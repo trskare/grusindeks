@@ -78,7 +78,7 @@ fn score_errors_with_helpful_message_when_config_missing() {
 async fn score_against_mocked_api_emits_grusindeks_text() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path_m("/weatherapi/locationforecast/2.0/compact"))
+        .and(path_m("/weatherapi/locationforecast/2.0/complete"))
         .respond_with(ResponseTemplate::new(200).set_body_string(LOCATIONFORECAST_FIXTURE))
         .mount(&server)
         .await;
@@ -112,7 +112,7 @@ radius_km = 20.0
 async fn score_json_output_is_valid_json() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path_m("/weatherapi/locationforecast/2.0/compact"))
+        .and(path_m("/weatherapi/locationforecast/2.0/complete"))
         .respond_with(ResponseTemplate::new(200).set_body_string(LOCATIONFORECAST_FIXTURE))
         .mount(&server)
         .await;
@@ -150,7 +150,7 @@ async fn score_truncates_coordinates_in_query_string() {
     // wiremock saw — every one of the 9 sample points must have ≤4 decimals.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path_m("/weatherapi/locationforecast/2.0/compact"))
+        .and(path_m("/weatherapi/locationforecast/2.0/complete"))
         .respond_with(ResponseTemplate::new(200).set_body_string(LOCATIONFORECAST_FIXTURE))
         .mount(&server)
         .await;

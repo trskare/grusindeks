@@ -208,11 +208,11 @@ mod tests {
         let cfg = MetClientConfig::production(ua(), None);
         let client = MetClient::new(cfg).unwrap();
         let u = client
-            .api_url("/weatherapi/locationforecast/2.0/compact")
+            .api_url("/weatherapi/locationforecast/2.0/complete")
             .unwrap();
         assert_eq!(
             u.as_str(),
-            "https://api.met.no/weatherapi/locationforecast/2.0/compact"
+            "https://api.met.no/weatherapi/locationforecast/2.0/complete"
         );
     }
 
@@ -221,11 +221,11 @@ mod tests {
         let cfg = MetClientConfig::production(ua(), None);
         let client = MetClient::new(cfg).unwrap();
         let u = client
-            .api_url("weatherapi/locationforecast/2.0/compact")
+            .api_url("weatherapi/locationforecast/2.0/complete")
             .unwrap();
         assert_eq!(
             u.as_str(),
-            "https://api.met.no/weatherapi/locationforecast/2.0/compact"
+            "https://api.met.no/weatherapi/locationforecast/2.0/complete"
         );
     }
 
@@ -270,7 +270,7 @@ mod tests {
         let server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/weatherapi/locationforecast/2.0/compact"))
+            .and(path("/weatherapi/locationforecast/2.0/complete"))
             .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
             .mount(&server)
             .await;
@@ -284,7 +284,7 @@ mod tests {
         };
         let client = MetClient::new(cfg).unwrap();
         let url = client
-            .api_url("/weatherapi/locationforecast/2.0/compact")
+            .api_url("/weatherapi/locationforecast/2.0/complete")
             .unwrap();
         let resp = client.http().get(url).send().await.unwrap();
         assert_eq!(resp.status(), 200);

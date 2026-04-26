@@ -11,7 +11,7 @@ use crate::geo::Point;
 /// What we know about the weather at one geographical point during one hour.
 ///
 /// Required fields are the variables we can rely on from
-/// `locationforecast/2.0/compact` for any forecast horizon. Optional fields
+/// `locationforecast/2.0/complete` for any forecast horizon. Optional fields
 /// may be missing for long-term (>60h) forecasts or non-Nordic regions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HourlyConditions {

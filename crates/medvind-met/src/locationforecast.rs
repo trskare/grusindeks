@@ -1,8 +1,14 @@
-//! `api.met.no/weatherapi/locationforecast/2.0/compact` — 9-day forecast.
+//! `api.met.no/weatherapi/locationforecast/2.0/complete` — 9-day forecast.
 //!
 //! Maps the upstream timeseries to a `Vec<HourlyConditions>` from the core
 //! crate. We only emit entries that include `next_1_hours.details` so the
 //! per-hour precipitation is real, not back-derived from a 6-hour bucket.
+//!
+//! We deliberately use `/complete` over `/compact`: the latter omits
+//! `probability_of_precipitation`, `wind_speed_of_gust` and
+//! `ultraviolet_index_clear_sky` — fields the Grusindeks score and the
+//! drying model both depend on. Payload is ~2.4× larger but still tiny
+//! (~90KB).
 
 use chrono::{DateTime, Utc};
 use medvind_core::geo::Point;
@@ -11,7 +17,7 @@ use serde::Deserialize;
 
 use crate::client::{ClientError, MetClient};
 
-const PATH: &str = "/weatherapi/locationforecast/2.0/compact";
+const PATH: &str = "/weatherapi/locationforecast/2.0/complete";
 
 #[derive(Debug, Deserialize)]
 struct CompactResponse {
@@ -149,7 +155,6 @@ mod tests {
     fn parser_ingests_real_fixture() {
         let f = parse_compact(oslo(), FIXTURE).expect("fixture parses");
         assert!(!f.hours.is_empty(), "expected at least one hour");
-        // First emitted hour matches the captured JSON: temp 10.1, wind 1.9, 0 mm.
         let first = &f.hours[0];
         assert!(
             (first.temperature_c - 10.1).abs() < 1e-6,
@@ -164,7 +169,7 @@ mod tests {
         assert_eq!(first.precipitation_mm, 0.0);
         assert_eq!(first.wind_from_deg, Some(261.0));
         assert_eq!(first.relative_humidity, Some(30.9));
-        assert_eq!(first.cloud_area_fraction, Some(51.8));
+        assert_eq!(first.cloud_area_fraction, Some(90.0));
         // Time matches the first timeseries entry.
         assert_eq!(first.time.to_rfc3339(), "2026-04-26T10:00:00+00:00");
     }
@@ -184,13 +189,41 @@ mod tests {
 
     #[test]
     fn parser_only_emits_hours_with_next_1_hours_data() {
-        // The compact response includes long-term entries that lack
-        // `next_1_hours`. Our parser must skip those — verify by checking
-        // every returned hour has a sane precipitation value (0 or higher).
+        // The response includes long-term entries that lack `next_1_hours`.
+        // Our parser must skip those — verify by checking every returned
+        // hour has a sane precipitation value (0 or higher).
         let f = parse_compact(oslo(), FIXTURE).unwrap();
         for h in &f.hours {
             assert!(h.precipitation_mm >= 0.0);
         }
+    }
+
+    /// Contract test: the *endpoint* we use must populate every field the
+    /// scoring layer depends on. Catches the class of bug where the fixture
+    /// is captured from the wrong endpoint variant (e.g. `/compact` strips
+    /// `probability_of_precipitation`, `wind_speed_of_gust` and
+    /// `ultraviolet_index_clear_sky` — fields the score and drying model
+    /// both consume). If this ever fails, either the fixture was refreshed
+    /// from `/compact` by mistake, or MET changed the endpoint contract.
+    #[test]
+    fn fixture_populates_every_field_the_score_consumes() {
+        let f = parse_compact(oslo(), FIXTURE).unwrap();
+        assert!(
+            f.hours.iter().any(|h| h.probability_of_precip.is_some()),
+            "no hour has probability_of_precip — likely captured from /compact"
+        );
+        assert!(
+            f.hours.iter().any(|h| h.wind_gust_ms.is_some()),
+            "no hour has wind_gust_ms — likely captured from /compact"
+        );
+        assert!(
+            f.hours.iter().any(|h| h.uv_index_clear_sky.is_some()),
+            "no hour has uv_index_clear_sky — likely captured from /compact"
+        );
+        // These are present in both endpoints; assert anyway so any future
+        // endpoint regression is caught here too.
+        assert!(f.hours.iter().any(|h| h.relative_humidity.is_some()));
+        assert!(f.hours.iter().any(|h| h.cloud_area_fraction.is_some()));
     }
 
     // ---- HTTP-level wiremock test ----
@@ -200,7 +233,7 @@ mod tests {
         let server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path_m("/weatherapi/locationforecast/2.0/compact"))
+            .and(path_m("/weatherapi/locationforecast/2.0/complete"))
             // 5+ decimals would be a TOS violation. The mock only matches 4.
             .and(query_param("lat", "59.9139"))
             .and(query_param("lon", "10.7522"))
@@ -230,7 +263,7 @@ mod tests {
     async fn fetch_surfaces_http_error() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path_m("/weatherapi/locationforecast/2.0/compact"))
+            .and(path_m("/weatherapi/locationforecast/2.0/complete"))
             .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
             .mount(&server)
             .await;

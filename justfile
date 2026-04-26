@@ -38,7 +38,7 @@ clean:
 fixtures:
     @if [ -z "${MEDVIND_DEV_CONTACT:-}" ]; then echo "set MEDVIND_DEV_CONTACT=you@example.com (or a URL) first" >&2; exit 1; fi
     curl -sS -A "medvind-fixtures/0.1 $MEDVIND_DEV_CONTACT" \
-        "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=59.9139&lon=10.7522" \
+        "https://api.met.no/weatherapi/locationforecast/2.0/complete?lat=59.9139&lon=10.7522" \
         -o fixtures/locationforecast_oslo.json
     curl -sS -A "medvind-fixtures/0.1 $MEDVIND_DEV_CONTACT" \
         "https://api.met.no/weatherapi/nowcast/2.0/complete?lat=59.9139&lon=10.7522" \
