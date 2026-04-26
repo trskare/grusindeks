@@ -125,7 +125,7 @@ mod tests {
     const FIXTURE: &str = include_str!("../../../fixtures/frost_precip_oslo_48h.json");
 
     fn ua() -> UserAgent {
-        UserAgent::new("medvind-test", "0.1", "dev@example.invalid").unwrap()
+        UserAgent::new("grusindeks-test", "0.1", "dev@example.invalid").unwrap()
     }
 
     // ---- Pure parser ----
@@ -192,7 +192,7 @@ mod tests {
             .and(path_m("/observations/v0.jsonld"))
             .and(query_param("sources", "SN18700"))
             .and(query_param("elements", ELEMENT_HOURLY_PRECIP))
-            .and(header("user-agent", "medvind-test/0.1 dev@example.invalid"))
+            .and(header("user-agent", "grusindeks-test/0.1 dev@example.invalid"))
             .and(basic_auth("test-client-id", ""))
             .respond_with(ResponseTemplate::new(200).set_body_string(FIXTURE))
             .mount(&server)

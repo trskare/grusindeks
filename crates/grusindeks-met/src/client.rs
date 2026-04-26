@@ -2,7 +2,7 @@
 //!
 //! Single source of truth for the MET Terms of Service:
 //! - identifying `User-Agent` (validated at construction time)
-//! - 4-decimal coordinate truncation (handled by `medvind_core::geo`)
+//! - 4-decimal coordinate truncation (handled by `grusindeks_core::geo`)
 //! - `Expires` / `Last-Modified` cache revalidation (added in `cache.rs`)
 //!
 //! `base_url` is injectable so tests can point the client at a local
@@ -42,7 +42,7 @@ pub struct UserAgent(String);
 const BANNED_TOKENS: &[&str] = &["okhttp", "Dalvik", "fhttp", "Java"];
 
 impl UserAgent {
-    /// `app` is something like `"medvind"`; `version` like `"0.1.0"`;
+    /// `app` is something like `"grusindeks"`; `version` like `"0.1.0"`;
     /// `contact` an email address or URL where the operator can be reached.
     pub fn new(app: &str, version: &str, contact: &str) -> Result<Self, ClientError> {
         if app.trim().is_empty() {
@@ -156,20 +156,20 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn ua() -> UserAgent {
-        UserAgent::new("medvind", "0.1.0", "dev@example.invalid").unwrap()
+        UserAgent::new("grusindeks", "0.1.0", "dev@example.invalid").unwrap()
     }
 
     // ---- UserAgent validation ----
 
     #[test]
     fn user_agent_format() {
-        assert_eq!(ua().as_str(), "medvind/0.1.0 dev@example.invalid");
+        assert_eq!(ua().as_str(), "grusindeks/0.1.0 dev@example.invalid");
     }
 
     #[test]
     fn user_agent_accepts_url_contact() {
-        let u = UserAgent::new("medvind", "0.1.0", "https://example.org/medvind").unwrap();
-        assert!(u.as_str().ends_with("https://example.org/medvind"));
+        let u = UserAgent::new("grusindeks", "0.1.0", "https://example.org/grusindeks").unwrap();
+        assert!(u.as_str().ends_with("https://example.org/grusindeks"));
     }
 
     #[test]
@@ -180,25 +180,25 @@ mod tests {
 
     #[test]
     fn user_agent_rejects_empty_version() {
-        assert!(UserAgent::new("medvind", "", "dev@example.invalid").is_err());
+        assert!(UserAgent::new("grusindeks", "", "dev@example.invalid").is_err());
     }
 
     #[test]
     fn user_agent_rejects_empty_contact() {
-        assert!(UserAgent::new("medvind", "0.1.0", "").is_err());
-        assert!(UserAgent::new("medvind", "0.1.0", "   ").is_err());
+        assert!(UserAgent::new("grusindeks", "0.1.0", "").is_err());
+        assert!(UserAgent::new("grusindeks", "0.1.0", "   ").is_err());
     }
 
     #[test]
     fn user_agent_rejects_non_contact_string() {
         // No @, no ://, no . — looks like a random token, reject.
-        assert!(UserAgent::new("medvind", "0.1.0", "anonymous").is_err());
+        assert!(UserAgent::new("grusindeks", "0.1.0", "anonymous").is_err());
     }
 
     #[test]
     fn user_agent_rejects_banned_tokens() {
         assert!(UserAgent::new("okhttp", "1.0", "x@y.io").is_err());
-        assert!(UserAgent::new("medvind", "0.1.0", "Java@runtime.com").is_err());
+        assert!(UserAgent::new("grusindeks", "0.1.0", "Java@runtime.com").is_err());
     }
 
     // ---- MetClient: base URL ----
@@ -245,7 +245,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/ping"))
-            .and(header("user-agent", "medvind/0.1.0 dev@example.invalid"))
+            .and(header("user-agent", "grusindeks/0.1.0 dev@example.invalid"))
             .respond_with(ResponseTemplate::new(200).set_body_string("pong"))
             .mount(&server)
             .await;

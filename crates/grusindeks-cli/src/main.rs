@@ -11,9 +11,9 @@ use std::time::Duration as StdDuration;
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Local, NaiveDate, NaiveTime, TimeZone, Utc};
 use clap::{Parser, Subcommand};
-use medvind_core::geo::Point;
-use medvind_core::types::{Location, RideWindow};
-use medvind_met::client::{MetClient, MetClientConfig, UserAgent};
+use grusindeks_core::geo::Point;
+use grusindeks_core::types::{Location, RideWindow};
+use grusindeks_met::client::{MetClient, MetClientConfig, UserAgent};
 use url::Url;
 
 use crate::config::Config;
@@ -23,24 +23,24 @@ use crate::run::{run_forecast, run_score, DayWindow, ForecastInputs, ScoreInputs
 const APP: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// medvind — Grusindeks for sykling på grus.
+/// grusindeks — Grusindeks for sykling på grus.
 ///
-/// Kjør `medvind` uten argumenter for å se en seks-dagers oversikt fra og
-/// med i dag. Bruk `medvind score` for et enkelt tidsvindu, eller
-/// `medvind config init` for å sette opp.
+/// Kjør `grusindeks` uten argumenter for å se en seks-dagers oversikt fra og
+/// med i dag. Bruk `grusindeks score` for et enkelt tidsvindu, eller
+/// `grusindeks config init` for å sette opp.
 #[derive(Debug, Parser)]
-#[command(name = "medvind", version, about, long_about = None)]
+#[command(name = "grusindeks", version, about, long_about = None)]
 struct Cli {
-    /// Path to config file. Defaults to ~/.config/medvind/config.toml.
-    #[arg(long, global = true, env = "MEDVIND_CONFIG")]
+    /// Path to config file. Defaults to ~/.config/grusindeks/config.toml.
+    #[arg(long, global = true, env = "GRUSINDEKS_CONFIG")]
     config: Option<PathBuf>,
 
     /// Override api.met.no base URL — useful for tests against a wiremock.
-    #[arg(long, global = true, env = "MEDVIND_API_BASE", hide = true)]
+    #[arg(long, global = true, env = "GRUSINDEKS_API_BASE", hide = true)]
     api_base: Option<Url>,
 
     /// Override frost.met.no base URL.
-    #[arg(long, global = true, env = "MEDVIND_FROST_BASE", hide = true)]
+    #[arg(long, global = true, env = "GRUSINDEKS_FROST_BASE", hide = true)]
     frost_base: Option<Url>,
 
     /// Print sub-score breakdown and per-point detail.
@@ -99,7 +99,7 @@ struct ScoreArgs {
 
 #[derive(Debug, Subcommand)]
 enum ConfigAction {
-    /// Write a starter config to ~/.config/medvind/config.toml.
+    /// Write a starter config to ~/.config/grusindeks/config.toml.
     Init,
     /// Print the resolved config path.
     Path,
@@ -181,7 +181,7 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
     };
     let cfg = Config::load_from(&cfg_path).with_context(|| {
         format!(
-            "load config from {}\n\nRun `medvind config init` to scaffold one.",
+            "load config from {}\n\nRun `grusindeks config init` to scaffold one.",
             cfg_path.display()
         )
     })?;
@@ -262,7 +262,7 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
     Ok(())
 }
 
-/// Default horizon when the user runs `medvind` (or `medvind score`) with
+/// Default horizon when the user runs `grusindeks` (or `grusindeks score`) with
 /// no time arguments — today plus the next five days.
 const DEFAULT_FORECAST_DAYS: u8 = 6;
 

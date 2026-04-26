@@ -11,8 +11,8 @@
 //! (~90KB).
 
 use chrono::{DateTime, Utc};
-use medvind_core::geo::Point;
-use medvind_core::types::{Forecast, HourlyConditions, Resolution};
+use grusindeks_core::geo::Point;
+use grusindeks_core::types::{Forecast, HourlyConditions, Resolution};
 use serde::Deserialize;
 
 use crate::client::{ClientError, MetClient};
@@ -191,7 +191,7 @@ mod tests {
     const FIXTURE: &str = include_str!("../../../fixtures/locationforecast_oslo.json");
 
     fn ua() -> UserAgent {
-        UserAgent::new("medvind-test", "0.1", "dev@example.invalid").unwrap()
+        UserAgent::new("grusindeks-test", "0.1", "dev@example.invalid").unwrap()
     }
 
     fn oslo() -> Point {
@@ -251,7 +251,7 @@ mod tests {
         // The fixture contains both `next_1_hours` (≤60h) and `next_6_hours`
         // (later) entries. The parser should yield both kinds, with the
         // 6h-derived ones marked `Resolution::SixHourly`.
-        use medvind_core::types::Resolution;
+        use grusindeks_core::types::Resolution;
         let f = parse_compact(oslo(), FIXTURE).unwrap();
         let hourly_count = f
             .hours
@@ -277,7 +277,7 @@ mod tests {
     fn parser_prefers_hourly_over_six_hourly_when_both_present() {
         // A timeseries entry can carry both `next_1_hours` and
         // `next_6_hours`. We must keep the hourly version of that timestamp.
-        use medvind_core::types::Resolution;
+        use grusindeks_core::types::Resolution;
         let f = parse_compact(oslo(), FIXTURE).unwrap();
         // The first emitted hour is from `next_1_hours` per the fixture.
         assert_eq!(f.hours[0].resolution, Resolution::Hourly);
@@ -333,7 +333,7 @@ mod tests {
             // 5+ decimals would be a TOS violation. The mock only matches 4.
             .and(query_param("lat", "59.9139"))
             .and(query_param("lon", "10.7522"))
-            .and(header("user-agent", "medvind-test/0.1 dev@example.invalid"))
+            .and(header("user-agent", "grusindeks-test/0.1 dev@example.invalid"))
             .respond_with(ResponseTemplate::new(200).set_body_string(FIXTURE))
             .mount(&server)
             .await;

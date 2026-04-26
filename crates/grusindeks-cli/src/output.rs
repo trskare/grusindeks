@@ -8,9 +8,9 @@
 use std::fmt::Write as _;
 
 use chrono::{DateTime, Local, NaiveDate, Utc};
-use medvind_core::daily::Confidence;
-use medvind_core::score::Penalty;
-use medvind_core::types::RideWindow;
+use grusindeks_core::daily::Confidence;
+use grusindeks_core::score::Penalty;
+use grusindeks_core::types::RideWindow;
 
 use crate::aggregate::{AggregateScore, DayAggregate, MultiDayForecast};
 use crate::theme;
@@ -337,7 +337,7 @@ fn month_no(month: u32) -> &'static str {
 /// Combine the precipitation amount and probability sub-scores into one
 /// number plus an optional ` (mengde X, sjanse Y)` suffix.
 fn combined_precip(amount: u8, probability: u8) -> (u8, String) {
-    use medvind_core::score::thresholds::{W_PRECIP, W_PROB};
+    use grusindeks_core::score::thresholds::{W_PRECIP, W_PROB};
     let w_sum = u32::from(W_PRECIP) + u32::from(W_PROB);
     let combined = ((u32::from(amount) * u32::from(W_PRECIP)
         + u32::from(probability) * u32::from(W_PROB))
@@ -363,7 +363,7 @@ fn write_axis_row(out: &mut String, label: &str, value: u8, suffix: &str) {
 
 fn avg_axis<F>(agg: &AggregateScore, f: F) -> u8
 where
-    F: Fn(&medvind_core::score::ScoreBreakdown) -> u8,
+    F: Fn(&grusindeks_core::score::ScoreBreakdown) -> u8,
 {
     let n = agg.points.len() as u32;
     if n == 0 {
@@ -386,7 +386,7 @@ fn center_penalties(agg: &AggregateScore) -> &[Penalty] {
 }
 
 fn mean_label(total: u8) -> &'static str {
-    medvind_core::score::label_for(total)
+    grusindeks_core::score::label_for(total)
 }
 
 /// Pad a *coloured* string to `target_visible_width`. We can't trust the
@@ -406,9 +406,9 @@ fn pad_right(coloured: &str, visible: &str, target_visible_width: usize) -> Stri
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use medvind_core::geo::Point;
-    use medvind_core::score::score;
-    use medvind_core::types::HourlyConditions;
+    use grusindeks_core::geo::Point;
+    use grusindeks_core::score::score;
+    use grusindeks_core::types::HourlyConditions;
 
     fn t(h: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 4, 26, h, 0, 0).unwrap()
@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn multi_day_render_includes_per_day_rows_and_confidence_label() {
         use crate::aggregate::DayAggregate;
-        use medvind_core::daily::compute_day;
+        use grusindeks_core::daily::compute_day;
 
         let win = RideWindow::from_hours(t(6), 12);
         let now = t(5);
@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn multi_day_render_shows_headline_with_best_day() {
         use crate::aggregate::DayAggregate;
-        use medvind_core::daily::compute_day;
+        use grusindeks_core::daily::compute_day;
 
         let win = RideWindow::from_hours(t(6), 12);
         let now = t(5);
@@ -541,8 +541,8 @@ mod tests {
     #[test]
     fn multi_day_render_calls_out_optimal_luke_when_present() {
         use crate::aggregate::DayAggregate;
-        use medvind_core::daily::compute_day;
-        use medvind_core::types::HourlyConditions;
+        use grusindeks_core::daily::compute_day;
+        use grusindeks_core::types::HourlyConditions;
 
         fn awful(time_h: u32) -> HourlyConditions {
             HourlyConditions {
@@ -574,7 +574,7 @@ mod tests {
     #[test]
     fn multi_day_render_shows_top_penalty_under_each_day() {
         use crate::aggregate::DayAggregate;
-        use medvind_core::daily::compute_day;
+        use grusindeks_core::daily::compute_day;
 
         // Saturated ground → ground penalty should appear under the row.
         let win = RideWindow::from_hours(t(6), 12);
@@ -620,7 +620,7 @@ mod tests {
     #[ignore = "demo: run with --ignored --nocapture to inspect the rendered multi-day output"]
     fn demo_render_multi_day_with_mixed_weather() {
         use crate::aggregate::DayAggregate;
-        use medvind_core::daily::compute_day;
+        use grusindeks_core::daily::compute_day;
 
         fn at(time_h: u32, day_offset: i64) -> DateTime<Utc> {
             let date = NaiveDate::from_ymd_opt(2026, 4, 26)
@@ -682,7 +682,7 @@ mod tests {
     #[test]
     fn verbose_multi_day_lists_more_penalties_than_default() {
         use crate::aggregate::DayAggregate;
-        use medvind_core::daily::compute_day;
+        use grusindeks_core::daily::compute_day;
 
         // Cold + windy + rainy + saturated → multiple penalties.
         let win = RideWindow::from_hours(t(6), 12);

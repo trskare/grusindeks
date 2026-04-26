@@ -5,14 +5,14 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
-use medvind_core::daily::compute_day;
-use medvind_core::drying::{drying_step, DryingParams, DryingState};
-use medvind_core::geo::{sample_around, Point};
-use medvind_core::score::score;
-use medvind_core::types::{HourlyConditions, Resolution, RideWindow};
-use medvind_met::client::MetClient;
-use medvind_met::frost;
-use medvind_met::locationforecast;
+use grusindeks_core::daily::compute_day;
+use grusindeks_core::drying::{drying_step, DryingParams, DryingState};
+use grusindeks_core::geo::{sample_around, Point};
+use grusindeks_core::score::score;
+use grusindeks_core::types::{HourlyConditions, Resolution, RideWindow};
+use grusindeks_met::client::MetClient;
+use grusindeks_met::frost;
+use grusindeks_met::locationforecast;
 
 use crate::aggregate::{AggregateScore, DayAggregate, MultiDayForecast};
 
@@ -22,7 +22,7 @@ use crate::aggregate::{AggregateScore, DayAggregate, MultiDayForecast};
 /// entirely with `NoopProgress`). All methods have no-op defaults so
 /// callers only override the events they care about.
 ///
-/// Lives in the CLI crate on purpose — `medvind-met` stays unaware of
+/// Lives in the CLI crate on purpose — `grusindeks-met` stays unaware of
 /// presentation. Notifications are coarse-grained (start/finish per
 /// stage, plus a per-point tick on the forecast fan-out) since that's
 /// the granularity the user can perceive.
@@ -229,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_score_fires_progress_events_in_order() {
-        use medvind_met::client::{MetClient, MetClientConfig, UserAgent};
+        use grusindeks_met::client::{MetClient, MetClientConfig, UserAgent};
         use wiremock::matchers::{method, path as path_m};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -241,7 +241,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let ua = UserAgent::new("medvind-test", "0.1.0", "dev@example.invalid").unwrap();
+        let ua = UserAgent::new("grusindeks-test", "0.1.0", "dev@example.invalid").unwrap();
         let mut cfg = MetClientConfig::production(ua, None);
         cfg.api_base = format!("{}/", server.uri()).parse().unwrap();
         let client = MetClient::new(cfg).unwrap();

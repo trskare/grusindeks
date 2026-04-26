@@ -1,7 +1,7 @@
-//! End-to-end tests for the `medvind` binary.
+//! End-to-end tests for the `grusindeks` binary.
 //!
 //! Each test stands up a local `wiremock` server, points the binary at it
-//! via `MEDVIND_API_BASE` / `MEDVIND_FROST_BASE`, and uses `assert_cmd`
+//! via `GRUSINDEKS_API_BASE` / `GRUSINDEKS_FROST_BASE`, and uses `assert_cmd`
 //! to drive the CLI. No real network traffic.
 
 use std::path::PathBuf;
@@ -22,7 +22,7 @@ fn write_config(dir: &TempDir, body: &str) -> PathBuf {
 
 #[test]
 fn help_works() {
-    Command::cargo_bin("medvind")
+    Command::cargo_bin("grusindeks")
         .unwrap()
         .arg("--help")
         .assert()
@@ -34,7 +34,7 @@ fn help_works() {
 fn config_init_writes_template_to_custom_path() {
     let dir = TempDir::new().unwrap();
     let cfg = dir.path().join("config.toml");
-    Command::cargo_bin("medvind")
+    Command::cargo_bin("grusindeks")
         .unwrap()
         .arg("--config")
         .arg(&cfg)
@@ -50,7 +50,7 @@ fn config_init_writes_template_to_custom_path() {
 fn config_init_refuses_to_overwrite() {
     let dir = TempDir::new().unwrap();
     let cfg = write_config(&dir, "user_agent_contact = \"x@y.io\"\n");
-    Command::cargo_bin("medvind")
+    Command::cargo_bin("grusindeks")
         .unwrap()
         .arg("--config")
         .arg(&cfg)
@@ -64,14 +64,14 @@ fn config_init_refuses_to_overwrite() {
 fn score_errors_with_helpful_message_when_config_missing() {
     let dir = TempDir::new().unwrap();
     let cfg = dir.path().join("does-not-exist.toml");
-    Command::cargo_bin("medvind")
+    Command::cargo_bin("grusindeks")
         .unwrap()
         .arg("--config")
         .arg(&cfg)
         .args(["score", "--lat", "59.9139", "--lon", "10.7522"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("medvind config init"));
+        .stderr(predicate::str::contains("grusindeks config init"));
 }
 
 #[tokio::test]
@@ -94,10 +94,10 @@ radius_km = 20.0
 "#,
     );
 
-    Command::cargo_bin("medvind")
+    Command::cargo_bin("grusindeks")
         .unwrap()
-        .env("MEDVIND_API_BASE", format!("{}/", server.uri()))
-        .env("MEDVIND_FROST_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_API_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
         .arg("--config")
         .arg(&cfg)
         .args(["score", "--place", "oslo", "--hours", "3"])
@@ -120,10 +120,10 @@ async fn score_json_output_is_valid_json() {
     let dir = TempDir::new().unwrap();
     let cfg = write_config(&dir, "user_agent_contact = \"dev@example.invalid\"\n");
 
-    let out = Command::cargo_bin("medvind")
+    let out = Command::cargo_bin("grusindeks")
         .unwrap()
-        .env("MEDVIND_API_BASE", format!("{}/", server.uri()))
-        .env("MEDVIND_FROST_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_API_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
         .arg("--config")
         .arg(&cfg)
         .arg("--json")
@@ -165,10 +165,10 @@ radius_km = 20.0
 "#,
     );
 
-    Command::cargo_bin("medvind")
+    Command::cargo_bin("grusindeks")
         .unwrap()
-        .env("MEDVIND_API_BASE", format!("{}/", server.uri()))
-        .env("MEDVIND_FROST_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_API_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
         .arg("--config")
         .arg(&cfg)
         .args(["score", "--place", "oslo", "--days", "5"])
@@ -183,7 +183,7 @@ radius_km = 20.0
 async fn score_with_days_and_window_errors_clearly() {
     let dir = TempDir::new().unwrap();
     let cfg = write_config(&dir, "user_agent_contact = \"dev@example.invalid\"\n");
-    Command::cargo_bin("medvind")
+    Command::cargo_bin("grusindeks")
         .unwrap()
         .arg("--config")
         .arg(&cfg)
@@ -215,10 +215,10 @@ async fn score_with_days_json_carries_forecast_field() {
     let dir = TempDir::new().unwrap();
     let cfg = write_config(&dir, "user_agent_contact = \"dev@example.invalid\"\n");
 
-    let out = Command::cargo_bin("medvind")
+    let out = Command::cargo_bin("grusindeks")
         .unwrap()
-        .env("MEDVIND_API_BASE", format!("{}/", server.uri()))
-        .env("MEDVIND_FROST_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_API_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
         .arg("--config")
         .arg(&cfg)
         .arg("--json")
@@ -241,7 +241,7 @@ async fn score_with_days_json_carries_forecast_field() {
 
 #[tokio::test]
 async fn no_subcommand_runs_six_day_forecast_against_default_place() {
-    // `medvind` with no subcommand and no time args should hit the
+    // `grusindeks` with no subcommand and no time args should hit the
     // multi-day forecast for the configured `default_place`.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -262,10 +262,10 @@ radius_km = 20.0
 "#,
     );
 
-    let out = Command::cargo_bin("medvind")
+    let out = Command::cargo_bin("grusindeks")
         .unwrap()
-        .env("MEDVIND_API_BASE", format!("{}/", server.uri()))
-        .env("MEDVIND_FROST_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_API_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
         .arg("--config")
         .arg(&cfg)
         .arg("--json")
@@ -296,10 +296,10 @@ async fn score_truncates_coordinates_in_query_string() {
     let dir = TempDir::new().unwrap();
     let cfg = write_config(&dir, "user_agent_contact = \"dev@example.invalid\"\n");
 
-    Command::cargo_bin("medvind")
+    Command::cargo_bin("grusindeks")
         .unwrap()
-        .env("MEDVIND_API_BASE", format!("{}/", server.uri()))
-        .env("MEDVIND_FROST_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_API_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
         .arg("--config")
         .arg(&cfg)
         .args(["score", "--lat", "59.913918", "--lon", "10.752230"])

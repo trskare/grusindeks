@@ -1,11 +1,11 @@
 [package]
-name = "medvind-core"
+name = "grusindeks-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Domain types and Grusindeks scoring for the medvind weather/cycling app"
+description = "Domain types and Grusindeks scoring for the grusindeks weather/cycling app"
 
 [dependencies]
 serde = { workspace = true }

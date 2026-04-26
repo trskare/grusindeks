@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/medvind-core",
-    "crates/medvind-met",
-    "crates/medvind-cli",
+    "crates/grusindeks-core",
+    "crates/grusindeks-met",
+    "crates/grusindeks-cli",
 ]
 
 [workspace.package]
@@ -14,8 +14,8 @@ license = "MIT OR Apache-2.0"
 authors = ["Truls Skare"]
 
 [workspace.dependencies]
-medvind-core = { path = "crates/medvind-core" }
-medvind-met = { path = "crates/medvind-met" }
+grusindeks-core = { path = "crates/grusindeks-core" }
+grusindeks-met = { path = "crates/grusindeks-met" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

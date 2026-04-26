@@ -4,7 +4,7 @@
 //! signal that the CLI uses to nudge the user ("kjør nå før regnet").
 
 use chrono::{DateTime, Utc};
-use medvind_core::geo::Point;
+use grusindeks_core::geo::Point;
 use serde::Deserialize;
 
 use crate::client::{ClientError, MetClient};
@@ -137,7 +137,7 @@ mod tests {
     const FIXTURE: &str = include_str!("../../../fixtures/nowcast_oslo.json");
 
     fn ua() -> UserAgent {
-        UserAgent::new("medvind-test", "0.1", "dev@example.invalid").unwrap()
+        UserAgent::new("grusindeks-test", "0.1", "dev@example.invalid").unwrap()
     }
 
     // ---- Pure parser ----

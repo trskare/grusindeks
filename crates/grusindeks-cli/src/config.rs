@@ -1,4 +1,4 @@
-//! User config file (`~/.config/medvind/config.toml`).
+//! User config file (`~/.config/grusindeks/config.toml`).
 //!
 //! Holds the User-Agent contact (TOS-mandated), Frost credentials, and
 //! named ride locations. The CLI reads this on every invocation.
@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use directories::ProjectDirs;
-use medvind_core::geo::Point;
+use grusindeks_core::geo::Point;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,9 +58,9 @@ const fn default_radius_km() -> f64 {
 }
 
 impl Config {
-    /// Default file location: `~/.config/medvind/config.toml` on Linux/macOS.
+    /// Default file location: `~/.config/grusindeks/config.toml` on Linux/macOS.
     pub fn default_path() -> Result<PathBuf> {
-        let dirs = ProjectDirs::from("", "", "medvind")
+        let dirs = ProjectDirs::from("", "", "grusindeks")
             .ok_or_else(|| anyhow!("could not determine config directory for this OS"))?;
         Ok(dirs.config_dir().join("config.toml"))
     }
@@ -81,13 +81,13 @@ impl Config {
         Ok(())
     }
 
-    /// Render the example config used by `medvind config init`.
+    /// Render the example config used by `grusindeks config init`.
     pub fn example_template() -> &'static str {
         EXAMPLE_TEMPLATE
     }
 }
 
-const EXAMPLE_TEMPLATE: &str = r#"# medvind configuration
+const EXAMPLE_TEMPLATE: &str = r#"# grusindeks configuration
 # Required: a way for api.met.no to reach you (email or URL).
 user_agent_contact = "you@example.com"
 
@@ -96,7 +96,7 @@ default_place = "oslo"
 
 [frost]
 # Register a free client_id at https://frost.met.no/auth/requestCredentials.html
-# Without it, medvind skips historical observations and assumes dry ground.
+# Without it, grusindeks skips historical observations and assumes dry ground.
 # client_id = "00000000-0000-0000-0000-000000000000"
 # source_id = "SN18700"  # default Frost station; e.g. SN18700 for Blindern, Oslo
 
@@ -182,7 +182,7 @@ frost_source_id = "SN50540"
 
     #[test]
     fn missing_file_errors_clearly() {
-        let err = Config::load_from(Path::new("/no/such/path/medvind.toml")).unwrap_err();
+        let err = Config::load_from(Path::new("/no/such/path/grusindeks.toml")).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("reading config"), "got {msg}");
     }

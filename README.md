@@ -1,10 +1,8 @@
-# medvind
+# grusindeks
 
-Beregner **Grusindeks** (0–100) for hvor optimalt det er å sykle på grus
-i et gitt geografisk område — basert på prognose og observasjoner fra
-[MET / yr.no](https://api.met.no).
-
-> _medvind_ (no.) — vind i ryggen, gunstige forhold.
+CLI som beregner **Grusindeks** (0–100) for hvor optimalt det er å sykle
+på grus i et gitt geografisk område — basert på prognose og observasjoner
+fra [MET / yr.no](https://api.met.no).
 
 ## Hva er Grusindeks?
 
@@ -34,22 +32,22 @@ støy.
 
 ```sh
 # Første gang:
-medvind config init
-$EDITOR ~/.config/medvind/config.toml   # sett user_agent_contact
+grusindeks config init
+$EDITOR ~/.config/grusindeks/config.toml   # sett user_agent_contact
 
 # Score for koordinater nå (3-timers vindu fra nå):
-medvind score --lat 59.9139 --lon 10.7522
+grusindeks score --lat 59.9139 --lon 10.7522
 
 # Score for et lagret sted i et bestemt vindu i dag:
-medvind score --place oslo --window 14:00-17:00
+grusindeks score --place oslo --window 14:00-17:00
 
 # Dag-for-dag oversikt for de neste 5 dagene (med konfidens og evt.
 # beste «luke» innenfor hver dag):
-medvind score --place oslo --days 5
+grusindeks score --place oslo --days 5
 
 # Maskinlesbart for skripting / framtidig web-API:
-medvind score --place oslo --json
-medvind score --place oslo --days 5 --json
+grusindeks score --place oslo --json
+grusindeks score --place oslo --days 5 --json
 ```
 
 ### Dag-for-dag prognose
@@ -64,7 +62,7 @@ og hindrer luke-deteksjon for fjerne dager.
 
 ### Config
 
-`~/.config/medvind/config.toml`:
+`~/.config/grusindeks/config.toml`:
 
 ```toml
 user_agent_contact = "you@example.com"  # MÅ være satt — kreves av MET TOS
@@ -73,7 +71,7 @@ default_place = "oslo"
 [frost]
 # Registrer en gratis client_id på
 # https://frost.met.no/auth/requestCredentials.html
-# Uten den hopper medvind over historisk nedbør og antar tørr bakke.
+# Uten den hopper grusindeks over historisk nedbør og antar tørr bakke.
 # client_id = "00000000-0000-0000-0000-000000000000"
 # source_id = "SN18700"   # Frost stasjon — f.eks. SN18700 (Blindern, Oslo)
 
@@ -89,15 +87,15 @@ radius_km = 20.0
 cargo test --workspace          # 150 tester, ingen nettverkskall
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
-cargo run -p medvind-cli -- score --lat 59.9139 --lon 10.7522 --verbose
+cargo run -p grusindeks-cli -- score --lat 59.9139 --lon 10.7522 --verbose
 ```
 
 Workspace-layout:
 
-- `crates/medvind-core` — domenetyper, scoring, vannbalanse, geo (ingen I/O)
-- `crates/medvind-met` — `api.met.no` + `frost.met.no`-klienter med
+- `crates/grusindeks-core` — domenetyper, scoring, vannbalanse, geo (ingen I/O)
+- `crates/grusindeks-met` — `api.met.no` + `frost.met.no`-klienter med
   TOS-compliant User-Agent og `Expires` / `If-Modified-Since`-cache
-- `crates/medvind-cli` — `medvind`-binæren
+- `crates/grusindeks-cli` — `grusindeks`-binæren
 
 Testene bruker `wiremock` for HTTP-mock og fixtures fanget fra ekte MET
 i `fixtures/`. Ingen tester treffer nettet.
@@ -110,4 +108,4 @@ Værdata: © [Meteorologisk institutt (MET Norway)](https://www.met.no), via
 
 Denne tjenesten er ikke tilknyttet Yr eller MET.
 
-medvind-koden er lisensiert under MIT eller Apache-2.0 (du velger).
+grusindeks-koden er lisensiert under MIT eller Apache-2.0 (du velger).

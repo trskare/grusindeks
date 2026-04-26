@@ -557,6 +557,65 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
+name = "grusindeks-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "chrono",
+ "clap",
+ "directories",
+ "grusindeks-core",
+ "grusindeks-met",
+ "indicatif",
+ "insta",
+ "owo-colors",
+ "predicates",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "terminal_size",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wiremock",
+]
+
+[[package]]
+name = "grusindeks-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "insta",
+ "rstest",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "grusindeks-met"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "grusindeks-core",
+ "hex",
+ "insta",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1000,65 +1059,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
-]
-
-[[package]]
-name = "medvind-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "chrono",
- "clap",
- "directories",
- "indicatif",
- "insta",
- "medvind-core",
- "medvind-met",
- "owo-colors",
- "predicates",
- "serde",
- "serde_json",
- "tempfile",
- "terminal_size",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "url",
- "wiremock",
-]
-
-[[package]]
-name = "medvind-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "insta",
- "rstest",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "medvind-met"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "hex",
- "insta",
- "medvind-core",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "url",
- "wiremock",
 ]
 
 [[package]]

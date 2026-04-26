@@ -5,8 +5,8 @@
 //! `if_supports_color`, so output stays plain ASCII when piped to a file or
 //! when `NO_COLOR` is set.
 
-use medvind_core::daily::Confidence;
-use medvind_core::score::{Component, Severity};
+use grusindeks_core::daily::Confidence;
+use grusindeks_core::score::{Component, Severity};
 use owo_colors::{OwoColorize, Rgb, Stream::Stdout, Style};
 
 // ---- Palette ----

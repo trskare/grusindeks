@@ -22,24 +22,24 @@ build:
     cargo build --workspace --release
 
 run *args:
-    cargo run --quiet -p medvind-cli -- {{args}}
+    cargo run --quiet -p grusindeks-cli -- {{args}}
 
 score *args:
-    cargo run --quiet -p medvind-cli -- score {{args}}
+    cargo run --quiet -p grusindeks-cli -- score {{args}}
 
 install:
-    cargo install --path crates/medvind-cli --locked
+    cargo install --path crates/grusindeks-cli --locked
 
 clean:
     cargo clean
 
 # Refresh the captured MET fixtures from the live API.
-# Set MEDVIND_DEV_CONTACT (email or URL) — MET TOS requires a reachable contact in the User-Agent.
+# Set GRUSINDEKS_DEV_CONTACT (email or URL) — MET TOS requires a reachable contact in the User-Agent.
 fixtures:
-    @if [ -z "${MEDVIND_DEV_CONTACT:-}" ]; then echo "set MEDVIND_DEV_CONTACT=you@example.com (or a URL) first" >&2; exit 1; fi
-    curl -sS -A "medvind-fixtures/0.1 $MEDVIND_DEV_CONTACT" \
+    @if [ -z "${GRUSINDEKS_DEV_CONTACT:-}" ]; then echo "set GRUSINDEKS_DEV_CONTACT=you@example.com (or a URL) first" >&2; exit 1; fi
+    curl -sS -A "grusindeks-fixtures/0.1 $GRUSINDEKS_DEV_CONTACT" \
         "https://api.met.no/weatherapi/locationforecast/2.0/complete?lat=59.9139&lon=10.7522" \
         -o fixtures/locationforecast_oslo.json
-    curl -sS -A "medvind-fixtures/0.1 $MEDVIND_DEV_CONTACT" \
+    curl -sS -A "grusindeks-fixtures/0.1 $GRUSINDEKS_DEV_CONTACT" \
         "https://api.met.no/weatherapi/nowcast/2.0/complete?lat=59.9139&lon=10.7522" \
         -o fixtures/nowcast_oslo.json

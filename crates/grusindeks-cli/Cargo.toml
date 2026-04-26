@@ -1,19 +1,19 @@
 [package]
-name = "medvind-cli"
+name = "grusindeks-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "CLI for the medvind weather/cycling app — computes Grusindeks for a given area"
+description = "CLI for the grusindeks weather/cycling app — computes Grusindeks for a given area"
 
 [[bin]]
-name = "medvind"
+name = "grusindeks"
 path = "src/main.rs"
 
 [dependencies]
-medvind-core = { workspace = true }
-medvind-met = { workspace = true }
+grusindeks-core = { workspace = true }
+grusindeks-met = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }

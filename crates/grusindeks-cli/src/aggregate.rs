@@ -6,10 +6,10 @@
 //! windward side) is what's dragging the score down.
 
 use chrono::NaiveDate;
-use medvind_core::daily::{Confidence, DayScore, OptimalWindow};
-use medvind_core::geo::{bearing_deg, bearing_label_no, Point};
-use medvind_core::score::Grusindeks;
-use medvind_core::types::RideWindow;
+use grusindeks_core::daily::{Confidence, DayScore, OptimalWindow};
+use grusindeks_core::geo::{bearing_deg, bearing_label_no, Point};
+use grusindeks_core::score::Grusindeks;
+use grusindeks_core::types::RideWindow;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -204,8 +204,8 @@ fn lower_confidence(a: Confidence, b: Confidence) -> Confidence {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-    use medvind_core::score::{score, ScoreBreakdown};
-    use medvind_core::types::{HourlyConditions, RideWindow};
+    use grusindeks_core::score::{score, ScoreBreakdown};
+    use grusindeks_core::types::{HourlyConditions, RideWindow};
 
     fn t(h: u32) -> chrono::DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 4, 26, h, 0, 0).unwrap()
@@ -256,8 +256,8 @@ mod tests {
 
     #[test]
     fn day_aggregate_picks_worst_confidence_across_points() {
-        use medvind_core::daily::compute_day;
-        use medvind_core::types::{HourlyConditions, Resolution};
+        use grusindeks_core::daily::compute_day;
+        use grusindeks_core::types::{HourlyConditions, Resolution};
         let win = RideWindow::from_hours(t(6), 12);
         let now = t(5);
 
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn day_aggregate_takes_optimal_window_from_center() {
-        use medvind_core::daily::compute_day;
+        use grusindeks_core::daily::compute_day;
         let win = RideWindow::from_hours(t(6), 12);
         let now = t(5);
 
