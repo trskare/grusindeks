@@ -333,7 +333,10 @@ mod tests {
             // 5+ decimals would be a TOS violation. The mock only matches 4.
             .and(query_param("lat", "59.9139"))
             .and(query_param("lon", "10.7522"))
-            .and(header("user-agent", "grusindeks-test/0.1 dev@example.invalid"))
+            .and(header(
+                "user-agent",
+                "grusindeks-test/0.1 dev@example.invalid",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_string(FIXTURE))
             .mount(&server)
             .await;

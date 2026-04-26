@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use directories::ProjectDirs;
 use grusindeks_core::geo::Point;
+use grusindeks_core::lang::Language;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +19,11 @@ pub struct Config {
 
     #[serde(default)]
     pub default_place: Option<String>,
+
+    /// UI language for human-readable output (labels, penalty messages,
+    /// day labels). Defaults to Norwegian. Set to `"swedish"` for Swedish.
+    #[serde(default)]
+    pub language: Language,
 
     #[serde(default)]
     pub frost: FrostConfig,
@@ -94,6 +100,9 @@ user_agent_contact = "you@example.com"
 # Optional: a default place name used when --lat/--lon/--place is omitted.
 default_place = "oslo"
 
+# Optional: UI language. "norwegian" (default) or "swedish".
+# language = "swedish"
+
 [frost]
 # Register a free client_id at https://frost.met.no/auth/requestCredentials.html
 # Without it, grusindeks skips historical observations and assumes dry ground.
@@ -125,6 +134,19 @@ mod tests {
         let cfg = Config::load_from(&p).unwrap();
         assert_eq!(cfg.user_agent_contact, "dev@example.invalid");
         assert!(cfg.places.is_empty());
+        // Default language is Norwegian.
+        assert_eq!(cfg.language, Language::Norwegian);
+    }
+
+    #[test]
+    fn loads_swedish_language_setting() {
+        let dir = TempDir::new().unwrap();
+        let p = write_cfg(
+            &dir,
+            "user_agent_contact = \"dev@example.invalid\"\nlanguage = \"swedish\"\n",
+        );
+        let cfg = Config::load_from(&p).unwrap();
+        assert_eq!(cfg.language, Language::Swedish);
     }
 
     #[test]

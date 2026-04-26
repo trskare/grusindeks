@@ -129,7 +129,9 @@ async fn score_json_output_is_valid_json() {
         .arg("--json")
         // --hours forces single-day mode; the default is now the
         // six-day forecast which yields a different JSON shape.
-        .args(["score", "--lat", "59.9139", "--lon", "10.7522", "--hours", "3"])
+        .args([
+            "score", "--lat", "59.9139", "--lon", "10.7522", "--hours", "3",
+        ])
         .assert()
         .success()
         .get_output()
@@ -200,7 +202,9 @@ async fn score_with_days_and_window_errors_clearly() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("kan ikke brukes sammen med --days"));
+        .stderr(predicate::str::contains(
+            "kan ikke brukes sammen med --days",
+        ));
 }
 
 #[tokio::test]
@@ -278,7 +282,12 @@ radius_km = 20.0
     let days = parsed["forecast"]["days"]
         .as_array()
         .expect("default invocation should produce the multi-day forecast shape");
-    assert_eq!(days.len(), 6, "default should be 6 days, got {}", days.len());
+    assert_eq!(
+        days.len(),
+        6,
+        "default should be 6 days, got {}",
+        days.len()
+    );
 }
 
 #[tokio::test]

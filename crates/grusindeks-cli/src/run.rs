@@ -8,6 +8,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use grusindeks_core::daily::compute_day;
 use grusindeks_core::drying::{drying_step, DryingParams, SurfaceState};
 use grusindeks_core::geo::{sample_around, Point};
+use grusindeks_core::lang::Language;
 use grusindeks_core::score::score;
 use grusindeks_core::types::{HourlyConditions, Resolution, RideWindow};
 use grusindeks_met::client::MetClient;
@@ -48,6 +49,8 @@ pub struct ScoreInputs<'a> {
     pub frost_source_id: Option<&'a str>,
     /// How many hours of past observations to feed into the drying model.
     pub history_hours: i64,
+    /// Language for human-readable labels and penalty messages.
+    pub lang: Language,
     pub progress: &'a dyn ProgressSink,
 }
 
@@ -55,15 +58,19 @@ pub struct ScoreInputs<'a> {
 pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<AggregateScore> {
     let points = sample_around(inputs.center, inputs.radius_km);
 
-    let surface =
-        fetch_ground_state(client, inputs.frost_source_id, inputs.history_hours, inputs.progress)
-            .await
-            .unwrap_or_default();
+    let surface = fetch_ground_state(
+        client,
+        inputs.frost_source_id,
+        inputs.history_hours,
+        inputs.progress,
+    )
+    .await
+    .unwrap_or_default();
 
     let per_point_hours = fetch_forecasts_parallel(client, &points, inputs.progress).await?;
     let scored: Vec<(Point, _)> = per_point_hours
         .into_iter()
-        .map(|(p, hours)| (p, score(&hours, inputs.window, surface)))
+        .map(|(p, hours)| (p, score(&hours, inputs.window, surface, inputs.lang)))
         .collect();
     Ok(AggregateScore::from_points(inputs.center, scored))
 }
@@ -82,6 +89,8 @@ pub struct ForecastInputs<'a> {
     pub days: Vec<DayWindow>,
     pub frost_source_id: Option<&'a str>,
     pub history_hours: i64,
+    /// Language for human-readable labels and penalty messages.
+    pub lang: Language,
     pub progress: &'a dyn ProgressSink,
 }
 
@@ -94,10 +103,14 @@ pub async fn run_forecast(
 ) -> Result<MultiDayForecast> {
     let points = sample_around(inputs.center, inputs.radius_km);
 
-    let surface =
-        fetch_ground_state(client, inputs.frost_source_id, inputs.history_hours, inputs.progress)
-            .await
-            .unwrap_or_default();
+    let surface = fetch_ground_state(
+        client,
+        inputs.frost_source_id,
+        inputs.history_hours,
+        inputs.progress,
+    )
+    .await
+    .unwrap_or_default();
 
     let now = Utc::now();
     let per_point_hours = fetch_forecasts_parallel(client, &points, inputs.progress).await?;
@@ -106,7 +119,7 @@ pub async fn run_forecast(
     for dw in inputs.days {
         let mut day_points = Vec::with_capacity(per_point_hours.len());
         for (p, hours) in &per_point_hours {
-            let ds = compute_day(hours, dw.window, surface, now);
+            let ds = compute_day(hours, dw.window, surface, now, inputs.lang);
             day_points.push((*p, ds));
         }
         days.push(DayAggregate::from_points(
@@ -258,6 +271,7 @@ mod tests {
                 window: win,
                 frost_source_id: None, // Frost not configured → no ground events
                 history_hours: 168,
+                lang: Language::Norwegian,
                 progress: &progress,
             },
         )
@@ -272,7 +286,10 @@ mod tests {
         assert_eq!(events.first(), Some(&"forecast_started"));
         assert_eq!(events.last(), Some(&"forecast_finished"));
         let total = progress.forecast_total.lock().unwrap().unwrap();
-        let ticks = events.iter().filter(|e| **e == "forecast_point_done").count();
+        let ticks = events
+            .iter()
+            .filter(|e| **e == "forecast_point_done")
+            .count();
         assert_eq!(ticks, total, "one tick per fanned-out point");
     }
 

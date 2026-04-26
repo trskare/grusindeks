@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use grusindeks_core::daily::Confidence;
+use grusindeks_core::lang::Language;
 use grusindeks_core::score::Penalty;
 use grusindeks_core::types::RideWindow;
 
@@ -49,6 +50,7 @@ pub fn render_human(
     window: RideWindow,
     agg: &AggregateScore,
     verbose: bool,
+    lang: Language,
 ) -> String {
     let mut out = String::new();
     let header = format!(
@@ -61,11 +63,15 @@ pub fn render_human(
     let _ = writeln!(out, "{}", theme::paint_dim(&"═".repeat(63)));
 
     // Headline total + label, both painted with the score colour.
+    let total_word = match lang {
+        Language::Norwegian => "Total",
+        Language::Swedish => "Totalt",
+    };
     let _ = writeln!(
         out,
-        "Total: {}/100  ⭐ {}",
+        "{total_word}: {}/100  ⭐ {}",
         theme::paint_score(agg.mean),
-        theme::paint_label(mean_label(agg.mean), agg.mean),
+        theme::paint_label(mean_label(agg.mean, lang), agg.mean),
     );
     let _ = writeln!(out);
 
@@ -77,11 +83,16 @@ pub fn render_human(
     let agg_prob = avg_axis(agg, |b| b.precip_probability);
     let agg_ground = avg_axis(agg, |b| b.ground);
 
-    write_axis_row(&mut out, "Temperatur", agg_temp, "");
-    write_axis_row(&mut out, "Vind", agg_wind, "");
-    let (precip_combined, precip_detail) = combined_precip(agg_precip, agg_prob);
-    write_axis_row(&mut out, "Nedbør", precip_combined, &precip_detail);
-    write_axis_row(&mut out, "Bakke", agg_ground, "");
+    write_axis_row(&mut out, axis_label_long("temperature", lang), agg_temp, "");
+    write_axis_row(&mut out, axis_label_long("wind", lang), agg_wind, "");
+    let (precip_combined, precip_detail) = combined_precip(agg_precip, agg_prob, lang);
+    write_axis_row(
+        &mut out,
+        axis_label_long("precipitation", lang),
+        precip_combined,
+        &precip_detail,
+    );
+    write_axis_row(&mut out, axis_label_long("ground", lang), agg_ground, "");
 
     // Penalty list — pulled from the center point. Default caps at the
     // top three so the output stays scannable; `--verbose` lists all.
@@ -90,7 +101,7 @@ pub fn render_human(
         let _ = writeln!(out);
         let cap = if verbose { penalties.len() } else { 3 };
         for p in penalties.iter().take(cap) {
-            let _ = writeln!(out, "  {}", format_penalty_line(p));
+            let _ = writeln!(out, "  {}", format_penalty_line(p, lang));
         }
     }
 
@@ -98,17 +109,21 @@ pub fn render_human(
         let _ = writeln!(out);
         let worst = agg.worst();
         let best = agg.best();
+        let (worst_word, best_word) = match lang {
+            Language::Norwegian => ("Verste punkt:", "Beste punkt: "),
+            Language::Swedish => ("Sämsta punkt:", "Bästa punkt: "),
+        };
         let _ = writeln!(
             out,
-            "Verste punkt:  {} ({})",
+            "{worst_word}  {} ({})",
             theme::paint_score(worst.score.total),
-            worst.bearing_label,
+            localize_bearing(worst.bearing_label, lang),
         );
         let _ = writeln!(
             out,
-            "Beste punkt:   {} ({})",
+            "{best_word}  {} ({})",
             theme::paint_score(best.score.total),
-            best.bearing_label,
+            localize_bearing(best.bearing_label, lang),
         );
     }
     out
@@ -123,12 +138,25 @@ pub fn render_multi_day(
     radius_km: f64,
     forecast: &MultiDayForecast,
     verbose: bool,
+    lang: Language,
 ) -> String {
     let mut out = String::new();
     let n = forecast.days.len();
+    let day_word_singular = match lang {
+        Language::Norwegian => "dag",
+        Language::Swedish => "dag",
+    };
+    let day_word_plural = match lang {
+        Language::Norwegian => "dager",
+        Language::Swedish => "dagar",
+    };
     let header = format!(
         "Grusindeks for {label} ({radius_km:.0}km radius) — {n} {}",
-        if n == 1 { "dag" } else { "dager" }
+        if n == 1 {
+            day_word_singular
+        } else {
+            day_word_plural
+        }
     );
     let _ = writeln!(out, "{}", theme::paint_accent(&header));
     let _ = writeln!(out, "{}", theme::paint_dim(&"═".repeat(63)));
@@ -139,21 +167,29 @@ pub fn render_multi_day(
     // bad week) — the user explicitly asked for a permanent summary line.
     if let Some(best) = pick_best_day(&forecast.days) {
         let _ = writeln!(out);
+        let best_day_phrase = match lang {
+            Language::Norwegian => "Beste dag",
+            Language::Swedish => "Bästa dag",
+        };
+        let best_luke_phrase = match lang {
+            Language::Norwegian => "Beste luke",
+            Language::Swedish => "Bästa lucka",
+        };
         let _ = writeln!(
             out,
-            "🎯 Beste dag: {}  ·  {}/100  {}",
-            day_label_no(best.date, today_local),
+            "🎯 {best_day_phrase}: {}  ·  {}/100  {}",
+            day_label(best.date, today_local, lang),
             theme::paint_score(best.mean),
-            theme::paint_label(mean_label(best.mean), best.mean),
+            theme::paint_label(mean_label(best.mean, lang), best.mean),
         );
         if let Some(ow) = &best.optimal_window {
             let _ = writeln!(
                 out,
-                "   Beste luke: {}–{} → {}/100  ({})",
+                "   {best_luke_phrase}: {}–{} → {}/100  ({})",
                 local_hm(ow.window.start),
                 local_hm(ow.window.end),
                 theme::paint_score(ow.score.total),
-                theme::paint_label(mean_label(ow.score.total), ow.score.total),
+                theme::paint_label(mean_label(ow.score.total, lang), ow.score.total),
             );
         }
         let _ = writeln!(out);
@@ -166,20 +202,37 @@ pub fn render_multi_day(
         if day.confidence == Confidence::Lav {
             any_low_confidence = true;
         }
-        write_day_row(&mut out, day, today_local, verbose);
+        write_day_row(&mut out, day, today_local, verbose, lang);
     }
 
     if any_low_confidence {
         let _ = writeln!(out);
-        let _ = writeln!(
-            out,
-            "{}",
-            theme::paint_dim(
+        let note = match lang {
+            Language::Norwegian => {
                 "Konfidens faller etter ca. 60 t — siste dager er 6-t oppløsning fra MET."
-            )
-        );
+            }
+            Language::Swedish => {
+                "Tillförlitlighet sjunker efter ca 60 h — sista dagarna är 6-h upplösning från MET."
+            }
+        };
+        let _ = writeln!(out, "{}", theme::paint_dim(note));
     }
     out
+}
+
+/// Long-form axis label used in the per-axis bars row of `render_human`.
+fn axis_label_long(axis: &str, lang: Language) -> &'static str {
+    match (lang, axis) {
+        (Language::Norwegian, "temperature") => "Temperatur",
+        (Language::Norwegian, "wind") => "Vind",
+        (Language::Norwegian, "precipitation") => "Nedbør",
+        (Language::Norwegian, "ground") => "Bakke",
+        (Language::Swedish, "temperature") => "Temperatur",
+        (Language::Swedish, "wind") => "Vind",
+        (Language::Swedish, "precipitation") => "Nederbörd",
+        (Language::Swedish, "ground") => "Mark",
+        _ => "?",
+    }
 }
 
 /// Render one day's row plus its top penalty (if any). Low-confidence
@@ -190,12 +243,13 @@ fn write_day_row(
     day: &DayAggregate,
     today_local: NaiveDate,
     verbose: bool,
+    lang: Language,
 ) {
     let center = day.center();
-    let day_label = day_label_no(day.date, today_local);
+    let day_label = day_label(day.date, today_local, lang);
     let icon = center.weather_icon;
-    let label = mean_label(day.mean);
-    let confidence_label = day.confidence.label_no();
+    let label = mean_label(day.mean, lang);
+    let confidence_label = day.confidence.label(lang);
 
     let dim = theme::dim_for_confidence(day.confidence);
 
@@ -249,7 +303,7 @@ fn write_day_row(
     // every day.
     let is_today = day.date == today_local;
     if is_today || verbose {
-        write_day_breakdown(out, day, dim, penalty_take > 0);
+        write_day_breakdown(out, day, dim, penalty_take > 0, lang);
     }
 
     // Penalty line(s): default surfaces the worst one (HardCap is always
@@ -257,20 +311,29 @@ fn write_day_row(
     for (i, penalty) in center.score.penalties.iter().take(penalty_take).enumerate() {
         let is_last = i + 1 == penalty_take;
         let branch = if is_last { "└─" } else { "├─" };
-        let _ = writeln!(out, "             {branch} {}", format_penalty_line(penalty));
+        let _ = writeln!(
+            out,
+            "             {branch} {}",
+            format_penalty_line(penalty, lang)
+        );
     }
 
     // "Best luke" hint — only on days where the optimal window improves
     // by enough to clear the threshold (caller already filtered).
     if let Some(ow) = &center.optimal_window {
+        let (luke_phrase, points_word) = match lang {
+            Language::Norwegian => ("Beste luke", "poeng"),
+            Language::Swedish => ("Bästa lucka", "poäng"),
+        };
         let _ = writeln!(
             out,
-            "             🎯 Beste luke: {}–{} → {} ({}, +{} poeng)",
+            "             🎯 {luke_phrase}: {}–{} → {} ({}, +{} {})",
             local_hm(ow.window.start),
             local_hm(ow.window.end),
             theme::paint_score(ow.score.total),
-            theme::paint_label(mean_label(ow.score.total), ow.score.total),
+            theme::paint_label(mean_label(ow.score.total, lang), ow.score.total),
             ow.improvement,
+            points_word,
         );
     }
 }
@@ -298,19 +361,24 @@ fn write_day_breakdown(
     day: &DayAggregate,
     dim: bool,
     penalties_follow: bool,
+    lang: Language,
 ) {
     let temp = avg_day_axis(day, |b| b.temperature);
     let wind = avg_day_axis(day, |b| b.wind);
     let precip = avg_day_axis(day, |b| b.precipitation);
     let prob = avg_day_axis(day, |b| b.precip_probability);
     let ground = avg_day_axis(day, |b| b.ground);
-    let (precip_combined, _) = combined_precip(precip, prob);
+    let (precip_combined, _) = combined_precip(precip, prob, lang);
 
+    let (temp_label, wind_label, precip_label, ground_label) = match lang {
+        Language::Norwegian => ("Temp", "Vind", "Nedbør", "Bakke"),
+        Language::Swedish => ("Temp", "Vind", "Nederbörd", "Mark"),
+    };
     let rows = [
-        ("Temp", temp),
-        ("Vind", wind),
-        ("Nedbør", precip_combined),
-        ("Bakke", ground),
+        (temp_label, temp),
+        (wind_label, wind),
+        (precip_label, precip_combined),
+        (ground_label, ground),
     ];
     let last_idx = rows.len() - 1;
     for (i, (label, value)) in rows.iter().enumerate() {
@@ -320,7 +388,11 @@ fn write_day_breakdown(
         } else {
             "├─"
         };
-        let _ = writeln!(out, "             {branch} {}", format_axis_row(label, *value, dim));
+        let _ = writeln!(
+            out,
+            "             {branch} {}",
+            format_axis_row(label, *value, dim)
+        );
     }
 }
 
@@ -356,11 +428,13 @@ where
 }
 
 /// Format a single penalty line: "Vind: snitt 8.2 m/s" with the
-/// component label coloured by component and the message dimmed.
-fn format_penalty_line(p: &Penalty) -> String {
+/// component label coloured by component and the message dimmed. The
+/// component label adjusts to the requested language; the message body
+/// is already localized at score-construction time.
+fn format_penalty_line(p: &Penalty, lang: Language) -> String {
     format!(
         "{}: {}",
-        theme::paint_component_label(p.component),
+        theme::paint_component_label(p.component, lang),
         theme::paint_severity(&p.message_no, p.severity),
     )
 }
@@ -376,67 +450,97 @@ fn icon_pad(icon: &str) -> &'static str {
     }
 }
 
-/// Norwegian-friendly day label. Uses "i dag" / "i morgen" for the
-/// nearest two days and a short weekday + date otherwise.
-fn day_label_no(date: NaiveDate, today: NaiveDate) -> String {
+/// Day label in the requested language. Uses "i dag/i morgen" (NO) or
+/// "idag/imorgon" (SE) for the nearest two days, and a short weekday +
+/// date otherwise.
+fn day_label(date: NaiveDate, today: NaiveDate, lang: Language) -> String {
     use chrono::Datelike;
     let delta = (date - today).num_days();
+    let (today_word, tomorrow_word) = match lang {
+        Language::Norwegian => ("i dag", "i morgen"),
+        Language::Swedish => ("idag", "imorgon"),
+    };
     match delta {
-        0 => "i dag".to_string(),
-        1 => "i morgen".to_string(),
+        0 => today_word.to_string(),
+        1 => tomorrow_word.to_string(),
         _ => format!(
             "{} {}. {}",
-            weekday_no(date),
+            weekday(date, lang),
             date.day(),
-            month_no(date.month()),
+            month(date.month(), lang),
         ),
     }
 }
 
-/// Two-letter Norwegian weekday abbreviation: ma/ti/on/to/fr/lø/sø.
-fn weekday_no(date: NaiveDate) -> &'static str {
+/// Two-letter weekday abbreviation in the requested language. Lowercase
+/// — neither Norwegian nor Swedish capitalises weekdays mid-sentence.
+fn weekday(date: NaiveDate, lang: Language) -> &'static str {
     use chrono::Datelike;
-    match date.weekday() {
-        chrono::Weekday::Mon => "ma",
-        chrono::Weekday::Tue => "ti",
-        chrono::Weekday::Wed => "on",
-        chrono::Weekday::Thu => "to",
-        chrono::Weekday::Fri => "fr",
-        chrono::Weekday::Sat => "lø",
-        chrono::Weekday::Sun => "sø",
+    match (lang, date.weekday()) {
+        (Language::Norwegian, chrono::Weekday::Mon) => "ma",
+        (Language::Norwegian, chrono::Weekday::Tue) => "ti",
+        (Language::Norwegian, chrono::Weekday::Wed) => "on",
+        (Language::Norwegian, chrono::Weekday::Thu) => "to",
+        (Language::Norwegian, chrono::Weekday::Fri) => "fr",
+        (Language::Norwegian, chrono::Weekday::Sat) => "lø",
+        (Language::Norwegian, chrono::Weekday::Sun) => "sø",
+        (Language::Swedish, chrono::Weekday::Mon) => "må",
+        (Language::Swedish, chrono::Weekday::Tue) => "ti",
+        (Language::Swedish, chrono::Weekday::Wed) => "on",
+        (Language::Swedish, chrono::Weekday::Thu) => "to",
+        (Language::Swedish, chrono::Weekday::Fri) => "fr",
+        (Language::Swedish, chrono::Weekday::Sat) => "lö",
+        (Language::Swedish, chrono::Weekday::Sun) => "sö",
     }
 }
 
-/// Three-letter Norwegian month abbreviation. Norwegian doesn't capitalise
-/// month names — `chrono`'s `%b` does, so we render our own.
-fn month_no(month: u32) -> &'static str {
-    match month {
-        1 => "jan",
-        2 => "feb",
-        3 => "mar",
-        4 => "apr",
-        5 => "mai",
-        6 => "jun",
-        7 => "jul",
-        8 => "aug",
-        9 => "sep",
-        10 => "okt",
-        11 => "nov",
-        12 => "des",
+/// Three-letter month abbreviation in the requested language. Lowercase
+/// — neither language capitalises month names — so we render our own
+/// rather than rely on `chrono`'s `%b`.
+fn month(month: u32, lang: Language) -> &'static str {
+    match (lang, month) {
+        (Language::Norwegian, 1) => "jan",
+        (Language::Norwegian, 2) => "feb",
+        (Language::Norwegian, 3) => "mar",
+        (Language::Norwegian, 4) => "apr",
+        (Language::Norwegian, 5) => "mai",
+        (Language::Norwegian, 6) => "jun",
+        (Language::Norwegian, 7) => "jul",
+        (Language::Norwegian, 8) => "aug",
+        (Language::Norwegian, 9) => "sep",
+        (Language::Norwegian, 10) => "okt",
+        (Language::Norwegian, 11) => "nov",
+        (Language::Norwegian, 12) => "des",
+        (Language::Swedish, 1) => "jan",
+        (Language::Swedish, 2) => "feb",
+        (Language::Swedish, 3) => "mar",
+        (Language::Swedish, 4) => "apr",
+        (Language::Swedish, 5) => "maj",
+        (Language::Swedish, 6) => "jun",
+        (Language::Swedish, 7) => "jul",
+        (Language::Swedish, 8) => "aug",
+        (Language::Swedish, 9) => "sep",
+        (Language::Swedish, 10) => "okt",
+        (Language::Swedish, 11) => "nov",
+        (Language::Swedish, 12) => "dec",
         _ => "?",
     }
 }
 
 /// Combine the precipitation amount and probability sub-scores into one
-/// number plus an optional ` (mengde X, sjanse Y)` suffix.
-fn combined_precip(amount: u8, probability: u8) -> (u8, String) {
+/// number plus an optional ` (amount X, chance Y)` suffix in the
+/// requested language.
+fn combined_precip(amount: u8, probability: u8, lang: Language) -> (u8, String) {
     use grusindeks_core::score::thresholds::{W_PRECIP, W_PROB};
     let w_sum = u32::from(W_PRECIP) + u32::from(W_PROB);
     let combined = ((u32::from(amount) * u32::from(W_PRECIP)
         + u32::from(probability) * u32::from(W_PROB))
         / w_sum) as u8;
     let detail = if amount.abs_diff(probability) > 5 {
-        format!("  (mengde {amount}, sjanse {probability})")
+        match lang {
+            Language::Norwegian => format!("  (mengde {amount}, sjanse {probability})"),
+            Language::Swedish => format!("  (mängd {amount}, chans {probability})"),
+        }
     } else {
         String::new()
     };
@@ -462,7 +566,11 @@ where
     if n == 0 {
         return 0;
     }
-    let sum: u32 = agg.points.iter().map(|p| u32::from(f(&p.score.breakdown))).sum();
+    let sum: u32 = agg
+        .points
+        .iter()
+        .map(|p| u32::from(f(&p.score.breakdown)))
+        .sum();
     (sum / n) as u8
 }
 
@@ -478,8 +586,22 @@ fn center_penalties(agg: &AggregateScore) -> &[Penalty] {
     &center.score.penalties
 }
 
-fn mean_label(total: u8) -> &'static str {
-    grusindeks_core::score::label_for(total)
+fn mean_label(total: u8, lang: Language) -> &'static str {
+    grusindeks_core::score::label_for(total, lang)
+}
+
+/// Translate the Norwegian bearing/center label stored in the
+/// `PointScore` (NØ, SØ, …, "senter") to the localized form. The data
+/// pipeline produces Norwegian labels so we can keep `"senter"` as an
+/// internal sentinel for center detection; this helper bridges to the
+/// renderer's chosen language.
+fn localize_bearing<'a>(label_no: &'a str, lang: Language) -> std::borrow::Cow<'a, str> {
+    use std::borrow::Cow;
+    match (lang, label_no) {
+        (Language::Swedish, "senter") => Cow::Borrowed("centrum"),
+        (Language::Swedish, _) if label_no.contains('Ø') => Cow::Owned(label_no.replace('Ø', "Ö")),
+        _ => Cow::Borrowed(label_no),
+    }
 }
 
 /// Pad a *coloured* string to `target_visible_width`. We can't trust the
@@ -518,10 +640,15 @@ mod tests {
     #[test]
     fn human_output_includes_total_and_breakdown_labels() {
         let win = RideWindow::from_hours(t(14), 3);
-        let s = score(&(14..17).map(perfect).collect::<Vec<_>>(), win, SurfaceState::default());
+        let s = score(
+            &(14..17).map(perfect).collect::<Vec<_>>(),
+            win,
+            SurfaceState::default(),
+            Language::Norwegian,
+        );
         let center = Point::new(59.9139, 10.7522);
         let agg = AggregateScore::from_points(center, vec![(center, s)]);
-        let out = render_human("Oslo", 20.0, win, &agg, false);
+        let out = render_human("Oslo", 20.0, win, &agg, false, Language::Norwegian);
         assert!(out.contains("Grusindeks for Oslo"));
         assert!(out.contains("Total:"));
         assert!(out.contains("Temperatur"));
@@ -541,10 +668,10 @@ mod tests {
         let hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions::minimal(t(h), 17.0, 9.0, 0.0))
             .collect();
-        let s = score(&hours, win, SurfaceState::default());
+        let s = score(&hours, win, SurfaceState::default(), Language::Norwegian);
         let center = Point::new(59.9139, 10.7522);
         let agg = AggregateScore::from_points(center, vec![(center, s)]);
-        let out = render_human("Oslo", 20.0, win, &agg, false);
+        let out = render_human("Oslo", 20.0, win, &agg, false, Language::Norwegian);
         // Component label + a number from the wind speed should be present.
         assert!(
             out.contains("Vind") && out.contains("9"),
@@ -554,14 +681,14 @@ mod tests {
 
     #[test]
     fn combined_precip_hides_breakdown_when_amount_and_probability_agree() {
-        let (combined, detail) = combined_precip(100, 100);
+        let (combined, detail) = combined_precip(100, 100, Language::Norwegian);
         assert_eq!(combined, 100);
         assert!(detail.is_empty(), "got {detail:?}");
     }
 
     #[test]
     fn combined_precip_shows_breakdown_when_amount_and_probability_diverge() {
-        let (combined, detail) = combined_precip(100, 40);
+        let (combined, detail) = combined_precip(100, 40, Language::Norwegian);
         assert!(detail.contains("mengde 100"), "got {detail:?}");
         assert!(detail.contains("sjanse 40"), "got {detail:?}");
         assert_eq!(combined, 82);
@@ -570,9 +697,13 @@ mod tests {
     #[test]
     fn day_label_for_today_and_tomorrow_uses_norwegian_phrasing() {
         let today = NaiveDate::from_ymd_opt(2026, 4, 26).unwrap();
-        assert_eq!(day_label_no(today, today), "i dag");
+        assert_eq!(day_label(today, today, Language::Norwegian), "i dag");
         assert_eq!(
-            day_label_no(today + chrono::Duration::days(1), today),
+            day_label(
+                today + chrono::Duration::days(1),
+                today,
+                Language::Norwegian
+            ),
             "i morgen"
         );
     }
@@ -581,7 +712,7 @@ mod tests {
     fn day_label_for_distant_day_uses_weekday_and_date() {
         let today = NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(); // Sunday
         let in_three = today + chrono::Duration::days(3); // Wednesday
-        let label = day_label_no(in_three, today);
+        let label = day_label(in_three, today, Language::Norwegian);
         assert!(label.starts_with("on "), "got {label}");
         assert!(label.contains("29"), "got {label}");
         assert!(label.ends_with("apr"), "got {label}");
@@ -600,10 +731,19 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
             win,
             center,
-            vec![(center, compute_day(&hours, win, SurfaceState::default(), now))],
+            vec![(
+                center,
+                compute_day(
+                    &hours,
+                    win,
+                    SurfaceState::default(),
+                    now,
+                    Language::Norwegian,
+                ),
+            )],
         );
         let forecast = MultiDayForecast { days: vec![day] };
-        let out = render_multi_day("Oslo", 20.0, &forecast, false);
+        let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
         assert!(out.contains("Grusindeks for Oslo"), "got {out}");
         assert!(out.contains("dag"), "got {out}");
         assert!(out.contains("ⓘ"), "missing confidence glyph: {out}");
@@ -622,10 +762,19 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
             win,
             center,
-            vec![(center, compute_day(&hours, win, SurfaceState::default(), now))],
+            vec![(
+                center,
+                compute_day(
+                    &hours,
+                    win,
+                    SurfaceState::default(),
+                    now,
+                    Language::Norwegian,
+                ),
+            )],
         );
         let forecast = MultiDayForecast { days: vec![day] };
-        let out = render_multi_day("Oslo", 20.0, &forecast, false);
+        let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
         assert!(
             out.contains("Beste dag"),
             "expected headline 'Beste dag' in {out}"
@@ -655,10 +804,19 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
             win,
             center,
-            vec![(center, compute_day(&hours, win, SurfaceState::default(), now))],
+            vec![(
+                center,
+                compute_day(
+                    &hours,
+                    win,
+                    SurfaceState::default(),
+                    now,
+                    Language::Norwegian,
+                ),
+            )],
         );
         let forecast = MultiDayForecast { days: vec![day] };
-        let out = render_multi_day("Oslo", 20.0, &forecast, false);
+        let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
         assert!(
             out.contains("Beste luke") || out.contains("luke"),
             "expected luke callout in {out}"
@@ -679,10 +837,19 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
             win,
             center,
-            vec![(center, compute_day(&hours, win, SurfaceState::new(5.0), now))],
+            vec![(
+                center,
+                compute_day(
+                    &hours,
+                    win,
+                    SurfaceState::new(5.0),
+                    now,
+                    Language::Norwegian,
+                ),
+            )],
         );
         let forecast = MultiDayForecast { days: vec![day] };
-        let out = render_multi_day("Oslo", 20.0, &forecast, false);
+        let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
         assert!(out.contains("└─"), "expected penalty marker in {out}");
         assert!(
             out.to_lowercase().contains("bakke"),
@@ -703,11 +870,17 @@ mod tests {
                 ..HourlyConditions::minimal(t(h), 9.0, 16.0, 0.5)
             })
             .collect();
-        let s = score(&hours, win, SurfaceState::new(3.0));
+        let s = score(&hours, win, SurfaceState::new(3.0), Language::Norwegian);
         let center = Point::new(59.9139, 10.7522);
         let agg = AggregateScore::from_points(center, vec![(center, s)]);
-        eprintln!("\n--- DEFAULT ---\n{}", render_human("Oslo", 20.0, win, &agg, false));
-        eprintln!("--- VERBOSE ---\n{}", render_human("Oslo", 20.0, win, &agg, true));
+        eprintln!(
+            "\n--- DEFAULT ---\n{}",
+            render_human("Oslo", 20.0, win, &agg, false, Language::Norwegian)
+        );
+        eprintln!(
+            "--- VERBOSE ---\n{}",
+            render_human("Oslo", 20.0, win, &agg, true, Language::Norwegian)
+        );
     }
 
     #[test]
@@ -764,13 +937,28 @@ mod tests {
                 date,
                 win,
                 center,
-                vec![(center, compute_day(&hours, win, SurfaceState::new(1.0), now))],
+                vec![(
+                    center,
+                    compute_day(
+                        &hours,
+                        win,
+                        SurfaceState::new(1.0),
+                        now,
+                        Language::Norwegian,
+                    ),
+                )],
             );
             days.push(day);
         }
         let forecast = MultiDayForecast { days };
-        eprintln!("\n--- DEFAULT ---\n{}", render_multi_day("Oslo", 20.0, &forecast, false));
-        eprintln!("--- VERBOSE ---\n{}", render_multi_day("Oslo", 20.0, &forecast, true));
+        eprintln!(
+            "\n--- DEFAULT ---\n{}",
+            render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian)
+        );
+        eprintln!(
+            "--- VERBOSE ---\n{}",
+            render_multi_day("Oslo", 20.0, &forecast, true, Language::Norwegian)
+        );
     }
 
     #[test]
@@ -792,20 +980,27 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
             win,
             center,
-            vec![(center, compute_day(&hours, win, SurfaceState::new(5.0), now))],
+            vec![(
+                center,
+                compute_day(
+                    &hours,
+                    win,
+                    SurfaceState::new(5.0),
+                    now,
+                    Language::Norwegian,
+                ),
+            )],
         );
         let forecast = MultiDayForecast { days: vec![day] };
-        let default_out = render_multi_day("Oslo", 20.0, &forecast, false);
-        let verbose_out = render_multi_day("Oslo", 20.0, &forecast, true);
+        let default_out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
+        let verbose_out = render_multi_day("Oslo", 20.0, &forecast, true, Language::Norwegian);
         // Penalty rows are tree-prefixed (`├─`/`└─`) AND contain `: ` between
         // the component label and its message. Breakdown rows share the
         // tree prefix but never carry a colon, which is what lets us count
         // penalty rows specifically.
         let count_penalty_rows = |s: &str| {
             s.lines()
-                .filter(|line| {
-                    (line.contains("├─") || line.contains("└─")) && line.contains(": ")
-                })
+                .filter(|line| (line.contains("├─") || line.contains("└─")) && line.contains(": "))
                 .count()
         };
         assert!(
@@ -834,7 +1029,16 @@ mod tests {
             date,
             win,
             center,
-            vec![(center, compute_day(&hours, win, SurfaceState::default(), now))],
+            vec![(
+                center,
+                compute_day(
+                    &hours,
+                    win,
+                    SurfaceState::default(),
+                    now,
+                    Language::Norwegian,
+                ),
+            )],
         );
         MultiDayForecast { days: vec![day] }
     }
@@ -846,7 +1050,12 @@ mod tests {
 
         let win = RideWindow::from_hours(at(date, 6), 12);
         let center = Point::new(59.9139, 10.7522);
-        let dummy_score = score(&[] as &[HourlyConditions], win, SurfaceState::default());
+        let dummy_score = score(
+            &[] as &[HourlyConditions],
+            win,
+            SurfaceState::default(),
+            Language::Norwegian,
+        );
         let day_score = DayScore {
             window: win,
             score: grusindeks_core::score::Grusindeks {
@@ -913,14 +1122,17 @@ mod tests {
             day_with(today + Duration::days(3), 95, Confidence::Lav),
         ];
         let best = pick_best_day(&days_mean_wins).expect("non-empty");
-        assert_eq!(best.mean, 95, "higher mean should still win over confidence");
+        assert_eq!(
+            best.mean, 95,
+            "higher mean should still win over confidence"
+        );
     }
 
     #[test]
     fn multi_day_render_shows_breakdown_for_today_by_default() {
         let today = Local::now().date_naive();
         let forecast = one_day_forecast(today);
-        let out = render_multi_day("Oslo", 20.0, &forecast, false);
+        let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
         // The chip uses "Temp " — penalties use the longer "Temperatur",
         // and the headline doesn't mention either, so this is unique
         // to the breakdown line.
@@ -935,7 +1147,7 @@ mod tests {
         let today = Local::now().date_naive();
         let future = today + chrono::Duration::days(2);
         let forecast = one_day_forecast(future);
-        let out = render_multi_day("Oslo", 20.0, &forecast, false);
+        let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
         assert!(
             !out.contains("Temp "),
             "future day should not show breakdown by default:\n{out}"
@@ -951,8 +1163,20 @@ mod tests {
             .extend(one_day_forecast(today + chrono::Duration::days(1)).days);
 
         let count = |s: &str| s.matches("Temp ").count();
-        let default_chips = count(&render_multi_day("Oslo", 20.0, &forecast, false));
-        let verbose_chips = count(&render_multi_day("Oslo", 20.0, &forecast, true));
+        let default_chips = count(&render_multi_day(
+            "Oslo",
+            20.0,
+            &forecast,
+            false,
+            Language::Norwegian,
+        ));
+        let verbose_chips = count(&render_multi_day(
+            "Oslo",
+            20.0,
+            &forecast,
+            true,
+            Language::Norwegian,
+        ));
         // Default: today only → 1 "Temp " hit. Verbose: today + tomorrow → 2.
         assert!(
             verbose_chips > default_chips,
@@ -965,7 +1189,10 @@ mod tests {
         // Colour helpers degrade to plain text outside a TTY (test runner
         // is not a TTY), so the byte content is just the █/░ sequence.
         assert_eq!(colored_bar(0).chars().filter(|c| *c == '█').count(), 0);
-        assert_eq!(colored_bar(100).chars().filter(|c| *c == '█').count(), BAR_WIDTH);
+        assert_eq!(
+            colored_bar(100).chars().filter(|c| *c == '█').count(),
+            BAR_WIDTH
+        );
         assert_eq!(colored_bar(50).chars().filter(|c| *c == '█').count(), 5);
     }
 }

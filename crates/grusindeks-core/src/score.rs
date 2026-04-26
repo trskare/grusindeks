@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::drying::SurfaceState;
+use crate::lang::Language;
 use crate::types::{HourlyConditions, RideWindow};
 
 /// Default thresholds and weights. Held in one place so they're easy to
@@ -136,7 +137,14 @@ pub struct Grusindeks {
 /// Compute the Grusindeks for the slice of `hours` that overlap `window`,
 /// given the current `surface` state (from the drying model — accumulated
 /// surface water plus hours-since-meaningful-rain for drought detection).
-pub fn score(hours: &[HourlyConditions], window: RideWindow, surface: SurfaceState) -> Grusindeks {
+/// `lang` controls the language of the human-readable label and penalty
+/// messages.
+pub fn score(
+    hours: &[HourlyConditions],
+    window: RideWindow,
+    surface: SurfaceState,
+    lang: Language,
+) -> Grusindeks {
     let in_window: Vec<&HourlyConditions> =
         hours.iter().filter(|h| window.contains(h.time)).collect();
 
@@ -192,41 +200,53 @@ pub fn score(hours: &[HourlyConditions], window: RideWindow, surface: SurfaceSta
     };
 
     let mut penalties = Vec::new();
-    if let Some(p) = temp_penalty(breakdown.temperature, mean_temp) {
+    if let Some(p) = temp_penalty(breakdown.temperature, mean_temp, lang) {
         penalties.push(p);
     }
-    if let Some(p) = wind_penalty(breakdown.wind, mean_wind, max_gust_opt) {
+    if let Some(p) = wind_penalty(breakdown.wind, mean_wind, max_gust_opt, lang) {
         penalties.push(p);
     }
-    if let Some(p) = precip_penalty(breakdown.precipitation, mean_precip) {
+    if let Some(p) = precip_penalty(breakdown.precipitation, mean_precip, lang) {
         penalties.push(p);
     }
-    if let Some(p) = prob_penalty(breakdown.precip_probability, max_prob_opt) {
+    if let Some(p) = prob_penalty(breakdown.precip_probability, max_prob_opt, lang) {
         penalties.push(p);
     }
-    if let Some(p) = ground_penalty(breakdown.ground, surface.accumulated_mm) {
+    if let Some(p) = ground_penalty(breakdown.ground, surface.accumulated_mm, lang) {
         penalties.push(p);
     }
-    if let Some(p) = drought_penalty(breakdown.ground, surface) {
+    if let Some(p) = drought_penalty(breakdown.ground, surface, lang) {
         penalties.push(p);
     }
     if hard_capped {
         if max_precip.is_finite() && max_precip > thresholds::HARD_CAP_PRECIP_MM_PER_HOUR {
+            let message_no = match lang {
+                Language::Norwegian => {
+                    format!("Kraftig regn ventet ({max_precip:.1} mm/t) — score hard-cappet")
+                }
+                Language::Swedish => {
+                    format!("Kraftigt regn väntat ({max_precip:.1} mm/h) — poäng hard-cappad")
+                }
+            };
             penalties.push(Penalty {
                 component: Component::HardCap,
                 severity: Severity::Critical,
-                message_no: format!(
-                    "Kraftig regn ventet ({max_precip:.1} mm/t) — score hard-cappet"
-                ),
+                message_no,
             });
         }
         if max_wind.is_finite() && max_wind > thresholds::HARD_CAP_WIND_MS {
+            let message_no = match lang {
+                Language::Norwegian => {
+                    format!("Stormvind ventet ({max_wind:.1} m/s) — score hard-cappet")
+                }
+                Language::Swedish => {
+                    format!("Stormvind väntad ({max_wind:.1} m/s) — poäng hard-cappad")
+                }
+            };
             penalties.push(Penalty {
                 component: Component::HardCap,
                 severity: Severity::Critical,
-                message_no: format!(
-                    "Stormvind ventet ({max_wind:.1} m/s) — score hard-cappet"
-                ),
+                message_no,
             });
         }
     }
@@ -236,7 +256,7 @@ pub fn score(hours: &[HourlyConditions], window: RideWindow, surface: SurfaceSta
     Grusindeks {
         total,
         breakdown,
-        label: label_for(total),
+        label: label_for(total, lang),
         hard_capped,
         penalties,
     }
@@ -253,12 +273,14 @@ fn severity_for(subscore: u8) -> Option<Severity> {
     }
 }
 
-fn temp_penalty(subscore: u8, mean_temp: f64) -> Option<Penalty> {
+fn temp_penalty(subscore: u8, mean_temp: f64, lang: Language) -> Option<Penalty> {
     let severity = severity_for(subscore)?;
-    let message_no = if mean_temp < thresholds::TEMP_OPTIMAL_LOW {
-        format!("kjølig, snitt {mean_temp:.0} °C")
-    } else {
-        format!("varmt, snitt {mean_temp:.0} °C")
+    let cold = mean_temp < thresholds::TEMP_OPTIMAL_LOW;
+    let message_no = match (lang, cold) {
+        (Language::Norwegian, true) => format!("kjølig, snitt {mean_temp:.0} °C"),
+        (Language::Norwegian, false) => format!("varmt, snitt {mean_temp:.0} °C"),
+        (Language::Swedish, true) => format!("kallt, medel {mean_temp:.0} °C"),
+        (Language::Swedish, false) => format!("varmt, medel {mean_temp:.0} °C"),
     };
     Some(Penalty {
         component: Component::Temperature,
@@ -267,26 +289,47 @@ fn temp_penalty(subscore: u8, mean_temp: f64) -> Option<Penalty> {
     })
 }
 
-fn wind_penalty(subscore: u8, mean_wind: f64, max_gust: Option<f64>) -> Option<Penalty> {
+fn wind_penalty(
+    subscore: u8,
+    mean_wind: f64,
+    max_gust: Option<f64>,
+    lang: Language,
+) -> Option<Penalty> {
     let severity = severity_for(subscore)?;
     let gusty = matches!(
         max_gust,
         Some(g) if mean_wind > 0.0 && g > thresholds::GUST_RATIO_THRESHOLD * mean_wind
     );
+    let mean_word = match lang {
+        Language::Norwegian => "snitt",
+        Language::Swedish => "medel",
+    };
+    let gust_word = match lang {
+        Language::Norwegian => "kastevind",
+        Language::Swedish => "byvindar",
+    };
+    let gust_prep = match lang {
+        Language::Norwegian => "opp i",
+        Language::Swedish => "upp i",
+    };
+    let much_wind = match lang {
+        Language::Norwegian => "mye vind",
+        Language::Swedish => "mycket vind",
+    };
     let message_no = match (mean_wind, gusty, max_gust) {
         // Gust dominated, mean still calm.
         (m, true, Some(g)) if m <= thresholds::WIND_PERFECT_MAX => {
-            format!("kastevind opp i {g:.0} m/s")
+            format!("{gust_word} {gust_prep} {g:.0} m/s")
         }
         // Both wind and gust contribute.
         (m, true, Some(g)) => {
-            format!("snitt {m:.1} m/s, kastevind opp i {g:.0} m/s")
+            format!("{mean_word} {m:.1} m/s, {gust_word} {gust_prep} {g:.0} m/s")
         }
         // Plain wind, no notable gust.
         (m, _, _) if m > thresholds::WIND_OK_MAX => {
-            format!("snitt {m:.1} m/s — mye vind")
+            format!("{mean_word} {m:.1} m/s — {much_wind}")
         }
-        (m, _, _) => format!("snitt {m:.1} m/s"),
+        (m, _, _) => format!("{mean_word} {m:.1} m/s"),
     };
     Some(Penalty {
         component: Component::Wind,
@@ -295,12 +338,14 @@ fn wind_penalty(subscore: u8, mean_wind: f64, max_gust: Option<f64>) -> Option<P
     })
 }
 
-fn precip_penalty(subscore: u8, mean_precip: f64) -> Option<Penalty> {
+fn precip_penalty(subscore: u8, mean_precip: f64, lang: Language) -> Option<Penalty> {
     let severity = severity_for(subscore)?;
-    let message_no = if mean_precip > thresholds::PRECIP_HEAVY {
-        format!("kraftig regn, snitt {mean_precip:.1} mm/t")
-    } else {
-        format!("{mean_precip:.1} mm/t i snitt")
+    let heavy = mean_precip > thresholds::PRECIP_HEAVY;
+    let message_no = match (lang, heavy) {
+        (Language::Norwegian, true) => format!("kraftig regn, snitt {mean_precip:.1} mm/t"),
+        (Language::Norwegian, false) => format!("{mean_precip:.1} mm/t i snitt"),
+        (Language::Swedish, true) => format!("kraftigt regn, medel {mean_precip:.1} mm/h"),
+        (Language::Swedish, false) => format!("{mean_precip:.1} mm/h i medel"),
     };
     Some(Penalty {
         component: Component::Precipitation,
@@ -313,22 +358,30 @@ fn precip_penalty(subscore: u8, mean_precip: f64) -> Option<Penalty> {
 /// value. With no data the sub-score defaults to a neutral 50, and
 /// blaming the score on "0 %" would mislead the user — they'd read it as
 /// "the model is sure it won't rain".
-fn prob_penalty(subscore: u8, max_prob: Option<f64>) -> Option<Penalty> {
+fn prob_penalty(subscore: u8, max_prob: Option<f64>, lang: Language) -> Option<Penalty> {
     let severity = severity_for(subscore)?;
     let p = max_prob?.clamp(0.0, 100.0);
+    let message_no = match lang {
+        Language::Norwegian => format!("{p:.0} % sjanse for nedbør"),
+        Language::Swedish => format!("{p:.0} % chans för nederbörd"),
+    };
     Some(Penalty {
         component: Component::PrecipProbability,
         severity,
-        message_no: format!("{p:.0} % sjanse for nedbør"),
+        message_no,
     })
 }
 
-fn ground_penalty(subscore: u8, ground_water_mm: f64) -> Option<Penalty> {
+fn ground_penalty(subscore: u8, ground_water_mm: f64, lang: Language) -> Option<Penalty> {
     let severity = severity_for(subscore)?;
-    let message_no = if ground_water_mm >= thresholds::GROUND_SATURATED {
-        format!("gjennomvåt ({ground_water_mm:.1} mm akkumulert)")
-    } else {
-        format!("våt fra forrige døgn ({ground_water_mm:.1} mm)")
+    let saturated = ground_water_mm >= thresholds::GROUND_SATURATED;
+    let message_no = match (lang, saturated) {
+        (Language::Norwegian, true) => format!("gjennomvåt ({ground_water_mm:.1} mm akkumulert)"),
+        (Language::Norwegian, false) => format!("våt fra forrige døgn ({ground_water_mm:.1} mm)"),
+        (Language::Swedish, true) => format!("genomblött ({ground_water_mm:.1} mm ackumulerat)"),
+        (Language::Swedish, false) => {
+            format!("blött från föregående dygn ({ground_water_mm:.1} mm)")
+        }
     };
     Some(Penalty {
         component: Component::Ground,
@@ -342,7 +395,11 @@ fn ground_penalty(subscore: u8, ground_water_mm: f64) -> Option<Penalty> {
 /// subscore actually got knocked down by `apply_drought_penalty`. Skipped
 /// when the surface is wet (`accumulated_mm` past the optimum) — that
 /// case is already explained by `ground_penalty`.
-fn drought_penalty(ground_subscore_after: u8, surface: SurfaceState) -> Option<Penalty> {
+fn drought_penalty(
+    ground_subscore_after: u8,
+    surface: SurfaceState,
+    lang: Language,
+) -> Option<Penalty> {
     if surface.hours_since_meaningful_rain <= thresholds::DROUGHT_TRIGGER_HOURS {
         return None;
     }
@@ -356,21 +413,30 @@ fn drought_penalty(ground_subscore_after: u8, surface: SurfaceState) -> Option<P
         return None;
     }
     let days = (surface.hours_since_meaningful_rain / 24.0).round() as u32;
+    let message_no = match lang {
+        Language::Norwegian => format!("tørt og løst dekke ({days} døgn uten regn)"),
+        Language::Swedish => format!("torrt och löst underlag ({days} dygn utan regn)"),
+    };
     Some(Penalty {
         component: Component::Ground,
         severity: Severity::Minor,
-        message_no: format!("tørt og løst dekke ({days} døgn uten regn)"),
+        message_no,
     })
 }
 
-/// Map a total to a short Norwegian label.
-pub fn label_for(total: u8) -> &'static str {
-    match total {
-        0..=24 => "Dårlig",
-        25..=44 => "Marginalt",
-        45..=64 => "OK",
-        65..=84 => "Bra",
-        _ => "Strålende",
+/// Map a total to a short label in the requested language.
+pub fn label_for(total: u8, lang: Language) -> &'static str {
+    match (lang, total) {
+        (Language::Norwegian, 0..=24) => "Dårlig",
+        (Language::Norwegian, 25..=44) => "Marginalt",
+        (Language::Norwegian, 45..=64) => "OK",
+        (Language::Norwegian, 65..=84) => "Bra",
+        (Language::Norwegian, _) => "Strålende",
+        (Language::Swedish, 0..=24) => "Dåligt",
+        (Language::Swedish, 25..=44) => "Marginellt",
+        (Language::Swedish, 45..=64) => "OK",
+        (Language::Swedish, 65..=84) => "Bra",
+        (Language::Swedish, _) => "Strålande",
     }
 }
 
@@ -624,11 +690,7 @@ mod tests {
     #[case(168.0, 100, 90)] // saturates at -10
     #[case(240.0, 100, 90)] // beyond → still -10
     #[case(120.0, 3, 0)] // saturating subtract floors at 0
-    fn drought_penalty_examples(
-        #[case] hours: f64,
-        #[case] base: u8,
-        #[case] expected: u8,
-    ) {
+    fn drought_penalty_examples(#[case] hours: f64, #[case] base: u8, #[case] expected: u8) {
         assert_eq!(apply_drought_penalty(base, hours), expected);
     }
 
@@ -642,11 +704,93 @@ mod tests {
         }
     }
 
+    // ---- language switching ----
+
+    #[test]
+    fn label_for_returns_norwegian_by_default() {
+        assert_eq!(label_for(0, Language::Norwegian), "Dårlig");
+        assert_eq!(label_for(50, Language::Norwegian), "OK");
+        assert_eq!(label_for(95, Language::Norwegian), "Strålende");
+    }
+
+    #[test]
+    fn label_for_returns_swedish_when_requested() {
+        assert_eq!(label_for(0, Language::Swedish), "Dåligt");
+        assert_eq!(label_for(30, Language::Swedish), "Marginellt");
+        assert_eq!(label_for(95, Language::Swedish), "Strålande");
+    }
+
+    #[test]
+    fn swedish_score_uses_swedish_label() {
+        let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            SurfaceState::default(),
+            Language::Swedish,
+        );
+        assert_eq!(s.label, "Strålande");
+    }
+
+    #[test]
+    fn swedish_penalty_messages_are_in_swedish() {
+        // Heavy rain → triggers precip penalty + hard-cap critical.
+        let mut hours = (14..17).map(nice_hour).collect::<Vec<_>>();
+        hours[1].precipitation_mm = 6.0;
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            SurfaceState::default(),
+            Language::Swedish,
+        );
+        let crit = s
+            .penalties
+            .iter()
+            .find(|p| p.severity == Severity::Critical)
+            .expect("hard-cap should produce a Critical penalty");
+        assert!(
+            crit.message_no.to_lowercase().contains("kraftigt")
+                || crit.message_no.to_lowercase().contains("regn"),
+            "swedish hard-cap message: {:?}",
+            crit.message_no
+        );
+        assert!(
+            crit.message_no.contains("mm/h"),
+            "swedish should use mm/h not mm/t: {:?}",
+            crit.message_no
+        );
+    }
+
+    #[test]
+    fn swedish_drought_message_uses_dygn() {
+        let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
+        let surface = SurfaceState {
+            accumulated_mm: 0.0,
+            hours_since_meaningful_rain: 96.0, // 4 days
+        };
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            surface,
+            Language::Swedish,
+        );
+        let drought = s
+            .penalties
+            .iter()
+            .find(|p| p.message_no.contains("torrt"))
+            .expect("expected Swedish drought penalty after 96h");
+        assert!(
+            drought.message_no.contains("dygn"),
+            "swedish drought should use 'dygn': {:?}",
+            drought.message_no,
+        );
+    }
+
     #[test]
     fn perfect_conditions_yield_high_score() {
         let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         let window = RideWindow::from_hours(t(14), 3);
-        let s = score(&hours, window, SurfaceState::default());
+        let s = score(&hours, window, SurfaceState::default(), Language::Norwegian);
         assert!(!s.hard_capped);
         // Temp=100, wind=100, precip=100, prob=95, ground=95 (lett-fuktig
         // optimum sits at 0.4 mm; 0 mm scores GROUND_DRY_FLOOR_SCORE = 95).
@@ -660,7 +804,7 @@ mod tests {
         let mut hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         hours[1].precipitation_mm = 6.0; // > 5 mm/h hard-cap threshold
         let window = RideWindow::from_hours(t(14), 3);
-        let s = score(&hours, window, SurfaceState::default());
+        let s = score(&hours, window, SurfaceState::default(), Language::Norwegian);
         assert!(s.hard_capped);
         assert!(s.total <= thresholds::HARD_CAP_TOTAL);
     }
@@ -670,7 +814,7 @@ mod tests {
         let mut hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         hours[2].wind_speed_ms = 18.0; // > 15 m/s
         let window = RideWindow::from_hours(t(14), 3);
-        let s = score(&hours, window, SurfaceState::default());
+        let s = score(&hours, window, SurfaceState::default(), Language::Norwegian);
         assert!(s.hard_capped);
         assert!(s.total <= thresholds::HARD_CAP_TOTAL);
     }
@@ -679,8 +823,8 @@ mod tests {
     fn saturated_ground_drags_score_down_without_hard_cap() {
         let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         let window = RideWindow::from_hours(t(14), 3);
-        let dry = score(&hours, window, SurfaceState::default());
-        let wet = score(&hours, window, SurfaceState::new(5.0)); // ground saturated
+        let dry = score(&hours, window, SurfaceState::default(), Language::Norwegian);
+        let wet = score(&hours, window, SurfaceState::new(5.0), Language::Norwegian); // ground saturated
         assert!(!wet.hard_capped);
         assert!(wet.total < dry.total);
         // Ground sub-score worth 30 points; bone-dry now sits at 95 (not
@@ -697,23 +841,23 @@ mod tests {
         bad.wind_speed_ms = 30.0;
         hours.push(bad);
         let window = RideWindow::from_hours(t(14), 3); // 14..17, excludes 20
-        let s = score(&hours, window, SurfaceState::default());
+        let s = score(&hours, window, SurfaceState::default(), Language::Norwegian);
         assert!(!s.hard_capped);
         assert_eq!(s.total, 98);
     }
 
     #[test]
     fn label_thresholds() {
-        assert_eq!(label_for(0), "Dårlig");
-        assert_eq!(label_for(24), "Dårlig");
-        assert_eq!(label_for(25), "Marginalt");
-        assert_eq!(label_for(44), "Marginalt");
-        assert_eq!(label_for(45), "OK");
-        assert_eq!(label_for(64), "OK");
-        assert_eq!(label_for(65), "Bra");
-        assert_eq!(label_for(84), "Bra");
-        assert_eq!(label_for(85), "Strålende");
-        assert_eq!(label_for(100), "Strålende");
+        assert_eq!(label_for(0, Language::Norwegian), "Dårlig");
+        assert_eq!(label_for(24, Language::Norwegian), "Dårlig");
+        assert_eq!(label_for(25, Language::Norwegian), "Marginalt");
+        assert_eq!(label_for(44, Language::Norwegian), "Marginalt");
+        assert_eq!(label_for(45, Language::Norwegian), "OK");
+        assert_eq!(label_for(64, Language::Norwegian), "OK");
+        assert_eq!(label_for(65, Language::Norwegian), "Bra");
+        assert_eq!(label_for(84, Language::Norwegian), "Bra");
+        assert_eq!(label_for(85, Language::Norwegian), "Strålende");
+        assert_eq!(label_for(100, Language::Norwegian), "Strålende");
     }
 
     #[test]
@@ -722,6 +866,7 @@ mod tests {
             &(14..17).map(nice_hour).collect::<Vec<_>>(),
             RideWindow::from_hours(t(14), 3),
             SurfaceState::default(),
+            Language::Norwegian,
         );
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"total\""));
@@ -739,7 +884,12 @@ mod tests {
     #[test]
     fn perfect_conditions_emit_no_penalties() {
         let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            SurfaceState::default(),
+            Language::Norwegian,
+        );
         assert!(
             s.penalties.is_empty(),
             "expected no penalties on a strålende day, got {:?}",
@@ -753,7 +903,12 @@ mod tests {
         let hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions::minimal(t(h), 0.0, 2.0, 0.0))
             .collect();
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            SurfaceState::default(),
+            Language::Norwegian,
+        );
         let temp_pen = s
             .penalties
             .iter()
@@ -777,7 +932,12 @@ mod tests {
         let hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions::minimal(t(h), 17.0, 9.0, 0.0))
             .collect();
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            SurfaceState::default(),
+            Language::Norwegian,
+        );
         let wind_pen = s
             .penalties
             .iter()
@@ -800,7 +960,12 @@ mod tests {
                 ..HourlyConditions::minimal(t(h), 17.0, 4.0, 0.0)
             })
             .collect();
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            SurfaceState::default(),
+            Language::Norwegian,
+        );
         let wind_pen = s
             .penalties
             .iter()
@@ -823,7 +988,12 @@ mod tests {
         let hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions::minimal(t(h), 17.0, 2.0, 1.0))
             .collect();
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            SurfaceState::default(),
+            Language::Norwegian,
+        );
         assert!(
             s.penalties
                 .iter()
@@ -843,7 +1013,12 @@ mod tests {
                 ..HourlyConditions::minimal(t(h), 17.0, 2.0, 0.0)
             })
             .collect();
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            SurfaceState::default(),
+            Language::Norwegian,
+        );
         let prob_pen = s
             .penalties
             .iter()
@@ -859,7 +1034,12 @@ mod tests {
     #[test]
     fn saturated_ground_emits_ground_penalty() {
         let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::new(5.0));
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            SurfaceState::new(5.0),
+            Language::Norwegian,
+        );
         let g = s
             .penalties
             .iter()
@@ -872,7 +1052,12 @@ mod tests {
     fn hard_cap_emits_critical_penalty() {
         let mut hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         hours[1].precipitation_mm = 6.0; // > 5 mm/h
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            SurfaceState::default(),
+            Language::Norwegian,
+        );
         assert!(s.hard_capped);
         let crit = s
             .penalties
@@ -892,7 +1077,12 @@ mod tests {
     fn storm_wind_hard_cap_emits_critical_penalty_mentioning_wind() {
         let mut hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         hours[2].wind_speed_ms = 18.0;
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            SurfaceState::default(),
+            Language::Norwegian,
+        );
         assert!(s.hard_capped);
         let crit = s
             .penalties
@@ -916,9 +1106,16 @@ mod tests {
             .collect();
         let mut hs = hours.clone();
         hs[0].precipitation_mm = 6.0;
-        let s = score(&hs, RideWindow::from_hours(t(14), 3), SurfaceState::new(5.0));
+        let s = score(
+            &hs,
+            RideWindow::from_hours(t(14), 3),
+            SurfaceState::new(5.0),
+            Language::Norwegian,
+        );
         assert!(
-            s.penalties.windows(2).all(|w| w[0].severity >= w[1].severity),
+            s.penalties
+                .windows(2)
+                .all(|w| w[0].severity >= w[1].severity),
             "penalties not sorted desc: {:?}",
             s.penalties
         );
@@ -934,7 +1131,12 @@ mod tests {
     fn penalty_serializes_with_lowercase_component_and_severity() {
         let mut hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         hours[1].precipitation_mm = 6.0;
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            SurfaceState::default(),
+            Language::Norwegian,
+        );
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"penalties\""), "got {json}");
         // Component & Severity both render as lowercase strings.
@@ -951,13 +1153,17 @@ mod tests {
             accumulated_mm: 0.0,
             hours_since_meaningful_rain: 96.0, // 4 days
         };
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), surface);
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            surface,
+            Language::Norwegian,
+        );
         let drought = s
             .penalties
             .iter()
             .find(|p| {
-                p.component == Component::Ground
-                    && p.message_no.to_lowercase().contains("tørt")
+                p.component == Component::Ground && p.message_no.to_lowercase().contains("tørt")
             })
             .expect("expected a tørke penalty after 96h drought");
         assert_eq!(drought.severity, Severity::Minor);
@@ -977,7 +1183,12 @@ mod tests {
             accumulated_mm: 5.0,
             hours_since_meaningful_rain: 200.0,
         };
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), surface);
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            surface,
+            Language::Norwegian,
+        );
         let drought = s
             .penalties
             .iter()
@@ -998,6 +1209,7 @@ mod tests {
                 accumulated_mm: thresholds::GROUND_OPTIMAL_MM,
                 hours_since_meaningful_rain: 0.0,
             },
+            Language::Norwegian,
         );
         let parched = score(
             &hours,
@@ -1006,6 +1218,7 @@ mod tests {
                 accumulated_mm: 0.0,
                 hours_since_meaningful_rain: 240.0,
             },
+            Language::Norwegian,
         );
         assert!(parched.total < baseline.total);
         // Ground delta is 100 → 95-10 = 85, contribution diff 30·15/100 = 4.5
