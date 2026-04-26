@@ -1,0 +1,10 @@
+/target
+Cargo.lock.bak
+*.swp
+.DS_Store
+.idea/
+.vscode/
+# Local dev config (Frost credentials etc.) — never commit
+.env
+.env.local
+config.local.toml

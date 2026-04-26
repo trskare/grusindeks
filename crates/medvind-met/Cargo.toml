@@ -1,0 +1,27 @@
+[package]
+name = "medvind-met"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "MET (api.met.no + frost.met.no) HTTP clients for the medvind app"
+
+[dependencies]
+medvind-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = "2"
+sha2 = "0.10"
+hex = "0.4"
+
+[dev-dependencies]
+wiremock = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+insta = { workspace = true }

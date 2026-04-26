@@ -1,0 +1,82 @@
+{
+  "@context": "https://frost.met.no/schema",
+  "@type": "ObservationCollectionResponse",
+  "apiVersion": "v0",
+  "license": "https://creativecommons.org/licenses/by/4.0",
+  "createdAt": "2026-04-26T10:00:00Z",
+  "queryTime": 0.024,
+  "currentItemCount": 4,
+  "itemsPerPage": 100,
+  "totalItemCount": 4,
+  "currentLink": "https://frost.met.no/observations/v0.jsonld?sources=SN18700&elements=sum(precipitation_amount%20PT1H)&referencetime=2026-04-24T10%3A00%3A00Z%2F2026-04-26T10%3A00%3A00Z",
+  "data": [
+    {
+      "sourceId": "SN18700:0",
+      "referenceTime": "2026-04-24T22:00:00.000Z",
+      "observations": [
+        {
+          "elementId": "sum(precipitation_amount PT1H)",
+          "value": 1.4,
+          "unit": "mm",
+          "timeOffset": "PT0H",
+          "timeResolution": "PT1H",
+          "timeSeriesId": 0,
+          "performanceCategory": "C",
+          "exposureCategory": 1,
+          "qualityCode": 0
+        }
+      ]
+    },
+    {
+      "sourceId": "SN18700:0",
+      "referenceTime": "2026-04-24T23:00:00.000Z",
+      "observations": [
+        {
+          "elementId": "sum(precipitation_amount PT1H)",
+          "value": 2.6,
+          "unit": "mm",
+          "timeOffset": "PT0H",
+          "timeResolution": "PT1H",
+          "timeSeriesId": 0,
+          "performanceCategory": "C",
+          "exposureCategory": 1,
+          "qualityCode": 0
+        }
+      ]
+    },
+    {
+      "sourceId": "SN18700:0",
+      "referenceTime": "2026-04-25T00:00:00.000Z",
+      "observations": [
+        {
+          "elementId": "sum(precipitation_amount PT1H)",
+          "value": 0.0,
+          "unit": "mm",
+          "timeOffset": "PT0H",
+          "timeResolution": "PT1H",
+          "timeSeriesId": 0,
+          "performanceCategory": "C",
+          "exposureCategory": 1,
+          "qualityCode": 0
+        }
+      ]
+    },
+    {
+      "sourceId": "SN18700:0",
+      "referenceTime": "2026-04-25T01:00:00.000Z",
+      "observations": [
+        {
+          "elementId": "sum(precipitation_amount PT1H)",
+          "value": 0.1,
+          "unit": "mm",
+          "timeOffset": "PT0H",
+          "timeResolution": "PT1H",
+          "timeSeriesId": 0,
+          "performanceCategory": "C",
+          "exposureCategory": 1,
+          "qualityCode": 0
+        }
+      ]
+    }
+  ]
+}
