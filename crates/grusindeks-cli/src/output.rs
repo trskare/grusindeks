@@ -499,6 +499,7 @@ fn pad_right(coloured: &str, visible: &str, target_visible_width: usize) -> Stri
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use grusindeks_core::drying::SurfaceState;
     use grusindeks_core::geo::Point;
     use grusindeks_core::score::score;
     use grusindeks_core::types::HourlyConditions;
@@ -517,7 +518,7 @@ mod tests {
     #[test]
     fn human_output_includes_total_and_breakdown_labels() {
         let win = RideWindow::from_hours(t(14), 3);
-        let s = score(&(14..17).map(perfect).collect::<Vec<_>>(), win, 0.0);
+        let s = score(&(14..17).map(perfect).collect::<Vec<_>>(), win, SurfaceState::default());
         let center = Point::new(59.9139, 10.7522);
         let agg = AggregateScore::from_points(center, vec![(center, s)]);
         let out = render_human("Oslo", 20.0, win, &agg, false);
@@ -540,7 +541,7 @@ mod tests {
         let hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions::minimal(t(h), 17.0, 9.0, 0.0))
             .collect();
-        let s = score(&hours, win, 0.0);
+        let s = score(&hours, win, SurfaceState::default());
         let center = Point::new(59.9139, 10.7522);
         let agg = AggregateScore::from_points(center, vec![(center, s)]);
         let out = render_human("Oslo", 20.0, win, &agg, false);
@@ -599,7 +600,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
             win,
             center,
-            vec![(center, compute_day(&hours, win, 0.0, now))],
+            vec![(center, compute_day(&hours, win, SurfaceState::default(), now))],
         );
         let forecast = MultiDayForecast { days: vec![day] };
         let out = render_multi_day("Oslo", 20.0, &forecast, false);
@@ -621,7 +622,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
             win,
             center,
-            vec![(center, compute_day(&hours, win, 0.0, now))],
+            vec![(center, compute_day(&hours, win, SurfaceState::default(), now))],
         );
         let forecast = MultiDayForecast { days: vec![day] };
         let out = render_multi_day("Oslo", 20.0, &forecast, false);
@@ -654,7 +655,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
             win,
             center,
-            vec![(center, compute_day(&hours, win, 0.0, now))],
+            vec![(center, compute_day(&hours, win, SurfaceState::default(), now))],
         );
         let forecast = MultiDayForecast { days: vec![day] };
         let out = render_multi_day("Oslo", 20.0, &forecast, false);
@@ -678,7 +679,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
             win,
             center,
-            vec![(center, compute_day(&hours, win, 5.0, now))],
+            vec![(center, compute_day(&hours, win, SurfaceState::new(5.0), now))],
         );
         let forecast = MultiDayForecast { days: vec![day] };
         let out = render_multi_day("Oslo", 20.0, &forecast, false);
@@ -702,7 +703,7 @@ mod tests {
                 ..HourlyConditions::minimal(t(h), 9.0, 16.0, 0.5)
             })
             .collect();
-        let s = score(&hours, win, 3.0);
+        let s = score(&hours, win, SurfaceState::new(3.0));
         let center = Point::new(59.9139, 10.7522);
         let agg = AggregateScore::from_points(center, vec![(center, s)]);
         eprintln!("\n--- DEFAULT ---\n{}", render_human("Oslo", 20.0, win, &agg, false));
@@ -763,7 +764,7 @@ mod tests {
                 date,
                 win,
                 center,
-                vec![(center, compute_day(&hours, win, 1.0, now))],
+                vec![(center, compute_day(&hours, win, SurfaceState::new(1.0), now))],
             );
             days.push(day);
         }
@@ -791,7 +792,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
             win,
             center,
-            vec![(center, compute_day(&hours, win, 5.0, now))],
+            vec![(center, compute_day(&hours, win, SurfaceState::new(5.0), now))],
         );
         let forecast = MultiDayForecast { days: vec![day] };
         let default_out = render_multi_day("Oslo", 20.0, &forecast, false);
@@ -833,7 +834,7 @@ mod tests {
             date,
             win,
             center,
-            vec![(center, compute_day(&hours, win, 0.0, now))],
+            vec![(center, compute_day(&hours, win, SurfaceState::default(), now))],
         );
         MultiDayForecast { days: vec![day] }
     }
@@ -845,7 +846,7 @@ mod tests {
 
         let win = RideWindow::from_hours(at(date, 6), 12);
         let center = Point::new(59.9139, 10.7522);
-        let dummy_score = score(&[] as &[HourlyConditions], win, 0.0);
+        let dummy_score = score(&[] as &[HourlyConditions], win, SurfaceState::default());
         let day_score = DayScore {
             window: win,
             score: grusindeks_core::score::Grusindeks {

@@ -200,7 +200,7 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
                 radius_km: location.radius_km,
                 days: day_windows,
                 frost_source_id: frost_source_id.as_deref(),
-                history_hours: 48,
+                history_hours: 168,
                 progress: &progress,
             },
         )
@@ -234,7 +234,7 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
             radius_km: location.radius_km,
             window: win,
             frost_source_id: frost_source_id.as_deref(),
-            history_hours: 48,
+            history_hours: 168,
             progress: &progress,
         },
     )

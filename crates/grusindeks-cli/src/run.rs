@@ -6,7 +6,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use grusindeks_core::daily::compute_day;
-use grusindeks_core::drying::{drying_step, DryingParams, DryingState};
+use grusindeks_core::drying::{drying_step, DryingParams, SurfaceState};
 use grusindeks_core::geo::{sample_around, Point};
 use grusindeks_core::score::score;
 use grusindeks_core::types::{HourlyConditions, Resolution, RideWindow};
@@ -55,15 +55,15 @@ pub struct ScoreInputs<'a> {
 pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<AggregateScore> {
     let points = sample_around(inputs.center, inputs.radius_km);
 
-    let ground_initial_mm =
+    let surface =
         fetch_ground_state(client, inputs.frost_source_id, inputs.history_hours, inputs.progress)
             .await
-            .unwrap_or(0.0);
+            .unwrap_or_default();
 
     let per_point_hours = fetch_forecasts_parallel(client, &points, inputs.progress).await?;
     let scored: Vec<(Point, _)> = per_point_hours
         .into_iter()
-        .map(|(p, hours)| (p, score(&hours, inputs.window, ground_initial_mm)))
+        .map(|(p, hours)| (p, score(&hours, inputs.window, surface)))
         .collect();
     Ok(AggregateScore::from_points(inputs.center, scored))
 }
@@ -94,10 +94,10 @@ pub async fn run_forecast(
 ) -> Result<MultiDayForecast> {
     let points = sample_around(inputs.center, inputs.radius_km);
 
-    let ground_initial_mm =
+    let surface =
         fetch_ground_state(client, inputs.frost_source_id, inputs.history_hours, inputs.progress)
             .await
-            .unwrap_or(0.0);
+            .unwrap_or_default();
 
     let now = Utc::now();
     let per_point_hours = fetch_forecasts_parallel(client, &points, inputs.progress).await?;
@@ -106,7 +106,7 @@ pub async fn run_forecast(
     for dw in inputs.days {
         let mut day_points = Vec::with_capacity(per_point_hours.len());
         for (p, hours) in &per_point_hours {
-            let ds = compute_day(hours, dw.window, ground_initial_mm, now);
+            let ds = compute_day(hours, dw.window, surface, now);
             day_points.push((*p, ds));
         }
         days.push(DayAggregate::from_points(
@@ -151,7 +151,7 @@ async fn fetch_ground_state(
     frost_source_id: Option<&str>,
     history_hours: i64,
     progress: &dyn ProgressSink,
-) -> Option<f64> {
+) -> Option<SurfaceState> {
     let src = frost_source_id?;
     client.config().frost_client_id.as_ref()?;
     progress.ground_started();
@@ -172,10 +172,10 @@ async fn fetch_ground_state(
 /// Replay a list of `(time, mm)` precipitation observations through the
 /// drying model. Uses neutral drying conditions for missing temp/wind/etc.,
 /// since Frost-only history doesn't carry those for free.
-fn replay_into_state(history: &[frost::HourlyPrecip], p: &DryingParams) -> f64 {
+fn replay_into_state(history: &[frost::HourlyPrecip], p: &DryingParams) -> SurfaceState {
     // Conservative neutral assumption: 10°C, 3 m/s wind, 70% humidity, 70%
     // cloud, no UV. Tunable later if it turns out to be too pessimistic.
-    let mut state = DryingState::default();
+    let mut state = SurfaceState::default();
     for h in history {
         let synth = HourlyConditions {
             time: h.time,
@@ -192,7 +192,7 @@ fn replay_into_state(history: &[frost::HourlyPrecip], p: &DryingParams) -> f64 {
         };
         state = drying_step(state, &synth, p);
     }
-    state.accumulated_mm
+    state
 }
 
 #[cfg(test)]
@@ -257,7 +257,7 @@ mod tests {
                 radius_km: 20.0,
                 window: win,
                 frost_source_id: None, // Frost not configured → no ground events
-                history_hours: 48,
+                history_hours: 168,
                 progress: &progress,
             },
         )
@@ -278,8 +278,8 @@ mod tests {
 
     #[test]
     fn empty_history_yields_dry_ground() {
-        let mm = replay_into_state(&[], &DryingParams::default());
-        assert_eq!(mm, 0.0);
+        let state = replay_into_state(&[], &DryingParams::default());
+        assert_eq!(state, SurfaceState::default());
     }
 
     #[test]
@@ -291,7 +291,11 @@ mod tests {
                 mm: 3.0,
             })
             .collect();
-        let mm = replay_into_state(&history, &DryingParams::default());
-        assert!(mm > 0.0, "expected some accumulation, got {mm}");
+        let state = replay_into_state(&history, &DryingParams::default());
+        assert!(
+            state.accumulated_mm > 0.0,
+            "expected some accumulation, got {:?}",
+            state,
+        );
     }
 }

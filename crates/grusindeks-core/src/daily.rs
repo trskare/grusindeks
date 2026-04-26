@@ -10,6 +10,7 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 
+use crate::drying::SurfaceState;
 use crate::score::{score, Grusindeks};
 use crate::types::{HourlyConditions, Resolution, RideWindow};
 
@@ -87,11 +88,13 @@ pub const DEFAULT_OPTIMAL_WINDOW_HOURS: i64 = 3;
 /// Compute the `DayScore` for the given `day_window`.
 ///
 /// `now` is used to compute the forecast horizon for confidence.
-/// `ground_water_mm` is the drying-model state at the start of the window.
+/// `surface` is the drying-model state at the start of the window — both
+/// the accumulated surface water and the hours-since-meaningful-rain
+/// counter feed into scoring.
 pub fn compute_day(
     hours: &[HourlyConditions],
     day_window: RideWindow,
-    ground_water_mm: f64,
+    surface: SurfaceState,
     now: DateTime<Utc>,
 ) -> DayScore {
     let in_window: Vec<&HourlyConditions> = hours
@@ -99,14 +102,14 @@ pub fn compute_day(
         .filter(|h| day_window.contains(h.time))
         .collect();
 
-    let day_score = score(hours, day_window, ground_water_mm);
+    let day_score = score(hours, day_window, surface);
     let confidence = confidence_for(&in_window, day_window, now);
 
     let optimal_window = find_best_window(
         hours,
         day_window,
         DEFAULT_OPTIMAL_WINDOW_HOURS,
-        ground_water_mm,
+        surface,
     )
     .filter(|ow| ow.improvement >= DEFAULT_OPTIMAL_IMPROVEMENT);
 
@@ -186,7 +189,7 @@ pub fn find_best_window(
     hours: &[HourlyConditions],
     day_window: RideWindow,
     length_hours: i64,
-    ground_water_mm: f64,
+    surface: SurfaceState,
 ) -> Option<OptimalWindow> {
     if length_hours <= 0 || day_window.duration_hours() < length_hours {
         return None;
@@ -195,7 +198,7 @@ pub fn find_best_window(
         return None;
     }
 
-    let day_total = score(hours, day_window, ground_water_mm).total;
+    let day_total = score(hours, day_window, surface).total;
     let len = Duration::hours(length_hours);
 
     let mut best: Option<(RideWindow, Grusindeks)> = None;
@@ -210,7 +213,7 @@ pub fn find_best_window(
         // fallback inside `score`, which is misleading.
         let has_data = hours.iter().any(|h| candidate.contains(h.time));
         if has_data {
-            let s = score(hours, candidate, ground_water_mm);
+            let s = score(hours, candidate, surface);
             best = match best {
                 None => Some((candidate, s)),
                 Some((_, ref cur)) if s.total > cur.total => Some((candidate, s)),
@@ -307,7 +310,7 @@ mod tests {
         hours.extend((15..20).map(|h| nice_hour(t(2026, 4, 26, h))));
         let day = day_window(6, 14); // 06..20
 
-        let ow = find_best_window(&hours, day, 3, 0.0).expect("non-empty");
+        let ow = find_best_window(&hours, day, 3, SurfaceState::default()).expect("non-empty");
         let start_h = ow.window.start.format("%H").to_string();
         assert!(
             ["06", "07", "15", "16", "17"].contains(&start_h.as_str()),
@@ -323,7 +326,7 @@ mod tests {
         // No improvement possible — every window scores ~the same.
         let hours: Vec<HourlyConditions> = (6..18).map(|h| nice_hour(t(2026, 4, 26, h))).collect();
         let day = day_window(6, 12);
-        let ow = find_best_window(&hours, day, 3, 0.0).unwrap();
+        let ow = find_best_window(&hours, day, 3, SurfaceState::default()).unwrap();
         assert_eq!(
             ow.improvement, 0,
             "uniform perfect day should yield zero improvement"
@@ -334,14 +337,14 @@ mod tests {
     fn best_window_returns_none_when_day_shorter_than_length() {
         let hours: Vec<HourlyConditions> = (6..8).map(|h| nice_hour(t(2026, 4, 26, h))).collect();
         let day = day_window(6, 2);
-        assert!(find_best_window(&hours, day, 3, 0.0).is_none());
+        assert!(find_best_window(&hours, day, 3, SurfaceState::default()).is_none());
     }
 
     #[test]
     fn best_window_returns_none_when_no_hours_in_window() {
         let hours: Vec<HourlyConditions> = (6..9).map(|h| nice_hour(t(2026, 4, 27, h))).collect(); // wrong day
         let day = day_window(6, 12);
-        assert!(find_best_window(&hours, day, 3, 0.0).is_none());
+        assert!(find_best_window(&hours, day, 3, SurfaceState::default()).is_none());
     }
 
     // ---- compute_day ----
@@ -354,7 +357,7 @@ mod tests {
         hours.extend((15..20).map(|h| nice_hour(t(2026, 4, 26, h))));
         let day = day_window(6, 14);
         let now = t(2026, 4, 26, 5); // ride starts in 1h
-        let ds = compute_day(&hours, day, 0.0, now);
+        let ds = compute_day(&hours, day, SurfaceState::default(), now);
 
         assert!(ds.optimal_window.is_some(), "expected a luke to be flagged");
         let ow = ds.optimal_window.unwrap();
@@ -368,7 +371,7 @@ mod tests {
         let hours: Vec<HourlyConditions> = (6..18).map(|h| nice_hour(t(2026, 4, 26, h))).collect();
         let day = day_window(6, 12);
         let now = t(2026, 4, 26, 5);
-        let ds = compute_day(&hours, day, 0.0, now);
+        let ds = compute_day(&hours, day, SurfaceState::default(), now);
         assert!(ds.optimal_window.is_none());
     }
 
@@ -382,7 +385,7 @@ mod tests {
             (6..18).map(|h| nice_hour(t(2026, 4, 26, h))).collect();
         let day = day_window(6, 12);
         let now = t(2026, 4, 26, 5);
-        let ds = compute_day(&day_hours, day, 0.0, now);
+        let ds = compute_day(&day_hours, day, SurfaceState::default(), now);
         assert_eq!(ds.confidence, Confidence::Hoy);
     }
 
@@ -392,7 +395,7 @@ mod tests {
             (6..18).map(|h| nice_hour(t(2026, 4, 28, h))).collect();
         let day = RideWindow::from_hours(t(2026, 4, 28, 6), 12);
         let now = t(2026, 4, 26, 5);
-        let ds = compute_day(&day_hours, day, 0.0, now);
+        let ds = compute_day(&day_hours, day, SurfaceState::default(), now);
         assert_eq!(ds.confidence, Confidence::Middels);
     }
 
@@ -402,7 +405,7 @@ mod tests {
             (6..18).map(|h| nice_hour(t(2026, 5, 3, h))).collect();
         let day = RideWindow::from_hours(t(2026, 5, 3, 6), 12);
         let now = t(2026, 4, 26, 5);
-        let ds = compute_day(&day_hours, day, 0.0, now);
+        let ds = compute_day(&day_hours, day, SurfaceState::default(), now);
         assert_eq!(ds.confidence, Confidence::Lav);
     }
 
@@ -413,7 +416,7 @@ mod tests {
             (6..18).map(|h| sixhourly(t(2026, 4, 27, h))).collect();
         let day = RideWindow::from_hours(t(2026, 4, 27, 6), 12);
         let now = t(2026, 4, 26, 5);
-        let ds = compute_day(&day_hours, day, 0.0, now);
+        let ds = compute_day(&day_hours, day, SurfaceState::default(), now);
         assert_eq!(ds.confidence, Confidence::Lav);
     }
 
@@ -422,7 +425,7 @@ mod tests {
         let hours: Vec<HourlyConditions> = (4..20).map(|h| nice_hour(t(2026, 4, 26, h))).collect();
         let day = day_window(6, 12); // 06..18
         let now = t(2026, 4, 26, 5);
-        let ds = compute_day(&hours, day, 0.0, now);
+        let ds = compute_day(&hours, day, SurfaceState::default(), now);
         assert_eq!(ds.hours_with_data, 12);
     }
 
@@ -550,7 +553,7 @@ mod tests {
             .collect();
         let day = day_window(6, 12);
         let now = t(2026, 4, 26, 5);
-        let ds = compute_day(&hs, day, 0.0, now);
+        let ds = compute_day(&hs, day, SurfaceState::default(), now);
         assert_eq!(ds.weather_icon, "☀");
     }
 }

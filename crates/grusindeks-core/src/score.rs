@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::drying::SurfaceState;
 use crate::types::{HourlyConditions, RideWindow};
 
 /// Default thresholds and weights. Held in one place so they're easy to
@@ -36,6 +37,25 @@ pub mod thresholds {
 
     // ---- Ground saturation (mm of accumulated water) ----
     pub const GROUND_SATURATED: f64 = 5.0;
+
+    // ---- Ground optimum / dryness ----
+    /// Surface water level where the ground subscore peaks. Lett fuktig
+    /// grus pakker seg og ruller best — bone-dry is slightly worse, very
+    /// wet is much worse.
+    pub const GROUND_OPTIMAL_MM: f64 = 0.4;
+    /// Subscore at exactly 0 mm accumulated water — small bonus for "lett
+    /// fuktig" without hammering the score on a clear summer day.
+    pub const GROUND_DRY_FLOOR_SCORE: u8 = 95;
+
+    /// Hours-since-meaningful-rain at which the drought penalty starts to
+    /// kick in (3 døgn).
+    pub const DROUGHT_TRIGGER_HOURS: f64 = 72.0;
+    /// Hours at which the drought penalty saturates (7 døgn).
+    pub const DROUGHT_FULL_HOURS: f64 = 168.0;
+    /// Maximum points the drought penalty can subtract from the ground
+    /// subscore. Soft hint by design — wet ground stays the dominant
+    /// negative factor.
+    pub const DROUGHT_MAX_PENALTY: u8 = 10;
 
     // ---- Hard caps ----
     pub const HARD_CAP_PRECIP_MM_PER_HOUR: f64 = 5.0;
@@ -114,8 +134,9 @@ pub struct Grusindeks {
 }
 
 /// Compute the Grusindeks for the slice of `hours` that overlap `window`,
-/// given the current `ground_water_mm` (from the drying model).
-pub fn score(hours: &[HourlyConditions], window: RideWindow, ground_water_mm: f64) -> Grusindeks {
+/// given the current `surface` state (from the drying model — accumulated
+/// surface water plus hours-since-meaningful-rain for drought detection).
+pub fn score(hours: &[HourlyConditions], window: RideWindow, surface: SurfaceState) -> Grusindeks {
     let in_window: Vec<&HourlyConditions> =
         hours.iter().filter(|h| window.contains(h.time)).collect();
 
@@ -145,12 +166,13 @@ pub fn score(hours: &[HourlyConditions], window: RideWindow, ground_water_mm: f6
     let max_gust_opt = max_gust.is_finite().then_some(max_gust);
     let max_prob_opt = max_prob.is_finite().then_some(max_prob);
 
+    let raw_ground = ground_subscore(surface.accumulated_mm);
     let breakdown = ScoreBreakdown {
         temperature: temp_subscore(mean_temp),
         wind: wind_subscore(mean_wind, max_gust_opt),
         precipitation: precip_subscore(mean_precip),
         precip_probability: precip_prob_subscore(max_prob_opt),
-        ground: ground_subscore(ground_water_mm),
+        ground: apply_drought_penalty(raw_ground, surface.hours_since_meaningful_rain),
     };
 
     let weighted = u32::from(breakdown.temperature) * u32::from(thresholds::W_TEMP)
@@ -182,7 +204,10 @@ pub fn score(hours: &[HourlyConditions], window: RideWindow, ground_water_mm: f6
     if let Some(p) = prob_penalty(breakdown.precip_probability, max_prob_opt) {
         penalties.push(p);
     }
-    if let Some(p) = ground_penalty(breakdown.ground, ground_water_mm) {
+    if let Some(p) = ground_penalty(breakdown.ground, surface.accumulated_mm) {
+        penalties.push(p);
+    }
+    if let Some(p) = drought_penalty(breakdown.ground, surface) {
         penalties.push(p);
     }
     if hard_capped {
@@ -312,6 +337,32 @@ fn ground_penalty(subscore: u8, ground_water_mm: f64) -> Option<Penalty> {
     })
 }
 
+/// Drought-side counterpart to `ground_penalty`. Surfaces a Minor Penalty
+/// when the surface has been parched long enough that the ground
+/// subscore actually got knocked down by `apply_drought_penalty`. Skipped
+/// when the surface is wet (`accumulated_mm` past the optimum) — that
+/// case is already explained by `ground_penalty`.
+fn drought_penalty(ground_subscore_after: u8, surface: SurfaceState) -> Option<Penalty> {
+    if surface.hours_since_meaningful_rain <= thresholds::DROUGHT_TRIGGER_HOURS {
+        return None;
+    }
+    if surface.accumulated_mm > thresholds::GROUND_OPTIMAL_MM {
+        return None;
+    }
+    // Only emit when the drought penalty actually moved the score; if the
+    // hours just barely cleared the trigger we'd round to zero.
+    let raw = ground_subscore(surface.accumulated_mm);
+    if raw == ground_subscore_after {
+        return None;
+    }
+    let days = (surface.hours_since_meaningful_rain / 24.0).round() as u32;
+    Some(Penalty {
+        component: Component::Ground,
+        severity: Severity::Minor,
+        message_no: format!("tørt og løst dekke ({days} døgn uten regn)"),
+    })
+}
+
 /// Map a total to a short Norwegian label.
 pub fn label_for(total: u8) -> &'static str {
     match total {
@@ -409,17 +460,43 @@ pub fn precip_prob_subscore(prob_pct: Option<f64>) -> u8 {
     }
 }
 
-/// 100 when bone-dry; 0 at ≥ saturated. Linear in between.
+/// Peaks at `GROUND_OPTIMAL_MM` (lett fuktig grus). Bone-dry sits at
+/// `GROUND_DRY_FLOOR_SCORE` — slightly worse than optimum but no
+/// dramatic drop; the bigger dryness penalty comes from
+/// `apply_drought_penalty` once it's been parched for several days.
+/// Past optimum, the curve drops linearly to 0 at `GROUND_SATURATED`.
 pub fn ground_subscore(accumulated_mm: f64) -> u8 {
     use thresholds::*;
     if accumulated_mm <= 0.0 {
-        100
+        GROUND_DRY_FLOOR_SCORE
+    } else if accumulated_mm < GROUND_OPTIMAL_MM {
+        lerp_clamped(
+            accumulated_mm,
+            0.0,
+            GROUND_OPTIMAL_MM,
+            GROUND_DRY_FLOOR_SCORE,
+            100,
+        )
     } else if accumulated_mm >= GROUND_SATURATED {
         0
     } else {
-        let frac = accumulated_mm / GROUND_SATURATED;
-        ((1.0 - frac) * 100.0).round() as u8
+        lerp_clamped(accumulated_mm, GROUND_OPTIMAL_MM, GROUND_SATURATED, 100, 0)
     }
+}
+
+/// Subtract drought points from `ground_score`. Zero effect under the
+/// trigger, ramps linearly to `DROUGHT_MAX_PENALTY` at the full
+/// threshold. Together with the dry-side floor in `ground_subscore`, the
+/// total ground-axis loss caps at ~15 points.
+pub fn apply_drought_penalty(ground_score: u8, hours_since_meaningful_rain: f64) -> u8 {
+    use thresholds::*;
+    if hours_since_meaningful_rain <= DROUGHT_TRIGGER_HOURS {
+        return ground_score;
+    }
+    let span = DROUGHT_FULL_HOURS - DROUGHT_TRIGGER_HOURS;
+    let frac = ((hours_since_meaningful_rain - DROUGHT_TRIGGER_HOURS) / span).clamp(0.0, 1.0);
+    let penalty = (frac * f64::from(DROUGHT_MAX_PENALTY)).round() as u8;
+    ground_score.saturating_sub(penalty)
 }
 
 /// Linear interpolation that saturates outside `[x_lo, x_hi]`. Returns
@@ -523,12 +600,36 @@ mod tests {
     // ---- ground_subscore ----
 
     #[rstest]
-    #[case(0.0, 100)]
-    #[case(2.5, 50)] // halfway saturated
+    // Bone-dry sits at the dry-side floor (lett fuktig is the optimum).
+    #[case(0.0, thresholds::GROUND_DRY_FLOOR_SCORE)]
+    // Halfway between 0 mm and the optimum: 95 → 100 lerp at midpoint.
+    #[case(0.2, 98)]
+    // Optimum.
+    #[case(thresholds::GROUND_OPTIMAL_MM, 100)]
+    // Wet side: linear from 100 at 0.4 mm to 0 at 5 mm — 2.5 mm is at
+    // (5.0 − 2.5) / (5.0 − 0.4) ≈ 54.3 % of the way down.
+    #[case(2.5, 54)]
     #[case(5.0, 0)]
     #[case(10.0, 0)] // beyond saturated
     fn ground_subscore_examples(#[case] mm: f64, #[case] expected: u8) {
         assert_eq!(ground_subscore(mm), expected);
+    }
+
+    // ---- apply_drought_penalty ----
+
+    #[rstest]
+    #[case(60.0, 100, 100)] // under trigger → no change
+    #[case(72.0, 100, 100)] // exactly at trigger → no change
+    #[case(120.0, 100, 95)] // halfway through → -5
+    #[case(168.0, 100, 90)] // saturates at -10
+    #[case(240.0, 100, 90)] // beyond → still -10
+    #[case(120.0, 3, 0)] // saturating subtract floors at 0
+    fn drought_penalty_examples(
+        #[case] hours: f64,
+        #[case] base: u8,
+        #[case] expected: u8,
+    ) {
+        assert_eq!(apply_drought_penalty(base, hours), expected);
     }
 
     // ---- score (integration) ----
@@ -545,11 +646,12 @@ mod tests {
     fn perfect_conditions_yield_high_score() {
         let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         let window = RideWindow::from_hours(t(14), 3);
-        let s = score(&hours, window, 0.0);
+        let s = score(&hours, window, SurfaceState::default());
         assert!(!s.hard_capped);
-        // Temp=100, wind=100, precip=100, prob=95, ground=100
-        // Weighted: 15*100 + 20*100 + 25*100 + 10*95 + 30*100 = 9950 / 100 = 99
-        assert_eq!(s.total, 99);
+        // Temp=100, wind=100, precip=100, prob=95, ground=95 (lett-fuktig
+        // optimum sits at 0.4 mm; 0 mm scores GROUND_DRY_FLOOR_SCORE = 95).
+        // Weighted: 15*100 + 20*100 + 25*100 + 10*95 + 30*95 = 9800 / 100 = 98
+        assert_eq!(s.total, 98);
         assert_eq!(s.label, "Strålende");
     }
 
@@ -558,7 +660,7 @@ mod tests {
         let mut hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         hours[1].precipitation_mm = 6.0; // > 5 mm/h hard-cap threshold
         let window = RideWindow::from_hours(t(14), 3);
-        let s = score(&hours, window, 0.0);
+        let s = score(&hours, window, SurfaceState::default());
         assert!(s.hard_capped);
         assert!(s.total <= thresholds::HARD_CAP_TOTAL);
     }
@@ -568,7 +670,7 @@ mod tests {
         let mut hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         hours[2].wind_speed_ms = 18.0; // > 15 m/s
         let window = RideWindow::from_hours(t(14), 3);
-        let s = score(&hours, window, 0.0);
+        let s = score(&hours, window, SurfaceState::default());
         assert!(s.hard_capped);
         assert!(s.total <= thresholds::HARD_CAP_TOTAL);
     }
@@ -577,12 +679,13 @@ mod tests {
     fn saturated_ground_drags_score_down_without_hard_cap() {
         let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         let window = RideWindow::from_hours(t(14), 3);
-        let dry = score(&hours, window, 0.0);
-        let wet = score(&hours, window, 5.0); // ground saturated
+        let dry = score(&hours, window, SurfaceState::default());
+        let wet = score(&hours, window, SurfaceState::new(5.0)); // ground saturated
         assert!(!wet.hard_capped);
         assert!(wet.total < dry.total);
-        // Ground sub-score worth 30 points; difference should be exactly 30.
-        assert_eq!(dry.total - wet.total, 30);
+        // Ground sub-score worth 30 points; bone-dry now sits at 95 (not
+        // 100), so the integer-rounded total diff is 29, not 30.
+        assert_eq!(dry.total - wet.total, 29);
     }
 
     #[test]
@@ -594,9 +697,9 @@ mod tests {
         bad.wind_speed_ms = 30.0;
         hours.push(bad);
         let window = RideWindow::from_hours(t(14), 3); // 14..17, excludes 20
-        let s = score(&hours, window, 0.0);
+        let s = score(&hours, window, SurfaceState::default());
         assert!(!s.hard_capped);
-        assert_eq!(s.total, 99);
+        assert_eq!(s.total, 98);
     }
 
     #[test]
@@ -618,7 +721,7 @@ mod tests {
         let s = score(
             &(14..17).map(nice_hour).collect::<Vec<_>>(),
             RideWindow::from_hours(t(14), 3),
-            0.0,
+            SurfaceState::default(),
         );
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"total\""));
@@ -636,7 +739,7 @@ mod tests {
     #[test]
     fn perfect_conditions_emit_no_penalties() {
         let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
         assert!(
             s.penalties.is_empty(),
             "expected no penalties on a strålende day, got {:?}",
@@ -650,7 +753,7 @@ mod tests {
         let hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions::minimal(t(h), 0.0, 2.0, 0.0))
             .collect();
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
         let temp_pen = s
             .penalties
             .iter()
@@ -674,7 +777,7 @@ mod tests {
         let hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions::minimal(t(h), 17.0, 9.0, 0.0))
             .collect();
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
         let wind_pen = s
             .penalties
             .iter()
@@ -697,7 +800,7 @@ mod tests {
                 ..HourlyConditions::minimal(t(h), 17.0, 4.0, 0.0)
             })
             .collect();
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
         let wind_pen = s
             .penalties
             .iter()
@@ -720,7 +823,7 @@ mod tests {
         let hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions::minimal(t(h), 17.0, 2.0, 1.0))
             .collect();
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
         assert!(
             s.penalties
                 .iter()
@@ -740,7 +843,7 @@ mod tests {
                 ..HourlyConditions::minimal(t(h), 17.0, 2.0, 0.0)
             })
             .collect();
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
         let prob_pen = s
             .penalties
             .iter()
@@ -756,7 +859,7 @@ mod tests {
     #[test]
     fn saturated_ground_emits_ground_penalty() {
         let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), 5.0);
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::new(5.0));
         let g = s
             .penalties
             .iter()
@@ -769,7 +872,7 @@ mod tests {
     fn hard_cap_emits_critical_penalty() {
         let mut hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         hours[1].precipitation_mm = 6.0; // > 5 mm/h
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
         assert!(s.hard_capped);
         let crit = s
             .penalties
@@ -789,7 +892,7 @@ mod tests {
     fn storm_wind_hard_cap_emits_critical_penalty_mentioning_wind() {
         let mut hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         hours[2].wind_speed_ms = 18.0;
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
         assert!(s.hard_capped);
         let crit = s
             .penalties
@@ -813,7 +916,7 @@ mod tests {
             .collect();
         let mut hs = hours.clone();
         hs[0].precipitation_mm = 6.0;
-        let s = score(&hs, RideWindow::from_hours(t(14), 3), 5.0);
+        let s = score(&hs, RideWindow::from_hours(t(14), 3), SurfaceState::new(5.0));
         assert!(
             s.penalties.windows(2).all(|w| w[0].severity >= w[1].severity),
             "penalties not sorted desc: {:?}",
@@ -831,11 +934,86 @@ mod tests {
     fn penalty_serializes_with_lowercase_component_and_severity() {
         let mut hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         hours[1].precipitation_mm = 6.0;
-        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), SurfaceState::default());
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"penalties\""), "got {json}");
         // Component & Severity both render as lowercase strings.
         assert!(json.contains("\"hard_cap\""), "got {json}");
         assert!(json.contains("\"critical\""), "got {json}");
+    }
+
+    // ---- drought integration ----
+
+    #[test]
+    fn score_emits_drought_penalty_after_long_dry_spell() {
+        let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
+        let surface = SurfaceState {
+            accumulated_mm: 0.0,
+            hours_since_meaningful_rain: 96.0, // 4 days
+        };
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), surface);
+        let drought = s
+            .penalties
+            .iter()
+            .find(|p| {
+                p.component == Component::Ground
+                    && p.message_no.to_lowercase().contains("tørt")
+            })
+            .expect("expected a tørke penalty after 96h drought");
+        assert_eq!(drought.severity, Severity::Minor);
+        assert!(
+            drought.message_no.contains("4 døgn"),
+            "expected '4 døgn' in {:?}",
+            drought.message_no
+        );
+    }
+
+    #[test]
+    fn score_drought_does_not_fire_when_ground_is_wet() {
+        // Counter is high but ground is past the optimum — the wetness
+        // penalty owns this case; no drought penalty should appear.
+        let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
+        let surface = SurfaceState {
+            accumulated_mm: 5.0,
+            hours_since_meaningful_rain: 200.0,
+        };
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), surface);
+        let drought = s
+            .penalties
+            .iter()
+            .find(|p| p.message_no.to_lowercase().contains("tørt"));
+        assert!(drought.is_none(), "got {:?}", s.penalties);
+    }
+
+    #[test]
+    fn score_dry_and_drought_combine_within_soft_hint_budget() {
+        // Worst-case dry+drought against a perfect day: lett-fuktig floor
+        // (-5 on ground subscore) plus full drought (-10) is bounded
+        // within the agreed "soft hint" budget — total drop ≤ 5 points.
+        let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
+        let baseline = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            SurfaceState {
+                accumulated_mm: thresholds::GROUND_OPTIMAL_MM,
+                hours_since_meaningful_rain: 0.0,
+            },
+        );
+        let parched = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            SurfaceState {
+                accumulated_mm: 0.0,
+                hours_since_meaningful_rain: 240.0,
+            },
+        );
+        assert!(parched.total < baseline.total);
+        // Ground delta is 100 → 95-10 = 85, contribution diff 30·15/100 = 4.5
+        // → integer total drop should be ≤ 5.
+        assert!(
+            baseline.total - parched.total <= 5,
+            "drop {} exceeds soft-hint budget",
+            baseline.total - parched.total
+        );
     }
 }

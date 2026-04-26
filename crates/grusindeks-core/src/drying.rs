@@ -1,11 +1,15 @@
-//! A water-balance heuristic for "how wet is the gravel right now?".
+//! A water-balance heuristic for "how wet is the gravel right now?", plus
+//! a longer-timescale "how long since meaningful rain" counter for
+//! detecting loose/dusty conditions on the dry end.
 //!
-//! We track a single `accumulated_water_mm` value per location. Each
-//! simulated hour adds the hour's precipitation and subtracts a
+//! Each simulated hour adds the hour's precipitation and subtracts a
 //! drying-rate that depends on temperature, wind, sunshine, and humidity.
 //! Saturation is capped at `GROUND_SATURATED` mm so a single deluge
 //! doesn't take days to "drain" — gravel surfaces drain quickly even when
-//! soaked.
+//! soaked. In parallel we keep `hours_since_meaningful_rain`, which
+//! resets whenever a single hour delivers ≥ `MEANINGFUL_RAIN_MM` and
+//! otherwise increments by one each step. The scoring layer uses that to
+//! flag flerdøgnstørke.
 //!
 //! Not a real Penman–Monteith ET model; it's a transparent heuristic with
 //! all coefficients tunable in one place. Good enough for scoring.
@@ -14,6 +18,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::score::thresholds::GROUND_SATURATED;
 use crate::types::HourlyConditions;
+
+/// Accumulated surface water (post-drying) at which we treat the gravel
+/// as having been "actually wet" — enough to repack the surface. Lower
+/// than that and a brief shower / drizzle didn't really do anything, so
+/// the drought counter keeps climbing. Light continuous drizzle still
+/// resets, because the drying model lets it accumulate across hours.
+pub const SURFACE_WETTED_MM: f64 = 0.3;
 
 /// Coefficients for the per-hour drying rate (mm/h). Exposed so tests and
 /// future calibration can override them without forking the function.
@@ -42,17 +53,24 @@ impl Default for DryingParams {
     }
 }
 
-/// Mutable state of the water-balance simulation.
+/// Mutable state of the surface-condition simulation. Tracks both
+/// short-timescale wetness (`accumulated_mm`) and long-timescale dryness
+/// (`hours_since_meaningful_rain`), since they affect the score in
+/// opposite directions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
-pub struct DryingState {
+pub struct SurfaceState {
     /// Accumulated standing water on the surface, mm.
     pub accumulated_mm: f64,
+    /// Hours elapsed since the last hour that received at least
+    /// `MEANINGFUL_RAIN_MM`. Drizzle does not reset this.
+    pub hours_since_meaningful_rain: f64,
 }
 
-impl DryingState {
+impl SurfaceState {
     pub fn new(initial_mm: f64) -> Self {
         Self {
             accumulated_mm: initial_mm.max(0.0),
+            hours_since_meaningful_rain: 0.0,
         }
     }
 
@@ -90,21 +108,36 @@ pub fn drying_rate(h: &HourlyConditions, p: &DryingParams) -> f64 {
         .clamp(p.min_rate, p.max_rate)
 }
 
-/// Step the drying state forward by one hour.
+/// Step the surface state forward by one hour.
 ///
-/// Order: add this hour's precipitation, then subtract drying. Capped to
-/// `[0, GROUND_SATURATED]`.
-pub fn drying_step(state: DryingState, h: &HourlyConditions, p: &DryingParams) -> DryingState {
-    let after_rain = state.accumulated_mm + h.precipitation_mm.max(0.0);
+/// Order: add this hour's precipitation, then subtract drying (capped to
+/// `[0, GROUND_SATURATED]`); the drought counter resets on a meaningful
+/// shower or otherwise increments by one.
+pub fn drying_step(state: SurfaceState, h: &HourlyConditions, p: &DryingParams) -> SurfaceState {
+    let precip = h.precipitation_mm.max(0.0);
+    let after_rain = state.accumulated_mm + precip;
     let after_drying = (after_rain - drying_rate(h, p)).clamp(0.0, GROUND_SATURATED);
-    DryingState {
+    // Reset on actually-wet surface, not on a single rain reading. Light
+    // drizzle that builds up across several hours still trips this; a
+    // 0.2 mm sprinkle on an otherwise dry day does not.
+    let hours_since_meaningful_rain = if after_drying >= SURFACE_WETTED_MM {
+        0.0
+    } else {
+        state.hours_since_meaningful_rain + 1.0
+    };
+    SurfaceState {
         accumulated_mm: after_drying,
+        hours_since_meaningful_rain,
     }
 }
 
-/// Replay a sequence of past hours to estimate "how wet is it right now".
-/// Hours should be in chronological order. Returns the final state.
-pub fn replay(initial: DryingState, history: &[HourlyConditions], p: &DryingParams) -> DryingState {
+/// Replay a sequence of past hours to estimate the surface state right
+/// now. Hours should be in chronological order. Returns the final state.
+pub fn replay(
+    initial: SurfaceState,
+    history: &[HourlyConditions],
+    p: &DryingParams,
+) -> SurfaceState {
     history.iter().fold(initial, |s, h| drying_step(s, h, p))
 }
 
@@ -135,18 +168,18 @@ mod tests {
         }
     }
 
-    // ---- DryingState basics ----
+    // ---- SurfaceState basics ----
 
     #[test]
     fn new_clamps_negative_to_zero() {
-        assert_eq!(DryingState::new(-1.0).accumulated_mm, 0.0);
+        assert_eq!(SurfaceState::new(-1.0).accumulated_mm, 0.0);
     }
 
     #[test]
     fn saturated_threshold() {
-        assert!(!DryingState::new(4.99).is_saturated());
-        assert!(DryingState::new(5.0).is_saturated());
-        assert!(DryingState::new(10.0).is_saturated());
+        assert!(!SurfaceState::new(4.99).is_saturated());
+        assert!(SurfaceState::new(5.0).is_saturated());
+        assert!(SurfaceState::new(10.0).is_saturated());
     }
 
     // ---- drying_rate ----
@@ -220,7 +253,7 @@ mod tests {
         // Rainy conditions push drying near zero (humid, no sun) — what we
         // care about is that the precipitation makes it into the bucket.
         let p = DryingParams::default();
-        let s = DryingState::new(0.0);
+        let s = SurfaceState::new(0.0);
         let h = rainy_hour(0, 2.0);
         let s2 = drying_step(s, &h, &p);
         assert!(
@@ -236,7 +269,7 @@ mod tests {
         // Counterpart to the rainy case: with sunshine and warmth, water
         // does decrease.
         let p = DryingParams::default();
-        let s = DryingState::new(2.0);
+        let s = SurfaceState::new(2.0);
         let h = dry_hour(12);
         let s2 = drying_step(s, &h, &p);
         assert!(s2.accumulated_mm < s.accumulated_mm);
@@ -245,7 +278,7 @@ mod tests {
     #[test]
     fn step_caps_at_saturation() {
         let p = DryingParams::default();
-        let s = DryingState::new(4.0);
+        let s = SurfaceState::new(4.0);
         let h = rainy_hour(0, 50.0); // deluge
         let s2 = drying_step(s, &h, &p);
         assert!(s2.accumulated_mm <= GROUND_SATURATED);
@@ -254,11 +287,63 @@ mod tests {
     #[test]
     fn step_floor_zero() {
         let p = DryingParams::default();
-        let s = DryingState::new(0.0);
+        let s = SurfaceState::new(0.0);
         let h = dry_hour(0);
         let s2 = drying_step(s, &h, &p);
         assert!(s2.accumulated_mm >= 0.0);
         assert_eq!(s2.accumulated_mm, 0.0);
+    }
+
+    // ---- drought counter ----
+
+    #[test]
+    fn drought_counter_resets_when_surface_actually_gets_wet() {
+        let p = DryingParams::default();
+        let s = SurfaceState {
+            accumulated_mm: 0.0,
+            hours_since_meaningful_rain: 50.0,
+        };
+        // 0.5 mm shower → after-drying state clears SURFACE_WETTED_MM
+        // under the rainy fixture (humid, no sun → drying ≈ 0).
+        let s2 = drying_step(s, &rainy_hour(0, 0.5), &p);
+        assert_eq!(s2.hours_since_meaningful_rain, 0.0);
+    }
+
+    #[test]
+    fn drought_counter_does_not_reset_on_micro_sprinkle() {
+        let p = DryingParams::default();
+        let s = SurfaceState {
+            accumulated_mm: 0.0,
+            hours_since_meaningful_rain: 50.0,
+        };
+        // 0.1 mm in one hour stays well below the wetted threshold.
+        let s2 = drying_step(s, &rainy_hour(0, 0.1), &p);
+        assert_eq!(s2.hours_since_meaningful_rain, 51.0);
+    }
+
+    #[test]
+    fn drought_counter_resets_after_drizzle_accumulates() {
+        // Several light hours that each fall short individually but
+        // collectively wet the surface should reset the counter.
+        let p = DryingParams::default();
+        let mut s = SurfaceState {
+            accumulated_mm: 0.0,
+            hours_since_meaningful_rain: 50.0,
+        };
+        for h in 0..4 {
+            s = drying_step(s, &rainy_hour(h, 0.2), &p);
+        }
+        assert_eq!(s.hours_since_meaningful_rain, 0.0);
+    }
+
+    #[test]
+    fn drought_counter_increments_on_dry_hours() {
+        let p = DryingParams::default();
+        let mut s = SurfaceState::default();
+        for h in 0..3 {
+            s = drying_step(s, &dry_hour(h), &p);
+        }
+        assert_eq!(s.hours_since_meaningful_rain, 3.0);
     }
 
     // ---- replay ----
@@ -267,7 +352,7 @@ mod tests {
     fn replay_48h_no_rain_yields_dry() {
         let p = DryingParams::default();
         let history: Vec<_> = (0..48).map(|h| dry_hour(h % 24)).collect();
-        let final_state = replay(DryingState::new(3.0), &history, &p);
+        let final_state = replay(SurfaceState::new(3.0), &history, &p);
         assert_eq!(final_state.accumulated_mm, 0.0);
     }
 
@@ -275,7 +360,7 @@ mod tests {
     fn replay_continuous_rain_yields_saturated() {
         let p = DryingParams::default();
         let history: Vec<_> = (0..24).map(|h| rainy_hour(h % 24, 3.0)).collect();
-        let final_state = replay(DryingState::new(0.0), &history, &p);
+        let final_state = replay(SurfaceState::new(0.0), &history, &p);
         assert!(final_state.is_saturated());
     }
 
@@ -285,7 +370,7 @@ mod tests {
         let p = DryingParams::default();
         let mut history: Vec<HourlyConditions> = (0..6).map(|h| rainy_hour(h, 3.0)).collect();
         history.extend((6..30).map(|h| dry_hour(h % 24)));
-        let final_state = replay(DryingState::new(0.0), &history, &p);
+        let final_state = replay(SurfaceState::new(0.0), &history, &p);
         assert!(
             final_state.accumulated_mm < 1.0,
             "got {}",
@@ -305,15 +390,44 @@ mod tests {
                 }
             })
             .collect();
-        let a = replay(DryingState::new(0.0), &history, &p);
-        let b = replay(DryingState::new(0.0), &history, &p);
+        let a = replay(SurfaceState::new(0.0), &history, &p);
+        let b = replay(SurfaceState::new(0.0), &history, &p);
         assert_eq!(a, b);
     }
 
     #[test]
     fn replay_empty_history_returns_initial() {
         let p = DryingParams::default();
-        let s = DryingState::new(2.5);
+        let s = SurfaceState::new(2.5);
         assert_eq!(replay(s, &[], &p), s);
+    }
+
+    #[test]
+    fn replay_tracks_drought_across_history() {
+        // 7 dry days = 168 dry hours since the start; no rain ever fell, so
+        // the counter just increments by the history length.
+        let p = DryingParams::default();
+        let history: Vec<_> = (0..168).map(|h| dry_hour(h % 24)).collect();
+        let final_state = replay(SurfaceState::default(), &history, &p);
+        assert_eq!(final_state.hours_since_meaningful_rain, 168.0);
+    }
+
+    #[test]
+    fn replay_drought_counter_picks_up_from_last_rain() {
+        // 24 h of solid rain (saturates the surface to 5 mm), then 100 h
+        // of warm dry hours. The drying model takes ~17 hours to push
+        // the surface below SURFACE_WETTED_MM, during which the counter
+        // keeps resetting; afterwards it climbs each hour. Allow a wide
+        // band — the exact value depends on the drying-rate
+        // coefficients, which we don't want this test to lock down.
+        let p = DryingParams::default();
+        let mut history: Vec<HourlyConditions> = (0..24).map(|h| rainy_hour(h, 2.0)).collect();
+        history.extend((24..124).map(|h| dry_hour(h % 24)));
+        let final_state = replay(SurfaceState::default(), &history, &p);
+        assert!(
+            (60.0..=100.0).contains(&final_state.hours_since_meaningful_rain),
+            "got {}",
+            final_state.hours_since_meaningful_rain,
+        );
     }
 }

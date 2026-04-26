@@ -204,6 +204,7 @@ fn lower_confidence(a: Confidence, b: Confidence) -> Confidence {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+    use grusindeks_core::drying::SurfaceState;
     use grusindeks_core::score::{score, ScoreBreakdown};
     use grusindeks_core::types::{HourlyConditions, RideWindow};
 
@@ -228,8 +229,8 @@ mod tests {
     #[test]
     fn aggregate_picks_extremes() {
         let win = RideWindow::from_hours(t(14), 3);
-        let good = score(&(14..17).map(perfect).collect::<Vec<_>>(), win, 0.0);
-        let bad = score(&(14..17).map(awful).collect::<Vec<_>>(), win, 4.5);
+        let good = score(&(14..17).map(perfect).collect::<Vec<_>>(), win, SurfaceState::default());
+        let bad = score(&(14..17).map(awful).collect::<Vec<_>>(), win, SurfaceState::new(4.5));
         let center = Point::new(59.9139, 10.7522);
         let agg = AggregateScore::from_points(
             center,
@@ -248,7 +249,7 @@ mod tests {
     #[test]
     fn aggregate_labels_center_as_senter() {
         let win = RideWindow::from_hours(t(14), 3);
-        let good = score(&(14..17).map(perfect).collect::<Vec<_>>(), win, 0.0);
+        let good = score(&(14..17).map(perfect).collect::<Vec<_>>(), win, SurfaceState::default());
         let center = Point::new(59.9139, 10.7522);
         let agg = AggregateScore::from_points(center, vec![(center, good)]);
         assert_eq!(agg.points[0].bearing_label, "senter");
@@ -273,8 +274,8 @@ mod tests {
             win,
             center,
             vec![
-                (center, compute_day(&hourly, win, 0.0, now)),
-                (other, compute_day(&six_hourly, win, 0.0, now)),
+                (center, compute_day(&hourly, win, SurfaceState::default(), now)),
+                (other, compute_day(&six_hourly, win, SurfaceState::default(), now)),
             ],
         );
         // Center is Hoy, the other is Lav (>50% six-hourly) → worst is Lav.
@@ -301,8 +302,8 @@ mod tests {
             win,
             center,
             vec![
-                (center, compute_day(&center_hours, win, 0.0, now)),
-                (other, compute_day(&other_hours, win, 0.0, now)),
+                (center, compute_day(&center_hours, win, SurfaceState::default(), now)),
+                (other, compute_day(&other_hours, win, SurfaceState::default(), now)),
             ],
         );
         assert!(
@@ -315,7 +316,7 @@ mod tests {
     #[allow(unused_variables)]
     fn aggregate_serializes_to_json() {
         let win = RideWindow::from_hours(t(14), 3);
-        let good = score(&(14..17).map(perfect).collect::<Vec<_>>(), win, 0.0);
+        let good = score(&(14..17).map(perfect).collect::<Vec<_>>(), win, SurfaceState::default());
         let center = Point::new(59.9139, 10.7522);
         let agg = AggregateScore::from_points(center, vec![(center, good)]);
         let json = serde_json::to_string(&agg).unwrap();
