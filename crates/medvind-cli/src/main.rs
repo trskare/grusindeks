@@ -1,7 +1,9 @@
 mod aggregate;
 mod config;
 mod output;
+mod progress;
 mod run;
+mod theme;
 
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
@@ -15,12 +17,17 @@ use medvind_met::client::{MetClient, MetClientConfig, UserAgent};
 use url::Url;
 
 use crate::config::Config;
+use crate::progress::TerminalProgress;
 use crate::run::{run_forecast, run_score, DayWindow, ForecastInputs, ScoreInputs};
 
 const APP: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// medvind — Grusindeks for sykling på grus.
+///
+/// Kjør `medvind` uten argumenter for å se en seks-dagers oversikt fra og
+/// med i dag. Bruk `medvind score` for et enkelt tidsvindu, eller
+/// `medvind config init` for å sette opp.
 #[derive(Debug, Parser)]
 #[command(name = "medvind", version, about, long_about = None)]
 struct Cli {
@@ -45,42 +52,49 @@ struct Cli {
     json: bool,
 
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Compute the Grusindeks for a location and time window.
-    Score {
-        #[arg(long)]
-        lat: Option<f64>,
-        #[arg(long)]
-        lon: Option<f64>,
-        /// Named place from config (`places.<name>`). Mutually exclusive
-        /// with --lat/--lon.
-        #[arg(long)]
-        place: Option<String>,
-        /// Sample radius in km. Defaults to the place's radius_km, else 20.
-        #[arg(long = "radius-km")]
-        radius_km: Option<f64>,
-        /// Window like "14:00-17:00" in local time today.
-        #[arg(long)]
-        window: Option<String>,
-        /// Window length in hours when --window is omitted.
-        #[arg(long, default_value_t = 3)]
-        hours: i64,
-        /// Antall dager fremover i prognosen. 1 = bare i dag (default).
-        /// Når > 1 vises et dag-for-dag sammendrag i stedet for ett vindu;
-        /// --window og --hours ignoreres da til fordel for dagvindu
-        /// 06:00–22:00 lokal tid.
-        #[arg(long, default_value_t = 1)]
-        days: u8,
-    },
+    Score(ScoreArgs),
     /// Manage the configuration file.
     Config {
         #[command(subcommand)]
         action: ConfigAction,
     },
+}
+
+/// Arguments for the score command. Defaulting rules:
+///
+/// * No `--window` and no `--hours` set → multi-day (`--days` or 6).
+/// * `--window` set → single-day with that window.
+/// * `--hours` set (without `--window`) → single-day with `now..now+hours`.
+#[derive(Debug, Default, clap::Args)]
+struct ScoreArgs {
+    #[arg(long)]
+    lat: Option<f64>,
+    #[arg(long)]
+    lon: Option<f64>,
+    /// Named place from config (`places.<name>`). Mutually exclusive
+    /// with --lat/--lon.
+    #[arg(long)]
+    place: Option<String>,
+    /// Sample radius in km. Defaults to the place's radius_km, else 20.
+    #[arg(long = "radius-km")]
+    radius_km: Option<f64>,
+    /// Window like "14:00-17:00" in local time today.
+    #[arg(long)]
+    window: Option<String>,
+    /// Window length in hours. Implies single-day mode.
+    #[arg(long)]
+    hours: Option<i64>,
+    /// Antall dager fremover i prognosen (default 6: i dag + 5).
+    /// Tvinger fram dag-for-dag-sammendrag; --window og --hours kan
+    /// ikke kombineres med dette.
+    #[arg(long)]
+    days: Option<u8>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -103,12 +117,12 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match &cli.command {
-        Command::Config {
+        Some(Command::Config {
             action: ConfigAction::Init,
-        } => cmd_config_init(cli.config.as_deref()),
-        Command::Config {
+        }) => cmd_config_init(cli.config.as_deref()),
+        Some(Command::Config {
             action: ConfigAction::Path,
-        } => {
+        }) => {
             let p = cli
                 .config
                 .clone()
@@ -117,27 +131,10 @@ async fn main() -> Result<()> {
             println!("{}", p.display());
             Ok(())
         }
-        Command::Score {
-            lat,
-            lon,
-            place,
-            radius_km,
-            window,
-            hours,
-            days,
-        } => {
-            cmd_score(
-                &cli,
-                *lat,
-                *lon,
-                place.clone(),
-                *radius_km,
-                window.clone(),
-                *hours,
-                *days,
-            )
-            .await
-        }
+        Some(Command::Score(args)) => cmd_score(&cli, args).await,
+        // No subcommand → run `score` with all defaults, which gives the
+        // six-day forecast for the configured `default_place`.
+        None => cmd_score(&cli, &ScoreArgs::default()).await,
     }
 }
 
@@ -160,20 +157,24 @@ fn cmd_config_init(config_arg: Option<&std::path::Path>) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn cmd_score(
-    cli: &Cli,
-    lat: Option<f64>,
-    lon: Option<f64>,
-    place: Option<String>,
-    radius_km: Option<f64>,
-    window: Option<String>,
-    hours: i64,
-    days: u8,
-) -> Result<()> {
+async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
+    // Resolve which mode (single-day window vs multi-day forecast) the
+    // user is asking for. `--window` and `--hours` both imply single-day;
+    // anything else falls into the new default (six-day forecast).
+    let single_day = args.window.is_some() || args.hours.is_some();
+    let days = match (single_day, args.days) {
+        (true, Some(_)) => bail!("--window/--hours kan ikke brukes sammen med --days"),
+        (true, None) => 1,
+        (false, Some(d)) => d,
+        (false, None) => DEFAULT_FORECAST_DAYS,
+    };
     if days == 0 {
         bail!("--days må være minst 1");
     }
+    if days > 1 && args.window.is_some() {
+        bail!("--window kan ikke brukes sammen med --days > 1");
+    }
+
     let cfg_path = match cli.config.clone() {
         Some(p) => p,
         None => Config::default_path()?,
@@ -185,16 +186,14 @@ async fn cmd_score(
         )
     })?;
 
-    let location = resolve_location(&cfg, lat, lon, place, radius_km)?;
+    let location = resolve_location(&cfg, args.lat, args.lon, args.place.clone(), args.radius_km)?;
     let frost_source_id = location_frost_source(&cfg, &location);
     let client = build_client(&cfg, cli.api_base.as_ref(), cli.frost_base.as_ref())?;
 
     if days > 1 {
-        if window.is_some() {
-            bail!("--window kan ikke brukes sammen med --days > 1");
-        }
         let day_windows = build_day_windows(Local::now().date_naive(), days)?;
-        let forecast = run_forecast(
+        let progress = TerminalProgress::new();
+        let result = run_forecast(
             &client,
             ForecastInputs {
                 center: location.center,
@@ -202,9 +201,12 @@ async fn cmd_score(
                 days: day_windows,
                 frost_source_id: frost_source_id.as_deref(),
                 history_hours: 48,
+                progress: &progress,
             },
         )
-        .await?;
+        .await;
+        progress.finish();
+        let forecast = result?;
         if cli.json {
             let v = serde_json::json!({
                 "location": location,
@@ -212,14 +214,20 @@ async fn cmd_score(
             });
             println!("{}", serde_json::to_string_pretty(&v)?);
         } else {
-            let body = output::render_multi_day(&location.name, location.radius_km, &forecast);
+            let body = output::render_multi_day(
+                &location.name,
+                location.radius_km,
+                &forecast,
+                cli.verbose,
+            );
             print!("{body}");
         }
         return Ok(());
     }
 
-    let win = resolve_window(window.as_deref(), hours)?;
-    let agg = run_score(
+    let win = resolve_window(args.window.as_deref(), args.hours.unwrap_or(3))?;
+    let progress = TerminalProgress::new();
+    let result = run_score(
         &client,
         ScoreInputs {
             center: location.center,
@@ -227,9 +235,12 @@ async fn cmd_score(
             window: win,
             frost_source_id: frost_source_id.as_deref(),
             history_hours: 48,
+            progress: &progress,
         },
     )
-    .await?;
+    .await;
+    progress.finish();
+    let agg = result?;
 
     if cli.json {
         let v = serde_json::json!({
@@ -239,11 +250,21 @@ async fn cmd_score(
         });
         println!("{}", serde_json::to_string_pretty(&v)?);
     } else {
-        let body = output::render_human(&location.name, location.radius_km, win, &agg);
+        let body = output::render_human(
+            &location.name,
+            location.radius_km,
+            win,
+            &agg,
+            cli.verbose,
+        );
         print!("{body}");
     }
     Ok(())
 }
+
+/// Default horizon when the user runs `medvind` (or `medvind score`) with
+/// no time arguments — today plus the next five days.
+const DEFAULT_FORECAST_DAYS: u8 = 6;
 
 /// Local "ride hours" used for the multi-day day window. Wide enough to
 /// catch most realistic ride times while still excluding the dead-of-night

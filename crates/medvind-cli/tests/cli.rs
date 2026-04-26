@@ -127,7 +127,9 @@ async fn score_json_output_is_valid_json() {
         .arg("--config")
         .arg(&cfg)
         .arg("--json")
-        .args(["score", "--lat", "59.9139", "--lon", "10.7522"])
+        // --hours forces single-day mode; the default is now the
+        // six-day forecast which yields a different JSON shape.
+        .args(["score", "--lat", "59.9139", "--lon", "10.7522", "--hours", "3"])
         .assert()
         .success()
         .get_output()
@@ -198,7 +200,7 @@ async fn score_with_days_and_window_errors_clearly() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("--window kan ikke brukes"));
+        .stderr(predicate::str::contains("kan ikke brukes sammen med --days"));
 }
 
 #[tokio::test]
@@ -235,6 +237,48 @@ async fn score_with_days_json_carries_forecast_field() {
         assert!(d["mean"].is_u64());
         assert!(d["confidence"].is_string());
     }
+}
+
+#[tokio::test]
+async fn no_subcommand_runs_six_day_forecast_against_default_place() {
+    // `medvind` with no subcommand and no time args should hit the
+    // multi-day forecast for the configured `default_place`.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_m("/weatherapi/locationforecast/2.0/complete"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(LOCATIONFORECAST_FIXTURE))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let cfg = write_config(
+        &dir,
+        r#"user_agent_contact = "dev@example.invalid"
+default_place = "oslo"
+[places.oslo]
+lat = 59.9139
+lon = 10.7522
+radius_km = 20.0
+"#,
+    );
+
+    let out = Command::cargo_bin("medvind")
+        .unwrap()
+        .env("MEDVIND_API_BASE", format!("{}/", server.uri()))
+        .env("MEDVIND_FROST_BASE", format!("{}/", server.uri()))
+        .arg("--config")
+        .arg(&cfg)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&out).expect("output must be JSON");
+    let days = parsed["forecast"]["days"]
+        .as_array()
+        .expect("default invocation should produce the multi-day forecast shape");
+    assert_eq!(days.len(), 6, "default should be 6 days, got {}", days.len());
 }
 
 #[tokio::test]

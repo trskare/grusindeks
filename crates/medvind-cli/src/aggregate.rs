@@ -172,6 +172,19 @@ impl DayAggregate {
     }
 }
 
+impl DayAggregate {
+    /// The center sample's full `DayScore`. Used by the renderer to pick a
+    /// representative weather icon and penalty list for the day — neither
+    /// of which makes sense to "average" across points.
+    pub fn center(&self) -> &DayScore {
+        self.points
+            .iter()
+            .find(|p| p.bearing_label == "senter")
+            .map(|p| &p.day_score)
+            .unwrap_or(&self.points[0].day_score)
+    }
+}
+
 /// Multi-day forecast: one `DayAggregate` per requested local date.
 #[derive(Debug, Clone, Serialize)]
 pub struct MultiDayForecast {

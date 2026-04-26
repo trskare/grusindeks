@@ -58,6 +58,10 @@ pub struct DayScore {
     /// `Some` when at least one shorter sub-window scores `min_improvement`
     /// or more above the day score.
     pub optimal_window: Option<OptimalWindow>,
+    /// Single-glyph weather summary for the day. Derived from the in-window
+    /// cloud cover, total precipitation, max wind, and mean temperature so
+    /// the renderer can show one icon per day.
+    pub weather_icon: &'static str,
 }
 
 /// Default minimum point-improvement before we surface a "best window" in
@@ -95,12 +99,55 @@ pub fn compute_day(
     )
     .filter(|ow| ow.improvement >= DEFAULT_OPTIMAL_IMPROVEMENT);
 
+    let weather_icon = weather_icon_for(&in_window);
+
     DayScore {
         window: day_window,
         score: day_score,
         confidence,
         hours_with_data: in_window.len(),
         optimal_window,
+        weather_icon,
+    }
+}
+
+/// Pick a single weather emoji that best summarises the day. Order of
+/// precedence is "what would a cyclist actually want to see first": storm
+/// wind dominates, then snow, then rain, then cloud cover.
+pub fn weather_icon_for(hours: &[&HourlyConditions]) -> &'static str {
+    if hours.is_empty() {
+        return "·";
+    }
+    let n = hours.len() as f64;
+    let mean_temp = hours.iter().map(|h| h.temperature_c).sum::<f64>() / n;
+    let total_precip: f64 = hours.iter().map(|h| h.precipitation_mm).sum();
+    let max_wind = hours
+        .iter()
+        .map(|h| h.wind_speed_ms)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let mean_cloud: Option<f64> = {
+        let xs: Vec<f64> = hours.iter().filter_map(|h| h.cloud_area_fraction).collect();
+        if xs.is_empty() {
+            None
+        } else {
+            Some(xs.iter().sum::<f64>() / xs.len() as f64)
+        }
+    };
+
+    if max_wind.is_finite() && max_wind > 10.0 {
+        return "🌬";
+    }
+    if total_precip > 1.0 {
+        return if mean_temp <= 0.0 { "🌨" } else { "🌧" };
+    }
+    match mean_cloud {
+        Some(c) if c >= 80.0 => "☁",
+        Some(c) if c >= 40.0 => "⛅",
+        Some(_) => "☀",
+        // Long-range forecasts often miss cloud cover. Fall back to a
+        // neutral cloudy-ish glyph rather than promising sunshine.
+        None if total_precip > 0.0 => "🌧",
+        None => "⛅",
     }
 }
 
@@ -353,5 +400,99 @@ mod tests {
         let now = t(2026, 4, 26, 5);
         let ds = compute_day(&hours, day, 0.0, now);
         assert_eq!(ds.hours_with_data, 12);
+    }
+
+    // ---- weather_icon_for ----
+
+    fn with_clouds(time: DateTime<Utc>, cloud_pct: f64) -> HourlyConditions {
+        HourlyConditions {
+            cloud_area_fraction: Some(cloud_pct),
+            ..nice_hour(time)
+        }
+    }
+
+    #[test]
+    fn weather_icon_sun_for_clear_sky() {
+        let hs: Vec<_> = (6..18)
+            .map(|h| with_clouds(t(2026, 4, 26, h), 10.0))
+            .collect();
+        let refs: Vec<&HourlyConditions> = hs.iter().collect();
+        assert_eq!(weather_icon_for(&refs), "☀");
+    }
+
+    #[test]
+    fn weather_icon_partly_cloudy_for_mid_cloud() {
+        let hs: Vec<_> = (6..18)
+            .map(|h| with_clouds(t(2026, 4, 26, h), 60.0))
+            .collect();
+        let refs: Vec<&HourlyConditions> = hs.iter().collect();
+        assert_eq!(weather_icon_for(&refs), "⛅");
+    }
+
+    #[test]
+    fn weather_icon_overcast_for_heavy_cloud() {
+        let hs: Vec<_> = (6..18)
+            .map(|h| with_clouds(t(2026, 4, 26, h), 95.0))
+            .collect();
+        let refs: Vec<&HourlyConditions> = hs.iter().collect();
+        assert_eq!(weather_icon_for(&refs), "☁");
+    }
+
+    #[test]
+    fn weather_icon_rain_when_total_precip_above_1mm_and_warm() {
+        // Light rain across the window, warm enough to be liquid.
+        let hs: Vec<_> = (6..18)
+            .map(|h| HourlyConditions {
+                precipitation_mm: 0.2,
+                cloud_area_fraction: Some(90.0),
+                ..HourlyConditions::minimal(t(2026, 4, 26, h), 8.0, 2.0, 0.2)
+            })
+            .collect();
+        let refs: Vec<&HourlyConditions> = hs.iter().collect();
+        assert_eq!(weather_icon_for(&refs), "🌧");
+    }
+
+    #[test]
+    fn weather_icon_snow_when_precip_and_freezing() {
+        let hs: Vec<_> = (6..18)
+            .map(|h| HourlyConditions {
+                cloud_area_fraction: Some(90.0),
+                ..HourlyConditions::minimal(t(2026, 4, 26, h), -3.0, 2.0, 0.2)
+            })
+            .collect();
+        let refs: Vec<&HourlyConditions> = hs.iter().collect();
+        assert_eq!(weather_icon_for(&refs), "🌨");
+    }
+
+    #[test]
+    fn weather_icon_wind_dominates_when_max_wind_above_10() {
+        let hs: Vec<_> = (6..18)
+            .map(|h| HourlyConditions {
+                cloud_area_fraction: Some(20.0),
+                ..HourlyConditions::minimal(t(2026, 4, 26, h), 12.0, 11.0, 0.0)
+            })
+            .collect();
+        let refs: Vec<&HourlyConditions> = hs.iter().collect();
+        assert_eq!(weather_icon_for(&refs), "🌬");
+    }
+
+    #[test]
+    fn weather_icon_falls_back_when_no_cloud_data_and_dry() {
+        // No cloud_area_fraction set on any hour, no precip. Should not
+        // confidently promise sunshine — falls back to ⛅.
+        let hs: Vec<HourlyConditions> = (6..18).map(|h| nice_hour(t(2026, 4, 26, h))).collect();
+        let refs: Vec<&HourlyConditions> = hs.iter().collect();
+        assert_eq!(weather_icon_for(&refs), "⛅");
+    }
+
+    #[test]
+    fn weather_icon_set_by_compute_day() {
+        let hs: Vec<_> = (6..18)
+            .map(|h| with_clouds(t(2026, 4, 26, h), 10.0))
+            .collect();
+        let day = day_window(6, 12);
+        let now = t(2026, 4, 26, 5);
+        let ds = compute_day(&hs, day, 0.0, now);
+        assert_eq!(ds.weather_icon, "☀");
     }
 }

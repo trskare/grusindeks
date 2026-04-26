@@ -64,6 +64,40 @@ pub struct ScoreBreakdown {
     pub ground: u8,
 }
 
+/// Which axis a penalty came from. `HardCap` is reserved for the
+/// global "stop the score from being misleadingly high" rule when the
+/// forecast contains heavy rain or storm-force wind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Component {
+    Temperature,
+    Wind,
+    Precipitation,
+    PrecipProbability,
+    Ground,
+    HardCap,
+}
+
+/// How much a penalty hurt the score. Ordered so `Critical > Major > Minor`,
+/// which lets the renderer sort `Vec<Penalty>` and show the worst first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    Minor,
+    Major,
+    Critical,
+}
+
+/// A human-readable explanation for why a sub-score got reduced. The
+/// `message_no` is in Norwegian and includes the relevant numeric values
+/// (wind speed, mm of rain, °C, etc.) so the CLI can render it as-is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Penalty {
+    pub component: Component,
+    pub severity: Severity,
+    pub message_no: String,
+}
+
 /// The Grusindeks for one location and ride window.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Grusindeks {
@@ -72,6 +106,11 @@ pub struct Grusindeks {
     pub label: &'static str,
     /// `true` when a hard cap (heavy rain or storm wind) clamped the total.
     pub hard_capped: bool,
+    /// Explanations for the sub-scores that got reduced. Sorted by
+    /// `severity` descending so consumers can take the first N to surface
+    /// the most important ones.
+    #[serde(default)]
+    pub penalties: Vec<Penalty>,
 }
 
 /// Compute the Grusindeks for the slice of `hours` that overlap `window`,
@@ -103,11 +142,14 @@ pub fn score(hours: &[HourlyConditions], window: RideWindow, ground_water_mm: f6
         .filter_map(|h| h.probability_of_precip)
         .fold(f64::NEG_INFINITY, f64::max);
 
+    let max_gust_opt = max_gust.is_finite().then_some(max_gust);
+    let max_prob_opt = max_prob.is_finite().then_some(max_prob);
+
     let breakdown = ScoreBreakdown {
         temperature: temp_subscore(mean_temp),
-        wind: wind_subscore(mean_wind, max_gust.is_finite().then_some(max_gust)),
+        wind: wind_subscore(mean_wind, max_gust_opt),
         precipitation: precip_subscore(mean_precip),
-        precip_probability: precip_prob_subscore(max_prob.is_finite().then_some(max_prob)),
+        precip_probability: precip_prob_subscore(max_prob_opt),
         ground: ground_subscore(ground_water_mm),
     };
 
@@ -127,12 +169,147 @@ pub fn score(hours: &[HourlyConditions], window: RideWindow, ground_water_mm: f6
         raw_total
     };
 
+    let mut penalties = Vec::new();
+    if let Some(p) = temp_penalty(breakdown.temperature, mean_temp) {
+        penalties.push(p);
+    }
+    if let Some(p) = wind_penalty(breakdown.wind, mean_wind, max_gust_opt) {
+        penalties.push(p);
+    }
+    if let Some(p) = precip_penalty(breakdown.precipitation, mean_precip) {
+        penalties.push(p);
+    }
+    if let Some(p) = prob_penalty(breakdown.precip_probability, max_prob_opt) {
+        penalties.push(p);
+    }
+    if let Some(p) = ground_penalty(breakdown.ground, ground_water_mm) {
+        penalties.push(p);
+    }
+    if hard_capped {
+        if max_precip.is_finite() && max_precip > thresholds::HARD_CAP_PRECIP_MM_PER_HOUR {
+            penalties.push(Penalty {
+                component: Component::HardCap,
+                severity: Severity::Critical,
+                message_no: format!(
+                    "Kraftig regn ventet ({max_precip:.1} mm/t) — score hard-cappet"
+                ),
+            });
+        }
+        if max_wind.is_finite() && max_wind > thresholds::HARD_CAP_WIND_MS {
+            penalties.push(Penalty {
+                component: Component::HardCap,
+                severity: Severity::Critical,
+                message_no: format!(
+                    "Stormvind ventet ({max_wind:.1} m/s) — score hard-cappet"
+                ),
+            });
+        }
+    }
+    // Worst penalty first so the renderer can take the head.
+    penalties.sort_by(|a, b| b.severity.cmp(&a.severity));
+
     Grusindeks {
         total,
         breakdown,
         label: label_for(total),
         hard_capped,
+        penalties,
     }
+}
+
+/// Severity bucketing for sub-score deficits. `Critical` is reserved for
+/// hard-cap penalties (the global "stop misleading the user" rule), so the
+/// per-axis penalties only ever produce `Minor` or `Major`.
+fn severity_for(subscore: u8) -> Option<Severity> {
+    match subscore {
+        80..=100 => None,
+        60..=79 => Some(Severity::Minor),
+        _ => Some(Severity::Major),
+    }
+}
+
+fn temp_penalty(subscore: u8, mean_temp: f64) -> Option<Penalty> {
+    let severity = severity_for(subscore)?;
+    let message_no = if mean_temp < thresholds::TEMP_OPTIMAL_LOW {
+        format!("kjølig, snitt {mean_temp:.0} °C")
+    } else {
+        format!("varmt, snitt {mean_temp:.0} °C")
+    };
+    Some(Penalty {
+        component: Component::Temperature,
+        severity,
+        message_no,
+    })
+}
+
+fn wind_penalty(subscore: u8, mean_wind: f64, max_gust: Option<f64>) -> Option<Penalty> {
+    let severity = severity_for(subscore)?;
+    let gusty = matches!(
+        max_gust,
+        Some(g) if mean_wind > 0.0 && g > thresholds::GUST_RATIO_THRESHOLD * mean_wind
+    );
+    let message_no = match (mean_wind, gusty, max_gust) {
+        // Gust dominated, mean still calm.
+        (m, true, Some(g)) if m <= thresholds::WIND_PERFECT_MAX => {
+            format!("kastevind opp i {g:.0} m/s")
+        }
+        // Both wind and gust contribute.
+        (m, true, Some(g)) => {
+            format!("snitt {m:.1} m/s, kastevind opp i {g:.0} m/s")
+        }
+        // Plain wind, no notable gust.
+        (m, _, _) if m > thresholds::WIND_OK_MAX => {
+            format!("snitt {m:.1} m/s — mye vind")
+        }
+        (m, _, _) => format!("snitt {m:.1} m/s"),
+    };
+    Some(Penalty {
+        component: Component::Wind,
+        severity,
+        message_no,
+    })
+}
+
+fn precip_penalty(subscore: u8, mean_precip: f64) -> Option<Penalty> {
+    let severity = severity_for(subscore)?;
+    let message_no = if mean_precip > thresholds::PRECIP_HEAVY {
+        format!("kraftig regn, snitt {mean_precip:.1} mm/t")
+    } else {
+        format!("{mean_precip:.1} mm/t i snitt")
+    };
+    Some(Penalty {
+        component: Component::Precipitation,
+        severity,
+        message_no,
+    })
+}
+
+/// Probability penalty only fires when we actually have a probability
+/// value. With no data the sub-score defaults to a neutral 50, and
+/// blaming the score on "0 %" would mislead the user — they'd read it as
+/// "the model is sure it won't rain".
+fn prob_penalty(subscore: u8, max_prob: Option<f64>) -> Option<Penalty> {
+    let severity = severity_for(subscore)?;
+    let p = max_prob?.clamp(0.0, 100.0);
+    Some(Penalty {
+        component: Component::PrecipProbability,
+        severity,
+        message_no: format!("{p:.0} % sjanse for nedbør"),
+    })
+}
+
+fn ground_penalty(subscore: u8, ground_water_mm: f64) -> Option<Penalty> {
+    let severity = severity_for(subscore)?;
+    let message_no = if ground_water_mm >= thresholds::GROUND_SATURATED {
+        format!("gjennomvåt ({ground_water_mm:.1} mm akkumulert)")
+    } else {
+        format!("våt fra forrige døgn ({ground_water_mm:.1} mm)")
+    };
+    Some(Penalty {
+        component: Component::Ground,
+        severity,
+        message_no,
+    })
 }
 
 /// Map a total to a short Norwegian label.
@@ -448,5 +625,217 @@ mod tests {
         assert!(json.contains("\"breakdown\""));
         assert!(json.contains("\"temperature\""));
         assert!(json.contains("\"ground\""));
+    }
+
+    // ---- Penalties ----
+    //
+    // A `Penalty` explains *why* a sub-score got reduced. The CLI uses these
+    // to print "└─ Vind: kastevind opp i 14 m/s" lines. Severity ordering
+    // matters because the renderer shows the worst penalty per day first.
+
+    #[test]
+    fn perfect_conditions_emit_no_penalties() {
+        let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        assert!(
+            s.penalties.is_empty(),
+            "expected no penalties on a strålende day, got {:?}",
+            s.penalties
+        );
+    }
+
+    #[test]
+    fn cold_day_emits_minor_or_major_temperature_penalty() {
+        // 0°C → temp_subscore ≈ 35 (between -5 and 12)
+        let hours: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions::minimal(t(h), 0.0, 2.0, 0.0))
+            .collect();
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        let temp_pen = s
+            .penalties
+            .iter()
+            .find(|p| p.component == Component::Temperature)
+            .expect("expected a temperature penalty for 0°C");
+        assert!(
+            matches!(temp_pen.severity, Severity::Minor | Severity::Major),
+            "got severity {:?}",
+            temp_pen.severity
+        );
+        assert!(
+            temp_pen.message_no.contains("0"),
+            "message should mention the temperature: {:?}",
+            temp_pen.message_no
+        );
+    }
+
+    #[test]
+    fn windy_day_emits_wind_penalty_with_speed_in_message() {
+        // mean wind 9 m/s → wind_subscore ≈ 44 (Major)
+        let hours: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions::minimal(t(h), 17.0, 9.0, 0.0))
+            .collect();
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        let wind_pen = s
+            .penalties
+            .iter()
+            .find(|p| p.component == Component::Wind)
+            .expect("expected wind penalty for 9 m/s");
+        assert_eq!(wind_pen.severity, Severity::Major);
+        assert!(
+            wind_pen.message_no.contains("9"),
+            "wind message should cite the speed: {:?}",
+            wind_pen.message_no
+        );
+    }
+
+    #[test]
+    fn gusty_day_mentions_kastevind_in_wind_message() {
+        // Calm mean (4 m/s) but strong gusts (8 m/s = 2× mean).
+        let hours: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions {
+                wind_gust_ms: Some(8.0),
+                ..HourlyConditions::minimal(t(h), 17.0, 4.0, 0.0)
+            })
+            .collect();
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        let wind_pen = s
+            .penalties
+            .iter()
+            .find(|p| p.component == Component::Wind)
+            .expect("gust penalty applied → expected a wind Penalty");
+        assert!(
+            wind_pen.message_no.to_lowercase().contains("kast"),
+            "expected gust mention in {:?}",
+            wind_pen.message_no
+        );
+        assert!(
+            wind_pen.message_no.contains("8"),
+            "expected gust value in {:?}",
+            wind_pen.message_no
+        );
+    }
+
+    #[test]
+    fn rainy_day_emits_precipitation_penalty() {
+        let hours: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions::minimal(t(h), 17.0, 2.0, 1.0))
+            .collect();
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        assert!(
+            s.penalties
+                .iter()
+                .any(|p| p.component == Component::Precipitation),
+            "expected precip penalty, got {:?}",
+            s.penalties
+        );
+    }
+
+    #[test]
+    fn high_probability_emits_probability_penalty_when_amount_is_low() {
+        // Dry forecast (0 mm) but the model is 90 % sure it'll rain — the
+        // probability sub-score drops independently.
+        let hours: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions {
+                probability_of_precip: Some(90.0),
+                ..HourlyConditions::minimal(t(h), 17.0, 2.0, 0.0)
+            })
+            .collect();
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        let prob_pen = s
+            .penalties
+            .iter()
+            .find(|p| p.component == Component::PrecipProbability)
+            .expect("expected probability penalty for 90 %");
+        assert!(
+            prob_pen.message_no.contains("90"),
+            "expected 90 %% in {:?}",
+            prob_pen.message_no
+        );
+    }
+
+    #[test]
+    fn saturated_ground_emits_ground_penalty() {
+        let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), 5.0);
+        let g = s
+            .penalties
+            .iter()
+            .find(|p| p.component == Component::Ground)
+            .expect("saturated ground → expected ground penalty");
+        assert_eq!(g.severity, Severity::Major);
+    }
+
+    #[test]
+    fn hard_cap_emits_critical_penalty() {
+        let mut hours = (14..17).map(nice_hour).collect::<Vec<_>>();
+        hours[1].precipitation_mm = 6.0; // > 5 mm/h
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        assert!(s.hard_capped);
+        let crit = s
+            .penalties
+            .iter()
+            .find(|p| p.severity == Severity::Critical)
+            .expect("hard-cap → expected a Critical penalty");
+        assert_eq!(crit.component, Component::HardCap);
+        assert!(
+            crit.message_no.to_lowercase().contains("kraftig")
+                || crit.message_no.to_lowercase().contains("regn"),
+            "hard-cap message should mention rain: {:?}",
+            crit.message_no
+        );
+    }
+
+    #[test]
+    fn storm_wind_hard_cap_emits_critical_penalty_mentioning_wind() {
+        let mut hours = (14..17).map(nice_hour).collect::<Vec<_>>();
+        hours[2].wind_speed_ms = 18.0;
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        assert!(s.hard_capped);
+        let crit = s
+            .penalties
+            .iter()
+            .find(|p| p.severity == Severity::Critical && p.component == Component::HardCap)
+            .expect("storm hard-cap → expected a Critical/HardCap penalty");
+        assert!(
+            crit.message_no.to_lowercase().contains("storm")
+                || crit.message_no.to_lowercase().contains("vind"),
+            "storm message should mention wind: {:?}",
+            crit.message_no
+        );
+    }
+
+    #[test]
+    fn penalties_sorted_by_severity_descending() {
+        // Engineered to emit at least one Critical (hard cap), one Major
+        // (saturated ground), and one Minor (slight breeze).
+        let hours: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions::minimal(t(h), 17.0, 5.0, 0.0))
+            .collect();
+        let mut hs = hours.clone();
+        hs[0].precipitation_mm = 6.0;
+        let s = score(&hs, RideWindow::from_hours(t(14), 3), 5.0);
+        assert!(
+            s.penalties.windows(2).all(|w| w[0].severity >= w[1].severity),
+            "penalties not sorted desc: {:?}",
+            s.penalties
+        );
+    }
+
+    #[test]
+    fn severity_orders_critical_above_major_above_minor() {
+        assert!(Severity::Critical > Severity::Major);
+        assert!(Severity::Major > Severity::Minor);
+    }
+
+    #[test]
+    fn penalty_serializes_with_lowercase_component_and_severity() {
+        let mut hours = (14..17).map(nice_hour).collect::<Vec<_>>();
+        hours[1].precipitation_mm = 6.0;
+        let s = score(&hours, RideWindow::from_hours(t(14), 3), 0.0);
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"penalties\""), "got {json}");
+        // Component & Severity both render as lowercase strings.
+        assert!(json.contains("\"hard_cap\""), "got {json}");
+        assert!(json.contains("\"critical\""), "got {json}");
     }
 }
