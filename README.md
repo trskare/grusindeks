@@ -24,9 +24,7 @@ kompasspunkter (N/NØ/Ø/SØ/S/SV/V/NV) på radius (default 20 km), og
 rapporterer både snitt, verste og beste punkt.
 
 I CLI-utskriften vises de to nedbør-signalene som én **Nedbør**-rad
-(vektet 25:10 — slik som i totalen). Bryteren `(mengde X, sjanse Y)`
-dukker bare opp når de avviker mer enn 5 poeng — ellers er rommet bare
-støy.
+(vektet 25:10 — slik som i totalen).
 
 ## Installasjon
 
@@ -283,7 +281,7 @@ sjanse, bakken har 0.4 mm fra lett dusk i går.
 ```
 Temperatur     ████████████ 100
 Vind           ████████████ 100
-Nedbør         ████████████ 100   (mengde 100, sjanse 95)
+Nedbør         ████████████ 99
 Bakke          ████████████ 100
 Total          (15·100 + 20·100 + 25·100 + 10·95 + 30·100) / 100 = 99
 Label          Strålende
@@ -295,8 +293,7 @@ vinduet men 70 % sjanse, bakken litt våt fra i går (1.5 mm).
 ```
 Temperatur     ████████████ 100
 Vind           ████████░░░░  70   (snitt 6 m/s, mellom OK og POOR)
-Nedbør (mengde)  ████████████ 100
-Nedbør (sjanse)  ███░░░░░░░░░  30   (100 − 70)
+Nedbør         ██████████░░  80   (mengde 100 + sjanse 30, vektet 25:10)
 Bakke          █████████░░░  76   (lineær 100→0 fra 0.4 til 5.0 mm)
 Total          (15·100 + 20·70 + 25·100 + 10·30 + 30·76) / 100 = 79
 Label          Bra
@@ -318,8 +315,7 @@ bakken har vært bone-dry i 168 timer.
 ```
 Temperatur     █████████░░░  77   (varm-rampen mellom 22 og 35 °C)
 Vind           █████████░░░  80
-Nedbør (mengde)  ████████████ 100
-Nedbør (sjanse)  ████████████  95
+Nedbør         ████████████  99
 Bakke          █████████░░░  85   (95 dry-floor − 10 drought)
 Total          (15·77 + 20·80 + 25·100 + 10·95 + 30·85) / 100 = 87
 Label          Strålende

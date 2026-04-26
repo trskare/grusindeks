@@ -170,12 +170,12 @@ pub fn render_human(
 
     write_axis_row(&mut out, axis_label_long("temperature", lang), agg_temp, "");
     write_axis_row(&mut out, axis_label_long("wind", lang), agg_wind, "");
-    let (precip_combined, precip_detail) = combined_precip(agg_precip, agg_prob, lang);
+    let precip_combined = combined_precip(agg_precip, agg_prob, lang);
     write_axis_row(
         &mut out,
         axis_label_long("precipitation", lang),
         precip_combined,
-        &precip_detail,
+        "",
     );
     write_axis_row(&mut out, axis_label_long("ground", lang), agg_ground, "");
 
@@ -579,11 +579,7 @@ fn write_day_breakdown(
     let precip = avg_day_axis(day, |b| b.precipitation);
     let prob = avg_day_axis(day, |b| b.precip_probability);
     let ground = avg_day_axis(day, |b| b.ground);
-    // Capture the precip detail (`(mengde X, sjanse Y)`) so we can append
-    // it to the Nedbør row when amount and probability diverge — that's
-    // exactly the case where the combined number alone is misleading
-    // (e.g. 0 mm forecast but 50 % chance lands at ~85, not 100).
-    let (precip_combined, precip_detail) = combined_precip(precip, prob, lang);
+    let precip_combined = combined_precip(precip, prob, lang);
 
     let (temp_label, wind_label, precip_label, ground_label) = match lang {
         Language::Norwegian => ("Temp", "Vind", "Nedbør", "Bakke"),
@@ -592,7 +588,7 @@ fn write_day_breakdown(
     let rows: [(&str, u8, &str); 4] = [
         (temp_label, temp, ""),
         (wind_label, wind, ""),
-        (precip_label, precip_combined, precip_detail.as_str()),
+        (precip_label, precip_combined, ""),
         (ground_label, ground, ""),
     ];
     let last_idx = rows.len() - 1;
@@ -755,24 +751,16 @@ fn month(month: u32, lang: Language) -> &'static str {
     }
 }
 
-/// Combine the precipitation amount and probability sub-scores into one
-/// number plus an optional ` (amount X, chance Y)` suffix in the
-/// requested language.
-fn combined_precip(amount: u8, probability: u8, lang: Language) -> (u8, String) {
+/// Combine the precipitation amount and probability sub-scores into a
+/// single number using their scoring weights. The combined value is the
+/// only thing the renderer shows now — the previous
+/// `(mengde X, sjanse Y)` annotation was distracting more than it
+/// helped, so the detail is dropped entirely.
+fn combined_precip(amount: u8, probability: u8, _lang: Language) -> u8 {
     use grusindeks_core::score::thresholds::{W_PRECIP, W_PROB};
     let w_sum = u32::from(W_PRECIP) + u32::from(W_PROB);
-    let combined = ((u32::from(amount) * u32::from(W_PRECIP)
-        + u32::from(probability) * u32::from(W_PROB))
-        / w_sum) as u8;
-    let detail = if amount.abs_diff(probability) > 5 {
-        match lang {
-            Language::Norwegian => format!("  (mengde {amount}, sjanse {probability})"),
-            Language::Swedish => format!("  (mängd {amount}, chans {probability})"),
-        }
-    } else {
-        String::new()
-    };
-    (combined, detail)
+    ((u32::from(amount) * u32::from(W_PRECIP) + u32::from(probability) * u32::from(W_PROB)) / w_sum)
+        as u8
 }
 
 fn write_axis_row(out: &mut String, label: &str, value: u8, suffix: &str) {
@@ -915,18 +903,11 @@ mod tests {
     }
 
     #[test]
-    fn combined_precip_hides_breakdown_when_amount_and_probability_agree() {
-        let (combined, detail) = combined_precip(100, 100, Language::Norwegian);
-        assert_eq!(combined, 100);
-        assert!(detail.is_empty(), "got {detail:?}");
-    }
-
-    #[test]
-    fn combined_precip_shows_breakdown_when_amount_and_probability_diverge() {
-        let (combined, detail) = combined_precip(100, 40, Language::Norwegian);
-        assert!(detail.contains("mengde 100"), "got {detail:?}");
-        assert!(detail.contains("sjanse 40"), "got {detail:?}");
-        assert_eq!(combined, 82);
+    fn combined_precip_weights_amount_higher_than_probability() {
+        // 25:10 weighting from W_PRECIP / W_PROB. With amount=100,
+        // probability=40 we get (100*25 + 40*10) / 35 = 2900/35 = 82.
+        assert_eq!(combined_precip(100, 40, Language::Norwegian), 82);
+        assert_eq!(combined_precip(100, 100, Language::Norwegian), 100);
     }
 
     #[test]
