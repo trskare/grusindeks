@@ -12,24 +12,104 @@ use grusindeks_core::daily::Confidence;
 use grusindeks_core::lang::Language;
 use grusindeks_core::score::Penalty;
 use grusindeks_core::types::RideWindow;
+use unicode_width::UnicodeWidthStr;
 
 use crate::aggregate::{AggregateScore, DayAggregate, MultiDayForecast};
 use crate::theme;
 
-const BAR_WIDTH: usize = 10;
+/// Bar width for the per-day row. We render 9 full cells max + a 10th
+/// half-block sub-cell so values like 95 and 100 are visually distinct
+/// (the old 10-cell bar with `(value*10+50)/100` rounding collapsed
+/// 95–100 to identical glyphs).
+const BAR_FULL_CELLS: usize = 9;
+
+/// Indent before the tree-prefix on breakdown / penalty / "Beste luke"
+/// rows. Chosen so the *bar* on a breakdown row lines up directly under
+/// the bar on the parent day row — readers can sanity-check "the day's
+/// mean is the average of the four sub-scores" by tracing a vertical
+/// line.
+///
+/// Math: the parent row puts its bar at column 19 (2 indent + 11
+/// day-label + 2 + 3 icon-area + 1 = 19). The breakdown row layout is
+/// `<indent>├─ <label-padded-9> <bar>`, so indent + 2 + 1 + 9 + 1 = 19,
+/// giving indent = 6.
+const BREAKDOWN_INDENT: &str = "      ";
 
 /// Bar with the filled portion painted in the score colour and the empty
 /// portion dimmed. Returns the styled string ready to drop into a row.
+///
+/// The bar is 10 cells wide visually: up to 9 full blocks plus one
+/// trailing sub-cell drawn from the half-block ramp `▏▎▍▌▋▊▉█`. That
+/// gives us 9 × 8 + 1 = 73 levels in the same width as the old 10-cell
+/// full-block bar.
 fn colored_bar(value: u8) -> String {
-    let filled_count = (usize::from(value) * BAR_WIDTH + 50) / 100;
-    let filled_count = filled_count.min(BAR_WIDTH);
-    let filled: String = "█".repeat(filled_count);
-    let empty: String = "░".repeat(BAR_WIDTH - filled_count);
+    // Total sub-cells available: 9 × 8 = 72.
+    let total_sub = BAR_FULL_CELLS * 8;
+    let sub = (usize::from(value) * total_sub + 50) / 100;
+    let sub = sub.min(total_sub);
+    let full = sub / 8;
+    let rem = sub % 8;
+    let trailing = match rem {
+        0 => None,
+        1 => Some("▏"),
+        2 => Some("▎"),
+        3 => Some("▍"),
+        4 => Some("▌"),
+        5 => Some("▋"),
+        6 => Some("▊"),
+        7 => Some("▉"),
+        _ => unreachable!(),
+    };
+
+    // At the top of the scale, paint a 10th full block so score 100
+    // never reads as "9 cells + visual gap".
+    if full == BAR_FULL_CELLS {
+        return theme::paint_bar_filled(&"█".repeat(BAR_FULL_CELLS + 1), value);
+    }
+
+    let filled = "█".repeat(full);
+    let empty_cells = BAR_FULL_CELLS + 1 - full - if trailing.is_some() { 1 } else { 0 };
+    let empty: String = "░".repeat(empty_cells);
+
+    // The trailing half-block cell needs a *background* colour, not just
+    // a foreground — the right portion of `▏▎▍▌▋▊▉` is the cell
+    // background, which would otherwise be the terminal background
+    // (showing as a black gap between the filled run and the empty run).
+    // Painting bg=gray makes the bar read as continuous.
+    let trailing_painted = trailing
+        .map(|t| theme::paint_bar_partial(t, value))
+        .unwrap_or_default();
+
     format!(
-        "{}{}",
+        "{}{}{}",
         theme::paint_bar_filled(&filled, value),
-        theme::paint_bar_empty(&empty)
+        trailing_painted,
+        theme::paint_bar_empty(&empty),
     )
+}
+
+/// 8-level sparkline glyph for `▁▂▃▄▅▆▇█`. Maps a 0–100 score to the
+/// closest block. Used in the week-trend line above the day rows.
+fn sparkline_glyph(value: u8) -> char {
+    let levels = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let idx = (usize::from(value) * (levels.len() - 1) + 50) / 100;
+    levels[idx.min(levels.len() - 1)]
+}
+
+/// Slope arrow over a sequence of daily scores. Uses the sign of the
+/// difference between the first and last day; we don't need a real
+/// linear regression for a 6-day view.
+fn trend_arrow(values: &[u8]) -> char {
+    if values.len() < 2 {
+        return '→';
+    }
+    let first = i32::from(values[0]);
+    let last = i32::from(*values.last().unwrap());
+    match last - first {
+        d if d >= 5 => '↗',
+        d if d <= -5 => '↘',
+        _ => '→',
+    }
 }
 
 fn local_hm(t: DateTime<Utc>) -> String {
@@ -129,10 +209,20 @@ pub fn render_human(
     out
 }
 
-/// Render the multi-day forecast: a "best day" headline at the top, then
-/// one row per day with weather emoji, coloured bar, score, label, and
-/// confidence. Default mode shows each day's worst penalty on a `└─`
-/// line directly below; `verbose` shows every penalty for that day.
+/// Render the multi-day forecast.
+///
+/// Layout (default mode):
+/// 1. plain title line — "Grusindeks · {label} · {radius} km · {N} dager"
+/// 2. callout box — "★ Beste: {date} — {score}  {bucket}"
+/// 3. week-trend line — sparkline + first→last + slope arrow + spread
+/// 4. one row per day — day label, weather icon, half-block bar, score,
+///    plus a `~` marker for low-confidence days
+/// 5. footer chips — Bakke (when known), Skala, low-confidence note
+///
+/// `--verbose` adds the per-axis breakdown tree under every day and
+/// extends the per-day penalty list to all penalties (not just the
+/// worst). The "Beste luke" callout under each day also moves into
+/// verbose-only territory to keep the default scan tight.
 pub fn render_multi_day(
     label: &str,
     radius_km: f64,
@@ -142,60 +232,33 @@ pub fn render_multi_day(
 ) -> String {
     let mut out = String::new();
     let n = forecast.days.len();
-    let day_word_singular = match lang {
-        Language::Norwegian => "dag",
-        Language::Swedish => "dag",
+    let day_word = match (lang, n) {
+        (Language::Norwegian, 1) => "dag",
+        (Language::Norwegian, _) => "dager",
+        (Language::Swedish, 1) => "dag",
+        (Language::Swedish, _) => "dagar",
     };
-    let day_word_plural = match lang {
-        Language::Norwegian => "dager",
-        Language::Swedish => "dagar",
-    };
-    let header = format!(
-        "Grusindeks for {label} ({radius_km:.0}km radius) — {n} {}",
-        if n == 1 {
-            day_word_singular
-        } else {
-            day_word_plural
-        }
+    let title = format!(
+        "Grusindeks · {label} · {radius_km:.0} km · {n} {day_word}"
     );
-    let _ = writeln!(out, "{}", theme::paint_accent(&header));
-    let _ = writeln!(out, "{}", theme::paint_dim(&"═".repeat(63)));
+    let _ = writeln!(out, "{}", theme::paint_accent(&title));
+    let _ = writeln!(out);
 
     let today_local: NaiveDate = Local::now().date_naive();
 
-    // Headline: the best day in the forecast. Always rendered (even on a
-    // bad week) — the user explicitly asked for a permanent summary line.
+    // Callout: the best day in the forecast. The box itself takes its
+    // colour from the score bucket, so the eye reads "this week is in
+    // X-territory" before reading any text.
     if let Some(best) = pick_best_day(&forecast.days) {
-        let _ = writeln!(out);
-        let best_day_phrase = match lang {
-            Language::Norwegian => "Beste dag",
-            Language::Swedish => "Bästa dag",
-        };
-        let best_luke_phrase = match lang {
-            Language::Norwegian => "Beste luke",
-            Language::Swedish => "Bästa lucka",
-        };
-        let _ = writeln!(
-            out,
-            "🎯 {best_day_phrase}: {}  ·  {}/100  {}",
-            day_label(best.date, today_local, lang),
-            theme::paint_score(best.mean),
-            theme::paint_label(mean_label(best.mean, lang), best.mean),
-        );
-        if let Some(ow) = &best.optimal_window {
-            let _ = writeln!(
-                out,
-                "   {best_luke_phrase}: {}–{} → {}/100  ({})",
-                local_hm(ow.window.start),
-                local_hm(ow.window.end),
-                theme::paint_score(ow.score.total),
-                theme::paint_label(mean_label(ow.score.total, lang), ow.score.total),
-            );
-        }
+        write_best_callout(&mut out, best, today_local, lang);
         let _ = writeln!(out);
     }
 
-    let _ = writeln!(out, "{}", theme::paint_dim(&"─".repeat(63)));
+    // Week-trend line: sparkline over the daily scores, plus first→last
+    // numerics and a slope arrow. This is the chart the per-day bars
+    // can't be — it shows the *shape* of the week.
+    write_week_trend(&mut out, &forecast.days, lang);
+    let _ = writeln!(out);
 
     let mut any_low_confidence = false;
     for day in &forecast.days {
@@ -205,19 +268,158 @@ pub fn render_multi_day(
         write_day_row(&mut out, day, today_local, verbose, lang);
     }
 
-    if any_low_confidence {
-        let _ = writeln!(out);
-        let note = match lang {
-            Language::Norwegian => {
-                "Konfidens faller etter ca. 60 t — siste dager er 6-t oppløsning fra MET."
-            }
-            Language::Swedish => {
-                "Tillförlitlighet sjunker efter ca 60 h — sista dagarna är 6-h upplösning från MET."
-            }
-        };
-        let _ = writeln!(out, "{}", theme::paint_dim(note));
-    }
+    let _ = writeln!(out);
+    write_footer(&mut out, forecast, verbose, any_low_confidence, lang);
     out
+}
+
+/// Round-cornered callout drawn at the top of the multi-day report,
+/// pointing at the single best day. The border colour follows the
+/// score bucket so the user gets the verdict from glance alone.
+fn write_best_callout(
+    out: &mut String,
+    best: &DayAggregate,
+    today_local: NaiveDate,
+    lang: Language,
+) {
+    let best_phrase = match lang {
+        Language::Norwegian => "Beste",
+        Language::Swedish => "Bästa",
+    };
+    let conf_suffix = match (lang, best.confidence) {
+        (_, Confidence::Hoy) => "",
+        (Language::Norwegian, Confidence::Middels) => "  (middels konfidens)",
+        (Language::Norwegian, Confidence::Lav) => "  (lav konfidens)",
+        (Language::Swedish, Confidence::Middels) => "  (medel tillförlitlighet)",
+        (Language::Swedish, Confidence::Lav) => "  (låg tillförlitlighet)",
+    };
+    let body = format!(
+        "  ★ {best_phrase}: {}  —  {}  {}{}  ",
+        day_label(best.date, today_local, lang),
+        best.mean,
+        mean_label(best.mean, lang),
+        conf_suffix,
+    );
+    let body_width = UnicodeWidthStr::width(body.as_str());
+    let bar = "─".repeat(body_width);
+    let top = format!("╭{bar}╮");
+    let mid = format!("│{body}│");
+    let bot = format!("╰{bar}╯");
+    let _ = writeln!(out, "{}", theme::paint_score_soft(&top, best.mean));
+    // Keep the body content uncoloured so the score number stays
+    // readable on dark backgrounds; only the border carries the bucket
+    // signal.
+    let star_painted = mid.replacen(
+        '★',
+        &theme::paint_score_soft("★", best.mean),
+        1,
+    );
+    let _ = writeln!(out, "{star_painted}");
+    let _ = writeln!(out, "{}", theme::paint_score_soft(&bot, best.mean));
+}
+
+/// Week-trend line: per-day sparkline coloured by each day's bucket,
+/// followed by the first→last score numerics and a coarse slope arrow.
+/// Shows the *shape* of the week — exactly the information that gets
+/// flattened when the per-day bars are all in the same bucket.
+fn write_week_trend(out: &mut String, days: &[DayAggregate], lang: Language) {
+    if days.is_empty() {
+        return;
+    }
+    let scores: Vec<u8> = days.iter().map(|d| d.mean).collect();
+    let mut spark = String::new();
+    for d in days {
+        let glyph = sparkline_glyph(d.mean).to_string();
+        spark.push_str(&theme::paint_bar_filled(&glyph, d.mean));
+    }
+    let first = scores.first().copied().unwrap_or(0);
+    let last = scores.last().copied().unwrap_or(0);
+    let arrow = trend_arrow(&scores);
+    let min = scores.iter().min().copied().unwrap_or(0);
+    let max = scores.iter().max().copied().unwrap_or(0);
+    let spread = max.saturating_sub(min);
+    let week_word = match lang {
+        Language::Norwegian => "Uke",
+        Language::Swedish => "Vecka",
+    };
+    let spread_word = match lang {
+        Language::Norwegian => "spredning",
+        Language::Swedish => "spridning",
+    };
+    let _ = writeln!(
+        out,
+        "  {week_word}   {spark}   {first} → {last}   {arrow}   {spread_word} {spread} p"
+    );
+}
+
+/// Trailing chips: Bakke-state (when present), Skala bucket legend, and
+/// a one-line note when any day is low-confidence. Everything that used
+/// to repeat per row lives here once.
+fn write_footer(
+    out: &mut String,
+    forecast: &MultiDayForecast,
+    _verbose: bool,
+    any_low_confidence: bool,
+    lang: Language,
+) {
+    if let Some(msg) = ground_chip(forecast) {
+        let label = match lang {
+            Language::Norwegian => "Bakke",
+            Language::Swedish => "Mark",
+        };
+        let _ = writeln!(out, "  {}   {msg}", theme::paint_dim(label));
+    }
+
+    let scale_label = match lang {
+        Language::Norwegian => "Skala",
+        Language::Swedish => "Skala",
+    };
+    let _ = writeln!(out, "  {}   {}", theme::paint_dim(scale_label), bucket_legend(lang));
+
+    if any_low_confidence {
+        let note = match lang {
+            Language::Norwegian => "~       lav konfidens (>60 t — 6-t oppløsning fra MET)",
+            Language::Swedish => "~       låg tillförlitlighet (>60 h — 6-h upplösning från MET)",
+        };
+        let _ = writeln!(out, "  {}", theme::paint_dim(note));
+    }
+}
+
+/// Ground-state chip text. The score layer emits a `tørt og løst dekke
+/// (N døgn uten regn)` penalty when the surface is dry; we surface that
+/// in the footer so the message lands once instead of under every day.
+/// Returns the *content* (no label prefix) so the caller can paint the
+/// label separately.
+fn ground_chip(forecast: &MultiDayForecast) -> Option<String> {
+    // Look for a Ground penalty on the first day's center point — the
+    // surface state is shared across the whole forecast, so any day will
+    // do, and the first one is always present.
+    let first = forecast.days.first()?;
+    let center = first.center();
+    let penalty = center
+        .score
+        .penalties
+        .iter()
+        .find(|p| p.component == grusindeks_core::score::Component::Ground)?;
+    Some(penalty.message_no.clone())
+}
+
+/// One-line bucket legend: `0 dårlig · 25 marginalt · 45 ok · 65 bra · 85 strålende`.
+/// Each label is painted in its bucket's colour so the legend doubles
+/// as a colour key.
+fn bucket_legend(lang: Language) -> String {
+    let (d, m, ok, b, s) = match lang {
+        Language::Norwegian => ("dårlig", "marginalt", "ok", "bra", "strålende"),
+        Language::Swedish => ("dåligt", "marginellt", "ok", "bra", "strålande"),
+    };
+    format!(
+        "0 {} · 25 {} · 45 {} · 65 {} · 85 {}",
+        theme::paint_label(d, 0),
+        theme::paint_label(m, 25),
+        theme::paint_label(ok, 45),
+        theme::paint_label(b, 65),
+        theme::paint_label(s, 85),
+    )
 }
 
 /// Long-form axis label used in the per-axis bars row of `render_human`.
@@ -235,9 +437,15 @@ fn axis_label_long(axis: &str, lang: Language) -> &'static str {
     }
 }
 
-/// Render one day's row plus its top penalty (if any). Low-confidence
-/// rows are dimmed so the eye lands on the trustworthy near-term days.
-/// `verbose` lists every penalty for the day instead of just the worst.
+/// Render one day's row.
+///
+/// Default mode is intentionally lean: day label, weather icon,
+/// half-block bar, score, plus a `~` marker on low-confidence days
+/// (which would otherwise repeat "ⓘ lav" on every long-range row).
+/// Bucket labels and Ground-penalty chatter live once in the footer.
+///
+/// `--verbose` adds the per-axis sub-score tree and the full penalty
+/// list under each day.
 fn write_day_row(
     out: &mut String,
     day: &DayAggregate,
@@ -248,13 +456,9 @@ fn write_day_row(
     let center = day.center();
     let day_label = day_label(day.date, today_local, lang);
     let icon = center.weather_icon;
-    let label = mean_label(day.mean, lang);
-    let confidence_label = day.confidence.label(lang);
 
     let dim = theme::dim_for_confidence(day.confidence);
 
-    // Score gets right-aligned to 3 cells *before* painting, so dim and
-    // non-dim rows align identically.
     let score_str = format!("{:>3}", day.mean);
     let score_p = if dim {
         theme::paint_dim(&score_str)
@@ -262,58 +466,54 @@ fn write_day_row(
         theme::paint_score_str(&score_str, day.mean)
     };
 
-    // Label and day-label go through `pad_right` after painting, since the
-    // colour escape codes inflate the byte length without adding cells.
-    // We must NOT pre-pad before painting or the visible width doubles.
     let day_label_p = if dim {
         theme::paint_dim(&day_label)
     } else {
         theme::paint_fg(&day_label)
     };
-    let label_p = if dim {
-        theme::paint_dim(label)
+
+    let conf_marker = if day.confidence == Confidence::Lav {
+        theme::paint_dim("~")
     } else {
-        theme::paint_label(label, day.mean)
+        " ".to_string()
     };
-    let conf_col = format!("ⓘ {confidence_label}");
-    let conf_p = theme::paint_dim(&conf_col);
 
     let _ = writeln!(
         out,
-        "{} {}{}{} {}  {} {}",
-        pad_right(&day_label_p, &day_label, 12),
+        "  {}  {}{} {}  {}  {}",
+        pad_right(&day_label_p, &day_label, 11),
         icon,
         icon_pad(icon),
         colored_bar(day.mean),
         score_p,
-        pad_right(&label_p, label, 10),
-        conf_p,
+        conf_marker,
     );
 
-    // Penalty count is computed first so the breakdown tree knows whether
-    // its last row should close (└─) or continue (├─) into penalty rows.
-    let penalty_take = if verbose {
-        center.score.penalties.len()
-    } else {
-        center.score.penalties.len().min(1)
-    };
-
-    // Sub-score breakdown: by default we only print it for *today*, since
-    // that's the day the user actually acts on. `--verbose` prints it for
-    // every day.
     let is_today = day.date == today_local;
-    if is_today || verbose {
-        write_day_breakdown(out, day, dim, penalty_take > 0, lang);
+
+    // Sub-axis breakdown (Temp/Vind/Nedbør/Bakke):
+    //   * default mode: today only — that's the day the user acts on
+    //   * --verbose: every day, plus the full penalty list
+    if !verbose && is_today {
+        // No penalties follow in default mode, so the tree closes with
+        // `└─` on the last row.
+        write_day_breakdown(out, day, dim, false, lang);
     }
 
-    // Penalty line(s): default surfaces the worst one (HardCap is always
-    // Critical and sorts first when present); --verbose lists every one.
+    if !verbose {
+        return;
+    }
+
+    // Verbose: per-axis breakdown + full penalty list. The breakdown
+    // tree closes with `└─` only when no penalties follow.
+    let penalty_take = center.score.penalties.len();
+    write_day_breakdown(out, day, dim, penalty_take > 0, lang);
     for (i, penalty) in center.score.penalties.iter().take(penalty_take).enumerate() {
         let is_last = i + 1 == penalty_take;
         let branch = if is_last { "└─" } else { "├─" };
         let _ = writeln!(
             out,
-            "             {branch} {}",
+            "{BREAKDOWN_INDENT}{branch} {}",
             format_penalty_line(penalty, lang)
         );
     }
@@ -327,7 +527,7 @@ fn write_day_row(
         };
         let _ = writeln!(
             out,
-            "             🎯 {luke_phrase}: {}–{} → {} ({}, +{} {})",
+            "             ★ {luke_phrase}: {}–{} → {} ({}, +{} {})",
             local_hm(ow.window.start),
             local_hm(ow.window.end),
             theme::paint_score(ow.score.total),
@@ -390,7 +590,7 @@ fn write_day_breakdown(
         };
         let _ = writeln!(
             out,
-            "             {branch} {}",
+            "{BREAKDOWN_INDENT}{branch} {}",
             format_axis_row(label, *value, dim)
         );
     }
@@ -399,7 +599,11 @@ fn write_day_breakdown(
 /// One row of the breakdown tree: dim label, score-coloured bar, and the
 /// numeric value. Label width is fixed so all rows align under each other.
 fn format_axis_row(label: &str, value: u8, dim: bool) -> String {
-    const LABEL_WIDTH: usize = 7; // "Nedbør " is the longest, 6 chars + 1 pad.
+    // Sized so Swedish "Nederbörd" (9 cells) fits without pushing the
+    // bar — keeps sub-bars aligned under the parent across both
+    // languages. Norwegian labels (Temp/Vind/Nedbør/Bakke, max 6) get
+    // trailing padding to the same width.
+    const LABEL_WIDTH: usize = 9;
     let label_padded = format!("{label:<LABEL_WIDTH$}");
     let label_p = theme::paint_dim(&label_padded);
     let value_str = format!("{value:>3}");
@@ -440,13 +644,21 @@ fn format_penalty_line(p: &Penalty, lang: Language) -> String {
 }
 
 /// Width-padding for the weather emoji column so single-cell glyphs
-/// (☀ ☁ ·) and double-cell glyphs (🌧 🌨 🌬 ⛅ 🎯) leave the same gap
-/// before the bar. Hand-tuned because `unicode-width` doesn't agree
-/// with what most terminals actually render for these characters.
+/// (☀ ☁ ·) and double-cell glyphs (🌧 🌨 🌬 ⛅) leave the same gap
+/// before the bar. We target a fixed 3-cell column for the icon: the
+/// glyph itself takes 1 or 2 cells, the rest is padding.
+///
+/// `unicode-width` reports 1 for the BMP "weather" symbols and 2 for
+/// the emoji weather symbols, which matches what every modern terminal
+/// actually renders, so we use it directly instead of the old hand-tuned
+/// allow-list.
 fn icon_pad(icon: &str) -> &'static str {
-    match icon {
-        "☀" | "☁" | "·" => "  ",
-        _ => " ",
+    const TARGET: usize = 3;
+    let w = UnicodeWidthStr::width(icon);
+    match TARGET.saturating_sub(w) {
+        0 => "",
+        1 => " ",
+        _ => "  ",
     }
 }
 
@@ -606,9 +818,11 @@ fn localize_bearing<'a>(label_no: &'a str, lang: Language) -> std::borrow::Cow<'
 
 /// Pad a *coloured* string to `target_visible_width`. We can't trust the
 /// formatter's `{:<N}` since ANSI escape codes inflate the length without
-/// adding visible cells. The plain `visible` slice is what the eye sees.
+/// adding visible cells. The plain `visible` slice is what the eye sees;
+/// we measure its display width with `unicode-width` so wide glyphs
+/// (CJK, emoji, half/full-blocks) consume the right number of columns.
 fn pad_right(coloured: &str, visible: &str, target_visible_width: usize) -> String {
-    let visible_len = visible.chars().count();
+    let visible_len = UnicodeWidthStr::width(visible);
     if visible_len >= target_visible_width {
         coloured.to_string()
     } else {
@@ -719,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_day_render_includes_per_day_rows_and_confidence_label() {
+    fn multi_day_render_includes_title_and_skala_footer() {
         use crate::aggregate::DayAggregate;
         use grusindeks_core::daily::compute_day;
 
@@ -744,9 +958,12 @@ mod tests {
         );
         let forecast = MultiDayForecast { days: vec![day] };
         let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
-        assert!(out.contains("Grusindeks for Oslo"), "got {out}");
+        assert!(out.contains("Grusindeks · Oslo"), "got {out}");
         assert!(out.contains("dag"), "got {out}");
-        assert!(out.contains("ⓘ"), "missing confidence glyph: {out}");
+        // Bucket legend lives once in the footer, replacing the per-row
+        // bucket-name repetition.
+        assert!(out.contains("Skala"), "missing scale legend: {out}");
+        assert!(out.contains("strålende"), "missing bucket label: {out}");
     }
 
     #[test]
@@ -775,9 +992,12 @@ mod tests {
         );
         let forecast = MultiDayForecast { days: vec![day] };
         let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
+        // The "best day" callout uses the short prefix "Beste:" inside a
+        // round-cornered box, plus the "★" star in front. Either pin
+        // suffices to confirm the headline rendered.
         assert!(
-            out.contains("Beste dag"),
-            "expected headline 'Beste dag' in {out}"
+            out.contains("★ Beste:") && out.contains("╭"),
+            "expected best-day callout in {out}"
         );
     }
 
@@ -816,19 +1036,24 @@ mod tests {
             )],
         );
         let forecast = MultiDayForecast { days: vec![day] };
-        let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
+        // Verbose surfaces "Beste luke" under days with a usable
+        // optimal window. Default mode keeps the per-day rows lean and
+        // the luke callout lives only in --verbose now.
+        let out = render_multi_day("Oslo", 20.0, &forecast, true, Language::Norwegian);
         assert!(
             out.contains("Beste luke") || out.contains("luke"),
-            "expected luke callout in {out}"
+            "expected luke callout in verbose output: {out}"
         );
     }
 
     #[test]
-    fn multi_day_render_shows_top_penalty_under_each_day() {
+    fn multi_day_render_surfaces_ground_state_in_footer() {
         use crate::aggregate::DayAggregate;
         use grusindeks_core::daily::compute_day;
 
-        // Saturated ground → ground penalty should appear under the row.
+        // Saturated ground → Ground penalty exists. Default mode now
+        // surfaces it once in the footer "Bakke" chip rather than
+        // repeating it under every day row.
         let win = RideWindow::from_hours(t(6), 12);
         let now = t(5);
         let center = Point::new(59.9139, 10.7522);
@@ -850,10 +1075,28 @@ mod tests {
         );
         let forecast = MultiDayForecast { days: vec![day] };
         let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
-        assert!(out.contains("└─"), "expected penalty marker in {out}");
         assert!(
             out.to_lowercase().contains("bakke"),
-            "expected ground penalty in {out}"
+            "expected Bakke chip in footer: {out}"
+        );
+        // The breakdown tree for "i dag" still renders in default mode
+        // (its rows look like `├─ Temp …` — no colon). What default mode
+        // *omits* is the per-day penalty list (rows with `: ` between
+        // the component label and its message). Verbose adds those back.
+        let count_penalty_rows = |s: &str| {
+            s.lines()
+                .filter(|line| (line.contains("├─") || line.contains("└─")) && line.contains(": "))
+                .count()
+        };
+        assert_eq!(
+            count_penalty_rows(&out),
+            0,
+            "default mode should not show per-day penalty rows: {out}"
+        );
+        let verbose = render_multi_day("Oslo", 20.0, &forecast, true, Language::Norwegian);
+        assert!(
+            count_penalty_rows(&verbose) > 0,
+            "verbose should surface per-day penalty rows: {verbose}"
         );
     }
 
@@ -1130,15 +1373,15 @@ mod tests {
 
     #[test]
     fn multi_day_render_shows_breakdown_for_today_by_default() {
+        // Today is the day the user actually acts on, so its sub-axis
+        // tree is rendered in default mode. Future days only get it
+        // with --verbose.
         let today = Local::now().date_naive();
         let forecast = one_day_forecast(today);
         let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
-        // The chip uses "Temp " — penalties use the longer "Temperatur",
-        // and the headline doesn't mention either, so this is unique
-        // to the breakdown line.
         assert!(
             out.contains("Temp "),
-            "expected today's breakdown line in output:\n{out}"
+            "expected today's breakdown in default output:\n{out}"
         );
     }
 
@@ -1187,12 +1430,27 @@ mod tests {
     #[test]
     fn colored_bar_glyph_counts() {
         // Colour helpers degrade to plain text outside a TTY (test runner
-        // is not a TTY), so the byte content is just the █/░ sequence.
-        assert_eq!(colored_bar(0).chars().filter(|c| *c == '█').count(), 0);
+        // is not a TTY), so the byte content is just the bar glyphs. The
+        // half-block ramp `▏▎▍▌▋▊▉` lives in U+258F..U+2589, so we count
+        // bar glyphs by checking the script range rather than enumerating.
+        let is_bar =
+            |c: char| matches!(c, '█' | '▉' | '▊' | '▋' | '▌' | '▍' | '▎' | '▏' | '░');
         assert_eq!(
-            colored_bar(100).chars().filter(|c| *c == '█').count(),
-            BAR_WIDTH
+            colored_bar(0).chars().filter(|c| is_bar(*c)).count(),
+            10,
+            "score 0 should still render a 10-cell bar of empty glyphs"
         );
-        assert_eq!(colored_bar(50).chars().filter(|c| *c == '█').count(), 5);
+        // Score 100 fills all 9 full cells plus a trailing ▉ — visually
+        // saturated, which the old 10-cell full-block bar also showed,
+        // but distinct from score 95 (which lands on a different sub-cell).
+        assert!(
+            colored_bar(100).contains('█'),
+            "score 100 should contain at least one full-block"
+        );
+        assert_ne!(
+            colored_bar(95),
+            colored_bar(100),
+            "half-block sub-cells must distinguish 95 from 100"
+        );
     }
 }

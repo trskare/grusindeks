@@ -176,9 +176,11 @@ radius_km = 20.0
         .args(["score", "--place", "oslo", "--days", "5"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Grusindeks for oslo"))
+        .stdout(predicate::str::contains("Grusindeks · oslo"))
         .stdout(predicate::str::contains("dager"))
-        .stdout(predicate::str::contains("ⓘ"));
+        // The bucket legend chip lives once in the footer; pin against
+        // it instead of the old per-row "ⓘ" glyph that has been removed.
+        .stdout(predicate::str::contains("Skala"));
 }
 
 #[tokio::test]
