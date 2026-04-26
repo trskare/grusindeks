@@ -243,9 +243,7 @@ pub fn render_multi_day(
         (Language::Swedish, 1) => "dag",
         (Language::Swedish, _) => "dagar",
     };
-    let title = format!(
-        "Grusindeks · {label} · {radius_km:.0} km · {n} {day_word}"
-    );
+    let title = format!("Grusindeks · {label} · {radius_km:.0} km · {n} {day_word}");
     let _ = writeln!(out, "{}", theme::paint_accent(&title));
     let _ = writeln!(out);
 
@@ -314,11 +312,7 @@ fn write_best_callout(
     // Keep the body content uncoloured so the score number stays
     // readable on dark backgrounds; only the border carries the bucket
     // signal.
-    let star_painted = mid.replacen(
-        '★',
-        &theme::paint_score_soft("★", best.mean),
-        1,
-    );
+    let star_painted = mid.replacen('★', &theme::paint_score_soft("★", best.mean), 1);
     let _ = writeln!(out, "{star_painted}");
     let _ = writeln!(out, "{}", theme::paint_score_soft(&bot, best.mean));
 }
@@ -379,7 +373,12 @@ fn write_footer(
         Language::Norwegian => "Skala",
         Language::Swedish => "Skala",
     };
-    let _ = writeln!(out, "  {}   {}", theme::paint_dim(scale_label), bucket_legend(lang));
+    let _ = writeln!(
+        out,
+        "  {}   {}",
+        theme::paint_dim(scale_label),
+        bucket_legend(lang)
+    );
 
     if any_low_confidence {
         let note = match lang {
@@ -874,7 +873,7 @@ mod tests {
         let s = score(
             &(14..17).map(perfect).collect::<Vec<_>>(),
             win,
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         let center = Point::new(59.9139, 10.7522);
@@ -899,7 +898,12 @@ mod tests {
         let hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions::minimal(t(h), 17.0, 9.0, 0.0))
             .collect();
-        let s = score(&hours, win, SurfaceState::default(), Language::Norwegian);
+        let s = score(
+            &hours,
+            win,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
         let center = Point::new(59.9139, 10.7522);
         let agg = AggregateScore::from_points(center, vec![(center, s)]);
         let out = render_human("Oslo", 20.0, win, &agg, false, Language::Norwegian);
@@ -967,7 +971,7 @@ mod tests {
                 compute_day(
                     &hours,
                     win,
-                    SurfaceState::default(),
+                    Some(SurfaceState::default()),
                     now,
                     Language::Norwegian,
                 ),
@@ -1001,7 +1005,7 @@ mod tests {
                 compute_day(
                     &hours,
                     win,
-                    SurfaceState::default(),
+                    Some(SurfaceState::default()),
                     now,
                     Language::Norwegian,
                 ),
@@ -1046,7 +1050,7 @@ mod tests {
                 compute_day(
                     &hours,
                     win,
-                    SurfaceState::default(),
+                    Some(SurfaceState::default()),
                     now,
                     Language::Norwegian,
                 ),
@@ -1084,7 +1088,7 @@ mod tests {
                 compute_day(
                     &hours,
                     win,
-                    SurfaceState::new(5.0),
+                    Some(SurfaceState::new(5.0)),
                     now,
                     Language::Norwegian,
                 ),
@@ -1130,7 +1134,12 @@ mod tests {
                 ..HourlyConditions::minimal(t(h), 9.0, 16.0, 0.5)
             })
             .collect();
-        let s = score(&hours, win, SurfaceState::new(3.0), Language::Norwegian);
+        let s = score(
+            &hours,
+            win,
+            Some(SurfaceState::new(3.0)),
+            Language::Norwegian,
+        );
         let center = Point::new(59.9139, 10.7522);
         let agg = AggregateScore::from_points(center, vec![(center, s)]);
         eprintln!(
@@ -1202,7 +1211,7 @@ mod tests {
                     compute_day(
                         &hours,
                         win,
-                        SurfaceState::new(1.0),
+                        Some(SurfaceState::new(1.0)),
                         now,
                         Language::Norwegian,
                     ),
@@ -1245,7 +1254,7 @@ mod tests {
                 compute_day(
                     &hours,
                     win,
-                    SurfaceState::new(5.0),
+                    Some(SurfaceState::new(5.0)),
                     now,
                     Language::Norwegian,
                 ),
@@ -1294,7 +1303,7 @@ mod tests {
                 compute_day(
                     &hours,
                     win,
-                    SurfaceState::default(),
+                    Some(SurfaceState::default()),
                     now,
                     Language::Norwegian,
                 ),
@@ -1313,7 +1322,7 @@ mod tests {
         let dummy_score = score(
             &[] as &[HourlyConditions],
             win,
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         let day_score = DayScore {
@@ -1450,8 +1459,7 @@ mod tests {
         // is not a TTY), so the byte content is just the bar glyphs. The
         // half-block ramp `▏▎▍▌▋▊▉` lives in U+258F..U+2589, so we count
         // bar glyphs by checking the script range rather than enumerating.
-        let is_bar =
-            |c: char| matches!(c, '█' | '▉' | '▊' | '▋' | '▌' | '▍' | '▎' | '▏' | '▒');
+        let is_bar = |c: char| matches!(c, '█' | '▉' | '▊' | '▋' | '▌' | '▍' | '▎' | '▏' | '▒');
         assert_eq!(
             colored_bar(0).chars().filter(|c| is_bar(*c)).count(),
             10,

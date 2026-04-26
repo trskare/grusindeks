@@ -278,18 +278,12 @@ const DEFAULT_FORECAST_DAYS: u8 = 6;
 /// history and dragging the score with it just produces a fictional
 /// number. If the clipped today-window has zero hours left (running at
 /// midnight exactly), today is dropped from the forecast.
-fn build_day_windows(
-    start_date: NaiveDate,
-    n: u8,
-    now: DateTime<Utc>,
-) -> Result<Vec<DayWindow>> {
+fn build_day_windows(start_date: NaiveDate, n: u8, now: DateTime<Utc>) -> Result<Vec<DayWindow>> {
     let mut out = Vec::with_capacity(n as usize);
     for offset in 0..i64::from(n) {
         let date = start_date + ChronoDuration::days(offset);
         let day_start = local_to_utc(date.and_time(NaiveTime::MIN))?;
-        let day_end = local_to_utc(
-            (date + ChronoDuration::days(1)).and_time(NaiveTime::MIN),
-        )?;
+        let day_end = local_to_utc((date + ChronoDuration::days(1)).and_time(NaiveTime::MIN))?;
         // Clip "today" so the window starts at `now` rather than at
         // local midnight that's already in the past.
         let start = if day_start < now && now < day_end {
@@ -304,7 +298,10 @@ fn build_day_windows(
         }
         out.push(DayWindow {
             date,
-            window: RideWindow { start, end: day_end },
+            window: RideWindow {
+                start,
+                end: day_end,
+            },
         });
     }
     Ok(out)

@@ -233,13 +233,13 @@ mod tests {
         let good = score(
             &(14..17).map(perfect).collect::<Vec<_>>(),
             win,
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         let bad = score(
             &(14..17).map(awful).collect::<Vec<_>>(),
             win,
-            SurfaceState::new(4.5),
+            Some(SurfaceState::new(4.5)),
             Language::Norwegian,
         );
         let center = Point::new(59.9139, 10.7522);
@@ -263,7 +263,7 @@ mod tests {
         let good = score(
             &(14..17).map(perfect).collect::<Vec<_>>(),
             win,
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         let center = Point::new(59.9139, 10.7522);
@@ -295,7 +295,7 @@ mod tests {
                     compute_day(
                         &hourly,
                         win,
-                        SurfaceState::default(),
+                        Some(SurfaceState::default()),
                         now,
                         Language::Norwegian,
                     ),
@@ -305,7 +305,7 @@ mod tests {
                     compute_day(
                         &six_hourly,
                         win,
-                        SurfaceState::default(),
+                        Some(SurfaceState::default()),
                         now,
                         Language::Norwegian,
                     ),
@@ -341,7 +341,7 @@ mod tests {
                     compute_day(
                         &center_hours,
                         win,
-                        SurfaceState::default(),
+                        Some(SurfaceState::default()),
                         now,
                         Language::Norwegian,
                     ),
@@ -351,7 +351,7 @@ mod tests {
                     compute_day(
                         &other_hours,
                         win,
-                        SurfaceState::default(),
+                        Some(SurfaceState::default()),
                         now,
                         Language::Norwegian,
                     ),
@@ -371,7 +371,7 @@ mod tests {
         let good = score(
             &(14..17).map(perfect).collect::<Vec<_>>(),
             win,
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         let center = Point::new(59.9139, 10.7522);

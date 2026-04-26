@@ -99,14 +99,15 @@ pub const DEFAULT_OPTIMAL_WINDOW_HOURS: i64 = 3;
 /// Compute the `DayScore` for the given `day_window`.
 ///
 /// `now` is used to compute the forecast horizon for confidence.
-/// `surface` is the drying-model state at the start of the window — both
-/// the accumulated surface water and the hours-since-meaningful-rain
-/// counter feed into scoring. `lang` controls the language of the
-/// embedded `Grusindeks` label and penalty messages.
+/// `surface` is the drying-model state at the start of the window. Pass
+/// `None` when no historic observations are available — the score's
+/// ground axis then falls back to a neutral, "we don't know" value
+/// rather than pretending the gravel is bone-dry. `lang` controls the
+/// language of the embedded `Grusindeks` label and penalty messages.
 pub fn compute_day(
     hours: &[HourlyConditions],
     day_window: RideWindow,
-    surface: SurfaceState,
+    surface: Option<SurfaceState>,
     now: DateTime<Utc>,
     lang: Language,
 ) -> DayScore {
@@ -203,7 +204,7 @@ pub fn find_best_window(
     hours: &[HourlyConditions],
     day_window: RideWindow,
     length_hours: i64,
-    surface: SurfaceState,
+    surface: Option<SurfaceState>,
     lang: Language,
 ) -> Option<OptimalWindow> {
     if length_hours <= 0 || day_window.duration_hours() < length_hours {
@@ -325,8 +326,14 @@ mod tests {
         hours.extend((15..20).map(|h| nice_hour(t(2026, 4, 26, h))));
         let day = day_window(6, 14); // 06..20
 
-        let ow = find_best_window(&hours, day, 3, SurfaceState::default(), Language::Norwegian)
-            .expect("non-empty");
+        let ow = find_best_window(
+            &hours,
+            day,
+            3,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        )
+        .expect("non-empty");
         let start_h = ow.window.start.format("%H").to_string();
         assert!(
             ["06", "07", "15", "16", "17"].contains(&start_h.as_str()),
@@ -342,8 +349,14 @@ mod tests {
         // No improvement possible — every window scores ~the same.
         let hours: Vec<HourlyConditions> = (6..18).map(|h| nice_hour(t(2026, 4, 26, h))).collect();
         let day = day_window(6, 12);
-        let ow =
-            find_best_window(&hours, day, 3, SurfaceState::default(), Language::Norwegian).unwrap();
+        let ow = find_best_window(
+            &hours,
+            day,
+            3,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        )
+        .unwrap();
         assert_eq!(
             ow.improvement, 0,
             "uniform perfect day should yield zero improvement"
@@ -354,20 +367,28 @@ mod tests {
     fn best_window_returns_none_when_day_shorter_than_length() {
         let hours: Vec<HourlyConditions> = (6..8).map(|h| nice_hour(t(2026, 4, 26, h))).collect();
         let day = day_window(6, 2);
-        assert!(
-            find_best_window(&hours, day, 3, SurfaceState::default(), Language::Norwegian)
-                .is_none()
-        );
+        assert!(find_best_window(
+            &hours,
+            day,
+            3,
+            Some(SurfaceState::default()),
+            Language::Norwegian
+        )
+        .is_none());
     }
 
     #[test]
     fn best_window_returns_none_when_no_hours_in_window() {
         let hours: Vec<HourlyConditions> = (6..9).map(|h| nice_hour(t(2026, 4, 27, h))).collect(); // wrong day
         let day = day_window(6, 12);
-        assert!(
-            find_best_window(&hours, day, 3, SurfaceState::default(), Language::Norwegian)
-                .is_none()
-        );
+        assert!(find_best_window(
+            &hours,
+            day,
+            3,
+            Some(SurfaceState::default()),
+            Language::Norwegian
+        )
+        .is_none());
     }
 
     // ---- compute_day ----
@@ -383,7 +404,7 @@ mod tests {
         let ds = compute_day(
             &hours,
             day,
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             now,
             Language::Norwegian,
         );
@@ -403,7 +424,7 @@ mod tests {
         let ds = compute_day(
             &hours,
             day,
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             now,
             Language::Norwegian,
         );
@@ -423,7 +444,7 @@ mod tests {
         let ds = compute_day(
             &day_hours,
             day,
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             now,
             Language::Norwegian,
         );
@@ -439,7 +460,7 @@ mod tests {
         let ds = compute_day(
             &day_hours,
             day,
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             now,
             Language::Norwegian,
         );
@@ -455,7 +476,7 @@ mod tests {
         let ds = compute_day(
             &day_hours,
             day,
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             now,
             Language::Norwegian,
         );
@@ -472,7 +493,7 @@ mod tests {
         let ds = compute_day(
             &day_hours,
             day,
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             now,
             Language::Norwegian,
         );
@@ -487,7 +508,7 @@ mod tests {
         let ds = compute_day(
             &hours,
             day,
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             now,
             Language::Norwegian,
         );
@@ -618,7 +639,13 @@ mod tests {
             .collect();
         let day = day_window(6, 12);
         let now = t(2026, 4, 26, 5);
-        let ds = compute_day(&hs, day, SurfaceState::default(), now, Language::Norwegian);
+        let ds = compute_day(
+            &hs,
+            day,
+            Some(SurfaceState::default()),
+            now,
+            Language::Norwegian,
+        );
         assert_eq!(ds.weather_icon, "☀");
     }
 }

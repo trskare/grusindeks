@@ -73,6 +73,19 @@ pub mod thresholds {
     pub const fn weights_sum() -> u8 {
         W_TEMP + W_WIND + W_PRECIP + W_PROB + W_GROUND
     }
+
+    // Compile-time guards: any change to a weight or to the drought
+    // window that violates the invariants below fails the build instead
+    // of producing a quietly wrong score.
+    const _: () = assert!(weights_sum() == 100, "Grusindeks weights must sum to 100",);
+    const _: () = assert!(
+        DROUGHT_FULL_HOURS > DROUGHT_TRIGGER_HOURS,
+        "drought ramp window must be positive (full > trigger)",
+    );
+    const _: () = assert!(
+        GROUND_OPTIMAL_MM < GROUND_SATURATED,
+        "ground optimum must lie below the saturation cap",
+    );
 }
 
 /// Per-axis 0–100 sub-scores. Useful for the `--verbose` breakdown.
@@ -134,19 +147,43 @@ pub struct Grusindeks {
     pub penalties: Vec<Penalty>,
 }
 
-/// Compute the Grusindeks for the slice of `hours` that overlap `window`,
-/// given the current `surface` state (from the drying model — accumulated
-/// surface water plus hours-since-meaningful-rain for drought detection).
+/// Sub-score used for the ground axis when no historic surface
+/// observations are available (e.g. the user hasn't configured Frost, or
+/// the Frost call failed). Sits between the dry-floor (95) and saturated
+/// (0) so we don't reward a place we can't actually evaluate, while still
+/// not punishing it harder than the worst real ground we'd score.
+pub const GROUND_UNKNOWN_SCORE: u8 = 80;
+
+/// Compute the Grusindeks for the slice of `hours` that overlap `window`.
+///
+/// `surface` is the drying-model state (accumulated surface water +
+/// hours-since-meaningful-rain). Pass `None` to indicate that no historic
+/// observations were available — the ground axis then uses
+/// [`GROUND_UNKNOWN_SCORE`] and emits an informational ground penalty so
+/// the rendered explanation doesn't pretend the score is fully informed.
+///
 /// `lang` controls the language of the human-readable label and penalty
 /// messages.
 pub fn score(
     hours: &[HourlyConditions],
     window: RideWindow,
-    surface: SurfaceState,
+    surface: Option<SurfaceState>,
     lang: Language,
 ) -> Grusindeks {
-    let in_window: Vec<&HourlyConditions> =
-        hours.iter().filter(|h| window.contains(h.time)).collect();
+    // Filter on the time window AND drop poisoned readings up front: a
+    // single NaN in temperature/wind/precip would otherwise propagate
+    // through `mean_*` and turn into either a wrong score or a panic
+    // inside `clamp`. The optional fields (humidity, gust, prob, etc.)
+    // are guarded individually further down.
+    let in_window: Vec<&HourlyConditions> = hours
+        .iter()
+        .filter(|h| {
+            window.contains(h.time)
+                && h.temperature_c.is_finite()
+                && h.wind_speed_ms.is_finite()
+                && h.precipitation_mm.is_finite()
+        })
+        .collect();
 
     // Mean of the relevant signals over the window. Empty input: fall back
     // to a single neutral hour so the score is well-defined.
@@ -174,13 +211,19 @@ pub fn score(
     let max_gust_opt = max_gust.is_finite().then_some(max_gust);
     let max_prob_opt = max_prob.is_finite().then_some(max_prob);
 
-    let raw_ground = ground_subscore(surface.accumulated_mm);
+    let ground = match surface {
+        Some(s) => apply_drought_penalty(
+            ground_subscore(s.accumulated_mm),
+            s.hours_since_meaningful_rain,
+        ),
+        None => GROUND_UNKNOWN_SCORE,
+    };
     let breakdown = ScoreBreakdown {
         temperature: temp_subscore(mean_temp),
         wind: wind_subscore(mean_wind, max_gust_opt),
         precipitation: precip_subscore(mean_precip),
         precip_probability: precip_prob_subscore(max_prob_opt),
-        ground: apply_drought_penalty(raw_ground, surface.hours_since_meaningful_rain),
+        ground,
     };
 
     let weighted = u32::from(breakdown.temperature) * u32::from(thresholds::W_TEMP)
@@ -212,11 +255,20 @@ pub fn score(
     if let Some(p) = prob_penalty(breakdown.precip_probability, max_prob_opt, lang) {
         penalties.push(p);
     }
-    if let Some(p) = ground_penalty(breakdown.ground, surface.accumulated_mm, lang) {
-        penalties.push(p);
-    }
-    if let Some(p) = drought_penalty(breakdown.ground, surface, lang) {
-        penalties.push(p);
+    match surface {
+        Some(s) => {
+            if let Some(p) = ground_penalty(breakdown.ground, s.accumulated_mm, lang) {
+                penalties.push(p);
+            }
+            if let Some(p) = drought_penalty(breakdown.ground, s, lang) {
+                penalties.push(p);
+            }
+        }
+        None => {
+            if let Some(p) = ground_unknown_penalty(lang) {
+                penalties.push(p);
+            }
+        }
     }
     if hard_capped {
         if max_precip.is_finite() && max_precip > thresholds::HARD_CAP_PRECIP_MM_PER_HOUR {
@@ -390,6 +442,23 @@ fn ground_penalty(subscore: u8, ground_water_mm: f64, lang: Language) -> Option<
     })
 }
 
+/// Informational penalty surfaced when no historic Frost observations
+/// were available — flags to the user that the ground axis is a guess
+/// rather than a calculation, even though the ride-day weather was
+/// scored normally. Always Minor since it doesn't actually mean the
+/// ground is bad — just that we couldn't observe it.
+fn ground_unknown_penalty(lang: Language) -> Option<Penalty> {
+    let message_no = match lang {
+        Language::Norwegian => "bakketilstand ukjent (ingen Frost-observasjoner)".to_string(),
+        Language::Swedish => "underlag okänt (inga Frost-observationer)".to_string(),
+    };
+    Some(Penalty {
+        component: Component::Ground,
+        severity: Severity::Minor,
+        message_no,
+    })
+}
+
 /// Drought-side counterpart to `ground_penalty`. Surfaces a Minor Penalty
 /// when the surface has been parched long enough that the ground
 /// subscore actually got knocked down by `apply_drought_penalty`. Skipped
@@ -463,6 +532,9 @@ pub fn temp_subscore(t: f64) -> u8 {
 /// `GUST_PENALTY` points (saturating).
 pub fn wind_subscore(mean_ms: f64, gust_ms: Option<f64>) -> u8 {
     use thresholds::*;
+    if !mean_ms.is_finite() {
+        return 0;
+    }
     let base: i32 = if mean_ms <= WIND_PERFECT_MAX {
         100
     } else if mean_ms <= WIND_OK_MAX {
@@ -490,7 +562,9 @@ pub fn wind_subscore(mean_ms: f64, gust_ms: Option<f64>) -> u8 {
     };
 
     let gust_penalty = match gust_ms {
-        Some(g) if mean_ms > 0.0 && g > GUST_RATIO_THRESHOLD * mean_ms => GUST_PENALTY,
+        Some(g) if g.is_finite() && mean_ms > 0.0 && g > GUST_RATIO_THRESHOLD * mean_ms => {
+            GUST_PENALTY
+        }
         _ => 0,
     };
 
@@ -500,6 +574,9 @@ pub fn wind_subscore(mean_ms: f64, gust_ms: Option<f64>) -> u8 {
 /// Mean precipitation intensity (mm/h) over the ride window.
 pub fn precip_subscore(mm_per_hour: f64) -> u8 {
     use thresholds::*;
+    if !mm_per_hour.is_finite() {
+        return 0;
+    }
     if mm_per_hour <= 0.0 {
         100
     } else if mm_per_hour <= PRECIP_DRIZZLE {
@@ -518,11 +595,13 @@ pub fn precip_subscore(mm_per_hour: f64) -> u8 {
     }
 }
 
-/// `100 - probability_of_precipitation`. Missing data is neutral (50).
+/// `100 - probability_of_precipitation`. Missing data is neutral (50);
+/// non-finite probability is treated as missing rather than poisoning the
+/// score with a NaN cast.
 pub fn precip_prob_subscore(prob_pct: Option<f64>) -> u8 {
     match prob_pct {
-        Some(p) => (100.0 - p.clamp(0.0, 100.0)).round() as u8,
-        None => 50,
+        Some(p) if p.is_finite() => (100.0 - p.clamp(0.0, 100.0)).round() as u8,
+        _ => 50,
     }
 }
 
@@ -533,6 +612,9 @@ pub fn precip_prob_subscore(prob_pct: Option<f64>) -> u8 {
 /// Past optimum, the curve drops linearly to 0 at `GROUND_SATURATED`.
 pub fn ground_subscore(accumulated_mm: f64) -> u8 {
     use thresholds::*;
+    if !accumulated_mm.is_finite() {
+        return GROUND_DRY_FLOOR_SCORE;
+    }
     if accumulated_mm <= 0.0 {
         GROUND_DRY_FLOOR_SCORE
     } else if accumulated_mm < GROUND_OPTIMAL_MM {
@@ -556,7 +638,9 @@ pub fn ground_subscore(accumulated_mm: f64) -> u8 {
 /// total ground-axis loss caps at ~15 points.
 pub fn apply_drought_penalty(ground_score: u8, hours_since_meaningful_rain: f64) -> u8 {
     use thresholds::*;
-    if hours_since_meaningful_rain <= DROUGHT_TRIGGER_HOURS {
+    if !hours_since_meaningful_rain.is_finite()
+        || hours_since_meaningful_rain <= DROUGHT_TRIGGER_HOURS
+    {
         return ground_score;
     }
     let span = DROUGHT_FULL_HOURS - DROUGHT_TRIGGER_HOURS;
@@ -566,9 +650,11 @@ pub fn apply_drought_penalty(ground_score: u8, hours_since_meaningful_rain: f64)
 }
 
 /// Linear interpolation that saturates outside `[x_lo, x_hi]`. Returns
-/// `y_lo` at `x_lo` and `y_hi` at `x_hi`.
+/// `y_lo` at `x_lo` and `y_hi` at `x_hi`. Non-finite `x` short-circuits
+/// to `y_lo` so callers don't need to repeat the guard themselves and
+/// `clamp` never sees a NaN (which would panic in debug builds).
 fn lerp_clamped(x: f64, x_lo: f64, x_hi: f64, y_lo: u8, y_hi: u8) -> u8 {
-    if x <= x_lo {
+    if !x.is_finite() || x <= x_lo {
         return y_lo;
     }
     if x >= x_hi {
@@ -726,7 +812,7 @@ mod tests {
         let s = score(
             &hours,
             RideWindow::from_hours(t(14), 3),
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Swedish,
         );
         assert_eq!(s.label, "Strålande");
@@ -740,7 +826,7 @@ mod tests {
         let s = score(
             &hours,
             RideWindow::from_hours(t(14), 3),
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Swedish,
         );
         let crit = s
@@ -771,7 +857,7 @@ mod tests {
         let s = score(
             &hours,
             RideWindow::from_hours(t(14), 3),
-            surface,
+            Some(surface),
             Language::Swedish,
         );
         let drought = s
@@ -790,7 +876,12 @@ mod tests {
     fn perfect_conditions_yield_high_score() {
         let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         let window = RideWindow::from_hours(t(14), 3);
-        let s = score(&hours, window, SurfaceState::default(), Language::Norwegian);
+        let s = score(
+            &hours,
+            window,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
         assert!(!s.hard_capped);
         // Temp=100, wind=100, precip=100, prob=95, ground=95 (lett-fuktig
         // optimum sits at 0.4 mm; 0 mm scores GROUND_DRY_FLOOR_SCORE = 95).
@@ -804,7 +895,12 @@ mod tests {
         let mut hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         hours[1].precipitation_mm = 6.0; // > 5 mm/h hard-cap threshold
         let window = RideWindow::from_hours(t(14), 3);
-        let s = score(&hours, window, SurfaceState::default(), Language::Norwegian);
+        let s = score(
+            &hours,
+            window,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
         assert!(s.hard_capped);
         assert!(s.total <= thresholds::HARD_CAP_TOTAL);
     }
@@ -814,7 +910,12 @@ mod tests {
         let mut hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         hours[2].wind_speed_ms = 18.0; // > 15 m/s
         let window = RideWindow::from_hours(t(14), 3);
-        let s = score(&hours, window, SurfaceState::default(), Language::Norwegian);
+        let s = score(
+            &hours,
+            window,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
         assert!(s.hard_capped);
         assert!(s.total <= thresholds::HARD_CAP_TOTAL);
     }
@@ -823,8 +924,18 @@ mod tests {
     fn saturated_ground_drags_score_down_without_hard_cap() {
         let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         let window = RideWindow::from_hours(t(14), 3);
-        let dry = score(&hours, window, SurfaceState::default(), Language::Norwegian);
-        let wet = score(&hours, window, SurfaceState::new(5.0), Language::Norwegian); // ground saturated
+        let dry = score(
+            &hours,
+            window,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        let wet = score(
+            &hours,
+            window,
+            Some(SurfaceState::new(5.0)),
+            Language::Norwegian,
+        ); // ground saturated
         assert!(!wet.hard_capped);
         assert!(wet.total < dry.total);
         // Ground sub-score worth 30 points; bone-dry now sits at 95 (not
@@ -841,7 +952,12 @@ mod tests {
         bad.wind_speed_ms = 30.0;
         hours.push(bad);
         let window = RideWindow::from_hours(t(14), 3); // 14..17, excludes 20
-        let s = score(&hours, window, SurfaceState::default(), Language::Norwegian);
+        let s = score(
+            &hours,
+            window,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
         assert!(!s.hard_capped);
         assert_eq!(s.total, 98);
     }
@@ -865,7 +981,7 @@ mod tests {
         let s = score(
             &(14..17).map(nice_hour).collect::<Vec<_>>(),
             RideWindow::from_hours(t(14), 3),
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         let json = serde_json::to_string(&s).unwrap();
@@ -887,7 +1003,7 @@ mod tests {
         let s = score(
             &hours,
             RideWindow::from_hours(t(14), 3),
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         assert!(
@@ -906,7 +1022,7 @@ mod tests {
         let s = score(
             &hours,
             RideWindow::from_hours(t(14), 3),
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         let temp_pen = s
@@ -935,7 +1051,7 @@ mod tests {
         let s = score(
             &hours,
             RideWindow::from_hours(t(14), 3),
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         let wind_pen = s
@@ -963,7 +1079,7 @@ mod tests {
         let s = score(
             &hours,
             RideWindow::from_hours(t(14), 3),
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         let wind_pen = s
@@ -991,7 +1107,7 @@ mod tests {
         let s = score(
             &hours,
             RideWindow::from_hours(t(14), 3),
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         assert!(
@@ -1016,7 +1132,7 @@ mod tests {
         let s = score(
             &hours,
             RideWindow::from_hours(t(14), 3),
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         let prob_pen = s
@@ -1037,7 +1153,7 @@ mod tests {
         let s = score(
             &hours,
             RideWindow::from_hours(t(14), 3),
-            SurfaceState::new(5.0),
+            Some(SurfaceState::new(5.0)),
             Language::Norwegian,
         );
         let g = s
@@ -1055,7 +1171,7 @@ mod tests {
         let s = score(
             &hours,
             RideWindow::from_hours(t(14), 3),
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         assert!(s.hard_capped);
@@ -1080,7 +1196,7 @@ mod tests {
         let s = score(
             &hours,
             RideWindow::from_hours(t(14), 3),
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         assert!(s.hard_capped);
@@ -1109,7 +1225,7 @@ mod tests {
         let s = score(
             &hs,
             RideWindow::from_hours(t(14), 3),
-            SurfaceState::new(5.0),
+            Some(SurfaceState::new(5.0)),
             Language::Norwegian,
         );
         assert!(
@@ -1134,7 +1250,7 @@ mod tests {
         let s = score(
             &hours,
             RideWindow::from_hours(t(14), 3),
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         let json = serde_json::to_string(&s).unwrap();
@@ -1156,7 +1272,7 @@ mod tests {
         let s = score(
             &hours,
             RideWindow::from_hours(t(14), 3),
-            surface,
+            Some(surface),
             Language::Norwegian,
         );
         let drought = s
@@ -1186,7 +1302,7 @@ mod tests {
         let s = score(
             &hours,
             RideWindow::from_hours(t(14), 3),
-            surface,
+            Some(surface),
             Language::Norwegian,
         );
         let drought = s
@@ -1205,19 +1321,19 @@ mod tests {
         let baseline = score(
             &hours,
             RideWindow::from_hours(t(14), 3),
-            SurfaceState {
+            Some(SurfaceState {
                 accumulated_mm: thresholds::GROUND_OPTIMAL_MM,
                 hours_since_meaningful_rain: 0.0,
-            },
+            }),
             Language::Norwegian,
         );
         let parched = score(
             &hours,
             RideWindow::from_hours(t(14), 3),
-            SurfaceState {
+            Some(SurfaceState {
                 accumulated_mm: 0.0,
                 hours_since_meaningful_rain: 240.0,
-            },
+            }),
             Language::Norwegian,
         );
         assert!(parched.total < baseline.total);
@@ -1228,5 +1344,121 @@ mod tests {
             "drop {} exceeds soft-hint budget",
             baseline.total - parched.total
         );
+    }
+
+    // ---- NaN sanitisation ----
+
+    #[test]
+    fn subscores_treat_nan_as_worst_case() {
+        // Each sub-score has its own NaN posture; the contract is that
+        // none of them panic and that the result is a sensible u8.
+        assert_eq!(temp_subscore(f64::NAN), 0);
+        assert_eq!(wind_subscore(f64::NAN, None), 0);
+        assert_eq!(precip_subscore(f64::NAN), 0);
+        // Probability missing/NaN both fall back to neutral 50.
+        assert_eq!(precip_prob_subscore(Some(f64::NAN)), 50);
+        // Ground unknown falls back to the dry floor (95) — same as 0 mm,
+        // since "we don't know" shouldn't be rendered as a wet penalty.
+        assert_eq!(
+            ground_subscore(f64::NAN),
+            thresholds::GROUND_DRY_FLOOR_SCORE
+        );
+    }
+
+    #[test]
+    fn apply_drought_penalty_handles_nan_hours() {
+        // A poisoned counter must not panic or hand back a wild value.
+        assert_eq!(apply_drought_penalty(80, f64::NAN), 80);
+        assert_eq!(apply_drought_penalty(80, f64::INFINITY), 80);
+    }
+
+    #[test]
+    fn lerp_clamped_handles_nan() {
+        // White-box test for the helper — NaN must short-circuit to y_lo
+        // instead of panicking inside `clamp`.
+        assert_eq!(lerp_clamped(f64::NAN, 0.0, 10.0, 25, 75), 25);
+    }
+
+    // ---- Unknown ground state ----
+
+    #[test]
+    fn score_with_no_surface_observations_uses_neutral_ground() {
+        let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            None,
+            Language::Norwegian,
+        );
+        // Ground subscore is fixed at GROUND_UNKNOWN_SCORE — falls
+        // between dry-floor (95) and saturated (0) so we don't reward a
+        // place we can't actually evaluate.
+        assert_eq!(s.breakdown.ground, GROUND_UNKNOWN_SCORE);
+    }
+
+    #[test]
+    fn score_with_no_surface_observations_emits_unknown_penalty() {
+        let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            None,
+            Language::Norwegian,
+        );
+        let pen = s
+            .penalties
+            .iter()
+            .find(|p| p.component == Component::Ground && p.message_no.contains("ukjent"))
+            .expect("expected an unknown-ground penalty");
+        assert_eq!(pen.severity, Severity::Minor);
+    }
+
+    #[test]
+    fn score_with_none_distinguishes_from_default_state() {
+        // With no historic data we must NOT match the score of a
+        // freshly-rained-on default state — that was the bug.
+        let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
+        let unknown = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            None,
+            Language::Norwegian,
+        );
+        let just_rained = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert_ne!(
+            unknown.breakdown.ground, just_rained.breakdown.ground,
+            "unknown and 'just rained' must produce different ground scores",
+        );
+    }
+
+    #[test]
+    fn score_filters_out_nan_hours_in_window() {
+        // Three good hours plus one poisoned reading; the poisoned hour
+        // must be ignored, leaving a perfectly-scoring window.
+        let mut hours: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions {
+                probability_of_precip: Some(5.0),
+                ..HourlyConditions::minimal(t(h), 17.0, 2.0, 0.0)
+            })
+            .collect();
+        hours.push(HourlyConditions::minimal(
+            t(15),
+            f64::NAN,
+            f64::NAN,
+            f64::NAN,
+        ));
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        // Same expected total as `perfect_conditions_yield_high_score`.
+        assert_eq!(s.total, 98);
     }
 }

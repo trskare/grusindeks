@@ -21,6 +21,11 @@ pub enum ClientError {
     InvalidUserAgent(&'static str),
     #[error("invalid base URL: {0}")]
     InvalidBaseUrl(String),
+    /// A required credential (e.g. the Frost `client_id`) is not configured.
+    /// Callers can use this to either prompt the user for setup or fall
+    /// back to a degraded code path that doesn't need the credential.
+    #[error("missing credentials: {0}")]
+    MissingCredentials(&'static str),
     #[error("HTTP error: {status}{}", .body.as_ref().map(|b| format!(" ({b})")).unwrap_or_default())]
     Http { status: u16, body: Option<String> },
     #[error("network error: {0}")]
