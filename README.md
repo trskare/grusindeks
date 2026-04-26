@@ -117,6 +117,28 @@ on 29. apr   ⛅ █████████░  94  Strålende  ⓘ lav
 to 30. apr   ☀  ██████████  95  Strålende  ⓘ lav
 ```
 
+### Språk
+
+Utskriften kommer på **norsk** som default. Sett `language = "swedish"`
+i `config.toml` for å bytte til **svensk** — labels (`Strålende` →
+`Strålande`, `Dårlig` → `Dåligt`), penalty-meldinger (`tørt og løst
+dekke` → `torrt och löst underlag`), kompass-forkortelser (`NØ` →
+`NÖ`), samt ukedager og måneder veksler alle med språket. Brand-navnet
+«Grusindeks» beholdes uansett.
+
+Samme dag som over, gjengitt på svensk:
+
+```
+🎯 Bästa dag: to 30. apr  ·  95/100  Strålande
+
+idag         ⛅ █████████░  89  Strålande  ⓘ hög
+             ├─ Temp    ████████░░  84
+             ├─ Vind    ████████░░  80
+             ├─ Nederbörd ████████ 100
+             ├─ Mark    █████████░  86
+             └─ Mark: torrt och löst underlag (4 dygn utan regn)
+```
+
 ### Config
 
 `~/.config/grusindeks/config.toml`:
