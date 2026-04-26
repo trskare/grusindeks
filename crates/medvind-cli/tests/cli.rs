@@ -144,6 +144,100 @@ async fn score_json_output_is_valid_json() {
 }
 
 #[tokio::test]
+async fn score_with_days_emits_multi_day_view() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_m("/weatherapi/locationforecast/2.0/complete"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(LOCATIONFORECAST_FIXTURE))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let cfg = write_config(
+        &dir,
+        r#"user_agent_contact = "dev@example.invalid"
+[places.oslo]
+lat = 59.9139
+lon = 10.7522
+radius_km = 20.0
+"#,
+    );
+
+    Command::cargo_bin("medvind")
+        .unwrap()
+        .env("MEDVIND_API_BASE", format!("{}/", server.uri()))
+        .env("MEDVIND_FROST_BASE", format!("{}/", server.uri()))
+        .arg("--config")
+        .arg(&cfg)
+        .args(["score", "--place", "oslo", "--days", "5"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Grusindeks for oslo"))
+        .stdout(predicate::str::contains("dager"))
+        .stdout(predicate::str::contains("ⓘ"));
+}
+
+#[tokio::test]
+async fn score_with_days_and_window_errors_clearly() {
+    let dir = TempDir::new().unwrap();
+    let cfg = write_config(&dir, "user_agent_contact = \"dev@example.invalid\"\n");
+    Command::cargo_bin("medvind")
+        .unwrap()
+        .arg("--config")
+        .arg(&cfg)
+        .args([
+            "score",
+            "--lat",
+            "59.9139",
+            "--lon",
+            "10.7522",
+            "--days",
+            "3",
+            "--window",
+            "14:00-17:00",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--window kan ikke brukes"));
+}
+
+#[tokio::test]
+async fn score_with_days_json_carries_forecast_field() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_m("/weatherapi/locationforecast/2.0/complete"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(LOCATIONFORECAST_FIXTURE))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let cfg = write_config(&dir, "user_agent_contact = \"dev@example.invalid\"\n");
+
+    let out = Command::cargo_bin("medvind")
+        .unwrap()
+        .env("MEDVIND_API_BASE", format!("{}/", server.uri()))
+        .env("MEDVIND_FROST_BASE", format!("{}/", server.uri()))
+        .arg("--config")
+        .arg(&cfg)
+        .arg("--json")
+        .args([
+            "score", "--lat", "59.9139", "--lon", "10.7522", "--days", "3",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&out).expect("output must be JSON");
+    let days = parsed["forecast"]["days"].as_array().expect("days array");
+    assert_eq!(days.len(), 3, "expected 3 days, got {days:?}");
+    for d in days {
+        assert!(d["mean"].is_u64());
+        assert!(d["confidence"].is_string());
+    }
+}
+
+#[tokio::test]
 async fn score_truncates_coordinates_in_query_string() {
     // High-precision input (6 decimals) must be truncated to 4 decimals
     // before hitting api.met.no. Verified by introspecting *all* requests

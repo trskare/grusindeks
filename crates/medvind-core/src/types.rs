@@ -8,6 +8,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::geo::Point;
 
+/// Where the underlying forecast values came from. `api.met.no` provides
+/// per-hour data for the first ~60 hours; beyond that, only 6-hour buckets
+/// are published. Tracking this lets us downgrade confidence on long-range
+/// days and skip best-window detection when the resolution is too coarse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Resolution {
+    /// Sourced from a `next_1_hours` block — true hourly fidelity.
+    #[default]
+    Hourly,
+    /// Synthesized by spreading a `next_6_hours` block across its 6 hours.
+    /// Temperature/wind are still from the per-hour `instant`, but
+    /// precipitation and probability are bucket-level.
+    SixHourly,
+}
+
 /// What we know about the weather at one geographical point during one hour.
 ///
 /// Required fields are the variables we can rely on from
@@ -42,6 +57,11 @@ pub struct HourlyConditions {
     /// UV index for clear-sky conditions, 0–11+.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uv_index_clear_sky: Option<f64>,
+
+    /// Where the data originated. Defaults to `Hourly` for backward compat
+    /// with serialized blobs predating the multi-day forecast feature.
+    #[serde(default)]
+    pub resolution: Resolution,
 }
 
 impl HourlyConditions {
@@ -64,6 +84,7 @@ impl HourlyConditions {
             relative_humidity: None,
             cloud_area_fraction: None,
             uv_index_clear_sky: None,
+            resolution: Resolution::Hourly,
         }
     }
 }
@@ -153,6 +174,21 @@ mod tests {
         assert_eq!(h.temperature_c, 16.0);
         assert!(h.wind_gust_ms.is_none());
         assert!(h.uv_index_clear_sky.is_none());
+        assert_eq!(h.resolution, Resolution::Hourly);
+    }
+
+    #[test]
+    fn hourly_resolution_defaults_to_hourly_when_missing_from_json() {
+        // Older serialized blobs (cache files, fixtures) won't carry the
+        // field. They must keep deserializing as `Hourly`.
+        let json = serde_json::json!({
+            "time": "2026-04-26T12:00:00Z",
+            "temperature_c": 16.0,
+            "wind_speed_ms": 4.0,
+            "precipitation_mm": 0.0,
+        });
+        let h: HourlyConditions = serde_json::from_value(json).unwrap();
+        assert_eq!(h.resolution, Resolution::Hourly);
     }
 
     #[test]

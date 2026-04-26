@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{DateTime, Local, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Local, NaiveDate, NaiveTime, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 use medvind_core::geo::Point;
 use medvind_core::types::{Location, RideWindow};
@@ -15,7 +15,7 @@ use medvind_met::client::{MetClient, MetClientConfig, UserAgent};
 use url::Url;
 
 use crate::config::Config;
-use crate::run::{run_score, ScoreInputs};
+use crate::run::{run_forecast, run_score, DayWindow, ForecastInputs, ScoreInputs};
 
 const APP: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -69,6 +69,12 @@ enum Command {
         /// Window length in hours when --window is omitted.
         #[arg(long, default_value_t = 3)]
         hours: i64,
+        /// Antall dager fremover i prognosen. 1 = bare i dag (default).
+        /// Når > 1 vises et dag-for-dag sammendrag i stedet for ett vindu;
+        /// --window og --hours ignoreres da til fordel for dagvindu
+        /// 06:00–22:00 lokal tid.
+        #[arg(long, default_value_t = 1)]
+        days: u8,
     },
     /// Manage the configuration file.
     Config {
@@ -118,6 +124,7 @@ async fn main() -> Result<()> {
             radius_km,
             window,
             hours,
+            days,
         } => {
             cmd_score(
                 &cli,
@@ -127,6 +134,7 @@ async fn main() -> Result<()> {
                 *radius_km,
                 window.clone(),
                 *hours,
+                *days,
             )
             .await
         }
@@ -152,6 +160,7 @@ fn cmd_config_init(config_arg: Option<&std::path::Path>) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_score(
     cli: &Cli,
     lat: Option<f64>,
@@ -160,7 +169,11 @@ async fn cmd_score(
     radius_km: Option<f64>,
     window: Option<String>,
     hours: i64,
+    days: u8,
 ) -> Result<()> {
+    if days == 0 {
+        bail!("--days må være minst 1");
+    }
     let cfg_path = match cli.config.clone() {
         Some(p) => p,
         None => Config::default_path()?,
@@ -173,10 +186,39 @@ async fn cmd_score(
     })?;
 
     let location = resolve_location(&cfg, lat, lon, place, radius_km)?;
-    let win = resolve_window(window.as_deref(), hours)?;
     let frost_source_id = location_frost_source(&cfg, &location);
-
     let client = build_client(&cfg, cli.api_base.as_ref(), cli.frost_base.as_ref())?;
+
+    if days > 1 {
+        if window.is_some() {
+            bail!("--window kan ikke brukes sammen med --days > 1");
+        }
+        let day_windows = build_day_windows(Local::now().date_naive(), days)?;
+        let forecast = run_forecast(
+            &client,
+            ForecastInputs {
+                center: location.center,
+                radius_km: location.radius_km,
+                days: day_windows,
+                frost_source_id: frost_source_id.as_deref(),
+                history_hours: 48,
+            },
+        )
+        .await?;
+        if cli.json {
+            let v = serde_json::json!({
+                "location": location,
+                "forecast": forecast,
+            });
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        } else {
+            let body = output::render_multi_day(&location.name, location.radius_km, &forecast);
+            print!("{body}");
+        }
+        return Ok(());
+    }
+
+    let win = resolve_window(window.as_deref(), hours)?;
     let agg = run_score(
         &client,
         ScoreInputs {
@@ -201,6 +243,28 @@ async fn cmd_score(
         print!("{body}");
     }
     Ok(())
+}
+
+/// Local "ride hours" used for the multi-day day window. Wide enough to
+/// catch most realistic ride times while still excluding the dead-of-night
+/// hours that would skew the average for no real benefit.
+const RIDE_HOURS_LOCAL: (u32, u32) = (6, 22);
+
+/// Build `n` consecutive day windows starting at `start_date` (local). Each
+/// window covers `RIDE_HOURS_LOCAL` in local time, converted to UTC.
+fn build_day_windows(start_date: NaiveDate, n: u8) -> Result<Vec<DayWindow>> {
+    let (h_start, h_end) = RIDE_HOURS_LOCAL;
+    let mut out = Vec::with_capacity(n as usize);
+    for offset in 0..i64::from(n) {
+        let date = start_date + ChronoDuration::days(offset);
+        let start = local_to_utc(date.and_time(NaiveTime::from_hms_opt(h_start, 0, 0).unwrap()))?;
+        let end = local_to_utc(date.and_time(NaiveTime::from_hms_opt(h_end, 0, 0).unwrap()))?;
+        out.push(DayWindow {
+            date,
+            window: RideWindow { start, end },
+        });
+    }
+    Ok(out)
 }
 
 fn resolve_location(

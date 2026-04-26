@@ -5,8 +5,11 @@
 //! whether the worst patch (often the wettest forest road on the
 //! windward side) is what's dragging the score down.
 
+use chrono::NaiveDate;
+use medvind_core::daily::{Confidence, DayScore, OptimalWindow};
 use medvind_core::geo::{bearing_deg, bearing_label_no, Point};
 use medvind_core::score::Grusindeks;
+use medvind_core::types::RideWindow;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,6 +81,112 @@ impl AggregateScore {
     }
 }
 
+/// One sample point's day-level score, including any optimal sub-window
+/// the daily module flagged for that point's hours.
+#[derive(Debug, Clone, Serialize)]
+pub struct DayPointScore {
+    pub point: Point,
+    pub bearing_deg: f64,
+    pub bearing_label: &'static str,
+    pub day_score: DayScore,
+}
+
+/// One day in the multi-day forecast view, aggregated across all sample
+/// points around the center.
+#[derive(Debug, Clone, Serialize)]
+pub struct DayAggregate {
+    /// Local date label (e.g. "2026-04-26"). The window itself is in UTC.
+    pub date: NaiveDate,
+    pub window: RideWindow,
+    pub min: u8,
+    pub mean: u8,
+    pub max: u8,
+    /// The most conservative confidence across the points — if any point
+    /// is `Lav`, we report `Lav`.
+    pub confidence: Confidence,
+    /// "Where to ride" hint for this day. Sourced from the center point —
+    /// it's a suggestion, not a guarantee. `None` when the day has no
+    /// stand-out window worth flagging.
+    pub optimal_window: Option<OptimalWindow>,
+    pub points: Vec<DayPointScore>,
+}
+
+impl DayAggregate {
+    /// Build a `DayAggregate` from per-point `DayScore`s. The first entry
+    /// in `points` is treated as the center for the optimal-window hint
+    /// and bearing labeling.
+    pub fn from_points(
+        date: NaiveDate,
+        window: RideWindow,
+        center: Point,
+        points: Vec<(Point, DayScore)>,
+    ) -> Self {
+        let scored: Vec<DayPointScore> = points
+            .into_iter()
+            .map(|(p, ds)| {
+                let b = if p == center {
+                    0.0
+                } else {
+                    bearing_deg(center, p)
+                };
+                DayPointScore {
+                    point: p,
+                    bearing_deg: b,
+                    bearing_label: if p == center {
+                        "senter"
+                    } else {
+                        bearing_label_no(b)
+                    },
+                    day_score: ds,
+                }
+            })
+            .collect();
+
+        let totals: Vec<u8> = scored.iter().map(|p| p.day_score.score.total).collect();
+        let min = *totals.iter().min().expect("at least one point");
+        let max = *totals.iter().max().expect("at least one point");
+        let mean = (totals.iter().map(|&v| u32::from(v)).sum::<u32>() / totals.len() as u32) as u8;
+
+        // Most conservative confidence wins — if any point loses fidelity,
+        // surface that to the user.
+        let confidence = scored
+            .iter()
+            .map(|p| p.day_score.confidence)
+            .fold(Confidence::Hoy, lower_confidence);
+
+        let optimal_window = scored
+            .iter()
+            .find(|p| p.point == center)
+            .and_then(|p| p.day_score.optimal_window.clone());
+
+        DayAggregate {
+            date,
+            window,
+            min,
+            mean,
+            max,
+            confidence,
+            optimal_window,
+            points: scored,
+        }
+    }
+}
+
+/// Multi-day forecast: one `DayAggregate` per requested local date.
+#[derive(Debug, Clone, Serialize)]
+pub struct MultiDayForecast {
+    pub days: Vec<DayAggregate>,
+}
+
+fn lower_confidence(a: Confidence, b: Confidence) -> Confidence {
+    use Confidence::*;
+    match (a, b) {
+        (Lav, _) | (_, Lav) => Lav,
+        (Middels, _) | (_, Middels) => Middels,
+        _ => Hoy,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +239,63 @@ mod tests {
         let center = Point::new(59.9139, 10.7522);
         let agg = AggregateScore::from_points(center, vec![(center, good)]);
         assert_eq!(agg.points[0].bearing_label, "senter");
+    }
+
+    #[test]
+    fn day_aggregate_picks_worst_confidence_across_points() {
+        use medvind_core::daily::compute_day;
+        use medvind_core::types::{HourlyConditions, Resolution};
+        let win = RideWindow::from_hours(t(6), 12);
+        let now = t(5);
+
+        let hourly: Vec<HourlyConditions> = (6..18).map(perfect).collect();
+        let mut six_hourly = hourly.clone();
+        for h in &mut six_hourly {
+            h.resolution = Resolution::SixHourly;
+        }
+        let center = Point::new(59.9139, 10.7522);
+        let other = Point::new(60.0, 10.7522);
+        let agg = DayAggregate::from_points(
+            chrono::NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
+            win,
+            center,
+            vec![
+                (center, compute_day(&hourly, win, 0.0, now)),
+                (other, compute_day(&six_hourly, win, 0.0, now)),
+            ],
+        );
+        // Center is Hoy, the other is Lav (>50% six-hourly) → worst is Lav.
+        assert_eq!(agg.confidence, Confidence::Lav);
+    }
+
+    #[test]
+    fn day_aggregate_takes_optimal_window_from_center() {
+        use medvind_core::daily::compute_day;
+        let win = RideWindow::from_hours(t(6), 12);
+        let now = t(5);
+
+        // Center has a clear "luke": rainy 09..15, dry otherwise.
+        let mut center_hours: Vec<_> = (6..9).map(perfect).collect();
+        center_hours.extend((9..15).map(awful));
+        center_hours.extend((15..18).map(perfect));
+        // The other point is uniformly perfect — no luke flagged.
+        let other_hours: Vec<_> = (6..18).map(perfect).collect();
+
+        let center = Point::new(59.9139, 10.7522);
+        let other = Point::new(60.0, 10.7522);
+        let agg = DayAggregate::from_points(
+            chrono::NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
+            win,
+            center,
+            vec![
+                (center, compute_day(&center_hours, win, 0.0, now)),
+                (other, compute_day(&other_hours, win, 0.0, now)),
+            ],
+        );
+        assert!(
+            agg.optimal_window.is_some(),
+            "expected the center point's luke to be surfaced"
+        );
     }
 
     #[test]

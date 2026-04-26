@@ -12,7 +12,7 @@
 
 use chrono::{DateTime, Utc};
 use medvind_core::geo::Point;
-use medvind_core::types::{Forecast, HourlyConditions};
+use medvind_core::types::{Forecast, HourlyConditions, Resolution};
 use serde::Deserialize;
 
 use crate::client::{ClientError, MetClient};
@@ -40,6 +40,8 @@ struct CompactData {
     instant: CompactInstant,
     #[serde(default)]
     next_1_hours: Option<CompactInterval>,
+    #[serde(default)]
+    next_6_hours: Option<CompactInterval>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,33 +73,80 @@ struct CompactIntervalDetails {
     probability_of_precipitation: Option<f64>,
 }
 
-/// Convert the upstream JSON into a `Forecast`. Skips entries without
-/// `next_1_hours.details` so every emitted hour has real precipitation.
+/// Convert the upstream JSON into a `Forecast`.
+///
+/// `api.met.no` publishes per-hour data (`next_1_hours`) for the first
+/// ~60 hours and only 6-hour buckets (`next_6_hours`) beyond that. We emit:
+///
+/// * one `Resolution::Hourly` entry per `next_1_hours` block, and
+/// * six `Resolution::SixHourly` entries per `next_6_hours` block — one for
+///   each hour `t..t+6h` — with `precipitation_mm = bucket_total / 6` and
+///   the bucket's probability carried as-is. Instant-grade fields
+///   (temperature, wind) are reused across the six hours, since MET only
+///   gives them at the bucket start.
+///
+/// When a 6h bucket overlaps an already-emitted hourly entry, hourly wins
+/// — it's the higher-fidelity source.
 fn into_forecast(point: Point, raw: CompactResponse) -> Forecast {
-    let hours: Vec<HourlyConditions> = raw
-        .properties
-        .timeseries
-        .into_iter()
-        .filter_map(|s| {
-            let next1 = s.data.next_1_hours?;
-            let temp = s.data.instant.details.air_temperature?;
-            let wind = s.data.instant.details.wind_speed?;
+    use std::collections::BTreeMap;
+    let mut by_time: BTreeMap<DateTime<Utc>, HourlyConditions> = BTreeMap::new();
+
+    for s in raw.properties.timeseries {
+        let Some(temp) = s.data.instant.details.air_temperature else {
+            continue;
+        };
+        let Some(wind) = s.data.instant.details.wind_speed else {
+            continue;
+        };
+
+        if let Some(next1) = s.data.next_1_hours {
             let precip = next1.details.precipitation_amount.unwrap_or(0.0);
-            Some(HourlyConditions {
-                time: s.time,
-                temperature_c: temp,
-                wind_speed_ms: wind,
-                precipitation_mm: precip,
-                wind_gust_ms: s.data.instant.details.wind_speed_of_gust,
-                wind_from_deg: s.data.instant.details.wind_from_direction,
-                probability_of_precip: next1.details.probability_of_precipitation,
-                relative_humidity: s.data.instant.details.relative_humidity,
-                cloud_area_fraction: s.data.instant.details.cloud_area_fraction,
-                uv_index_clear_sky: s.data.instant.details.ultraviolet_index_clear_sky,
-            })
-        })
-        .collect();
-    Forecast { point, hours }
+            by_time.insert(
+                s.time,
+                HourlyConditions {
+                    time: s.time,
+                    temperature_c: temp,
+                    wind_speed_ms: wind,
+                    precipitation_mm: precip,
+                    wind_gust_ms: s.data.instant.details.wind_speed_of_gust,
+                    wind_from_deg: s.data.instant.details.wind_from_direction,
+                    probability_of_precip: next1.details.probability_of_precipitation,
+                    relative_humidity: s.data.instant.details.relative_humidity,
+                    cloud_area_fraction: s.data.instant.details.cloud_area_fraction,
+                    uv_index_clear_sky: s.data.instant.details.ultraviolet_index_clear_sky,
+                    resolution: Resolution::Hourly,
+                },
+            );
+            continue;
+        }
+
+        if let Some(next6) = s.data.next_6_hours {
+            let bucket_total = next6.details.precipitation_amount.unwrap_or(0.0);
+            let per_hour_mm = bucket_total / 6.0;
+            for offset in 0..6 {
+                let t = s.time + chrono::Duration::hours(offset);
+                // Hourly entries already emitted win — never overwrite them.
+                by_time.entry(t).or_insert(HourlyConditions {
+                    time: t,
+                    temperature_c: temp,
+                    wind_speed_ms: wind,
+                    precipitation_mm: per_hour_mm,
+                    wind_gust_ms: s.data.instant.details.wind_speed_of_gust,
+                    wind_from_deg: s.data.instant.details.wind_from_direction,
+                    probability_of_precip: next6.details.probability_of_precipitation,
+                    relative_humidity: s.data.instant.details.relative_humidity,
+                    cloud_area_fraction: s.data.instant.details.cloud_area_fraction,
+                    uv_index_clear_sky: s.data.instant.details.ultraviolet_index_clear_sky,
+                    resolution: Resolution::SixHourly,
+                });
+            }
+        }
+    }
+
+    Forecast {
+        point,
+        hours: by_time.into_values().collect(),
+    }
 }
 
 /// Parse a `compact` JSON body for a known `point`. Useful in tests and
@@ -188,13 +237,60 @@ mod tests {
     }
 
     #[test]
-    fn parser_only_emits_hours_with_next_1_hours_data() {
-        // The response includes long-term entries that lack `next_1_hours`.
-        // Our parser must skip those — verify by checking every returned
-        // hour has a sane precipitation value (0 or higher).
+    fn parser_emits_well_formed_hours_for_every_emitted_entry() {
+        // Some entries are hourly, others are expanded from 6h buckets.
+        // All must have non-negative precipitation, regardless of source.
         let f = parse_compact(oslo(), FIXTURE).unwrap();
         for h in &f.hours {
             assert!(h.precipitation_mm >= 0.0);
+        }
+    }
+
+    #[test]
+    fn parser_expands_six_hour_buckets_into_hourly_entries() {
+        // The fixture contains both `next_1_hours` (≤60h) and `next_6_hours`
+        // (later) entries. The parser should yield both kinds, with the
+        // 6h-derived ones marked `Resolution::SixHourly`.
+        use medvind_core::types::Resolution;
+        let f = parse_compact(oslo(), FIXTURE).unwrap();
+        let hourly_count = f
+            .hours
+            .iter()
+            .filter(|h| h.resolution == Resolution::Hourly)
+            .count();
+        let six_count = f
+            .hours
+            .iter()
+            .filter(|h| h.resolution == Resolution::SixHourly)
+            .count();
+        assert!(hourly_count > 0, "no hourly entries");
+        assert!(six_count > 0, "no 6h-derived entries");
+        // 6h-derived hours should outnumber the hourly ones since the
+        // long-range portion of the forecast is much larger.
+        assert!(
+            six_count > hourly_count,
+            "expected more 6h-derived entries than hourly, got hourly={hourly_count} six={six_count}"
+        );
+    }
+
+    #[test]
+    fn parser_prefers_hourly_over_six_hourly_when_both_present() {
+        // A timeseries entry can carry both `next_1_hours` and
+        // `next_6_hours`. We must keep the hourly version of that timestamp.
+        use medvind_core::types::Resolution;
+        let f = parse_compact(oslo(), FIXTURE).unwrap();
+        // The first emitted hour is from `next_1_hours` per the fixture.
+        assert_eq!(f.hours[0].resolution, Resolution::Hourly);
+    }
+
+    #[test]
+    fn parser_returns_strictly_unique_hours_after_six_hour_expansion() {
+        // Expansion must not introduce duplicate timestamps even when
+        // adjacent 6h buckets touch hourly windows.
+        let f = parse_compact(oslo(), FIXTURE).unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for h in &f.hours {
+            assert!(seen.insert(h.time), "duplicate hour {}", h.time);
         }
     }
 

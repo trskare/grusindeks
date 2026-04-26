@@ -4,16 +4,17 @@
 //! integration tests can call it directly with a test client.
 
 use anyhow::Result;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
+use medvind_core::daily::compute_day;
 use medvind_core::drying::{drying_step, DryingParams, DryingState};
 use medvind_core::geo::{sample_around, Point};
 use medvind_core::score::score;
-use medvind_core::types::{HourlyConditions, RideWindow};
+use medvind_core::types::{HourlyConditions, Resolution, RideWindow};
 use medvind_met::client::MetClient;
 use medvind_met::frost;
 use medvind_met::locationforecast;
 
-use crate::aggregate::AggregateScore;
+use crate::aggregate::{AggregateScore, DayAggregate, MultiDayForecast};
 
 pub struct ScoreInputs<'a> {
     pub center: Point,
@@ -54,6 +55,80 @@ pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<Ag
     Ok(AggregateScore::from_points(inputs.center, scored))
 }
 
+/// One day worth of forecast lookup: a local date label plus the UTC
+/// window to score. The CLI builds these from local "ride hours" and
+/// hands them down so this layer doesn't need timezone knowledge.
+pub struct DayWindow {
+    pub date: NaiveDate,
+    pub window: RideWindow,
+}
+
+pub struct ForecastInputs<'a> {
+    pub center: Point,
+    pub radius_km: f64,
+    pub days: Vec<DayWindow>,
+    pub frost_source_id: Option<&'a str>,
+    pub history_hours: i64,
+}
+
+/// Multi-day variant of [`run_score`]. Fetches the forecast once per
+/// sample point (the response already covers the full 9-day horizon),
+/// then computes a `DayAggregate` per requested day.
+pub async fn run_forecast(
+    client: &MetClient,
+    inputs: ForecastInputs<'_>,
+) -> Result<MultiDayForecast> {
+    let points = sample_around(inputs.center, inputs.radius_km);
+
+    let ground_initial_mm =
+        fetch_ground_state(client, inputs.frost_source_id, inputs.history_hours)
+            .await
+            .unwrap_or(0.0);
+
+    // Fetch each point's forecast once. The same series is reused across
+    // every day to compute that day's score.
+    let now = Utc::now();
+    let mut per_point_hours: Vec<(Point, Vec<HourlyConditions>)> = Vec::with_capacity(points.len());
+    for p in points {
+        let f = locationforecast::fetch(client, p).await?;
+        per_point_hours.push((p, f.hours));
+    }
+
+    let mut days = Vec::with_capacity(inputs.days.len());
+    for dw in inputs.days {
+        let mut day_points = Vec::with_capacity(per_point_hours.len());
+        for (p, hours) in &per_point_hours {
+            let ds = compute_day(hours, dw.window, ground_initial_mm, now);
+            day_points.push((*p, ds));
+        }
+        days.push(DayAggregate::from_points(
+            dw.date,
+            dw.window,
+            inputs.center,
+            day_points,
+        ));
+    }
+    Ok(MultiDayForecast { days })
+}
+
+async fn fetch_ground_state(
+    client: &MetClient,
+    frost_source_id: Option<&str>,
+    history_hours: i64,
+) -> Option<f64> {
+    let src = frost_source_id?;
+    client.config().frost_client_id.as_ref()?;
+    let to: DateTime<Utc> = Utc::now();
+    let from = to - Duration::hours(history_hours);
+    match frost::fetch_hourly_precip(client, src, from, to).await {
+        Ok(history) => Some(replay_into_state(&history, &DryingParams::default())),
+        Err(e) => {
+            tracing::warn!("frost lookup failed, assuming dry ground: {e}");
+            None
+        }
+    }
+}
+
 /// Replay a list of `(time, mm)` precipitation observations through the
 /// drying model. Uses neutral drying conditions for missing temp/wind/etc.,
 /// since Frost-only history doesn't carry those for free.
@@ -73,6 +148,7 @@ fn replay_into_state(history: &[frost::HourlyPrecip], p: &DryingParams) -> f64 {
             relative_humidity: Some(70.0),
             cloud_area_fraction: Some(70.0),
             uv_index_clear_sky: None,
+            resolution: Resolution::Hourly,
         };
         state = drying_step(state, &synth, p);
     }
