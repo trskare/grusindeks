@@ -137,7 +137,7 @@ pub fn render_multi_day(
 
     // Headline: the best day in the forecast. Always rendered (even on a
     // bad week) — the user explicitly asked for a permanent summary line.
-    if let Some(best) = forecast.days.iter().max_by_key(|d| d.mean) {
+    if let Some(best) = pick_best_day(&forecast.days) {
         let _ = writeln!(out);
         let _ = writeln!(
             out,
@@ -236,15 +236,28 @@ fn write_day_row(
         conf_p,
     );
 
-    // Penalty line(s): default surfaces the worst one (HardCap is always
-    // Critical and sorts first when present); --verbose lists every one.
-    let take = if verbose {
+    // Penalty count is computed first so the breakdown tree knows whether
+    // its last row should close (└─) or continue (├─) into penalty rows.
+    let penalty_take = if verbose {
         center.score.penalties.len()
     } else {
         center.score.penalties.len().min(1)
     };
-    for penalty in center.score.penalties.iter().take(take) {
-        let _ = writeln!(out, "             └─ {}", format_penalty_line(penalty));
+
+    // Sub-score breakdown: by default we only print it for *today*, since
+    // that's the day the user actually acts on. `--verbose` prints it for
+    // every day.
+    let is_today = day.date == today_local;
+    if is_today || verbose {
+        write_day_breakdown(out, day, dim, penalty_take > 0);
+    }
+
+    // Penalty line(s): default surfaces the worst one (HardCap is always
+    // Critical and sorts first when present); --verbose lists every one.
+    for (i, penalty) in center.score.penalties.iter().take(penalty_take).enumerate() {
+        let is_last = i + 1 == penalty_take;
+        let branch = if is_last { "└─" } else { "├─" };
+        let _ = writeln!(out, "             {branch} {}", format_penalty_line(penalty));
     }
 
     // "Best luke" hint — only on days where the optimal window improves
@@ -260,6 +273,86 @@ fn write_day_row(
             ow.improvement,
         );
     }
+}
+
+/// Pick the day to feature in the "🎯 Beste dag" headline. Highest mean
+/// wins; ties go to the higher-confidence day (a Høy 90 beats a Lav 90),
+/// and any remaining ties go to the earliest date so the user lands on a
+/// day they can actually act on.
+fn pick_best_day(days: &[DayAggregate]) -> Option<&DayAggregate> {
+    days.iter().max_by(|a, b| {
+        a.mean
+            .cmp(&b.mean)
+            .then(a.confidence.rank().cmp(&b.confidence.rank()))
+            .then(b.date.cmp(&a.date))
+    })
+}
+
+/// Per-axis sub-score breakdown rendered as a small tree under the day
+/// row. By default we only emit it for *today* (the day the user acts on);
+/// `--verbose` extends it to every day. When `penalties_follow` is true,
+/// the last row uses `├─` so the tree continues into the penalty list;
+/// otherwise it closes with `└─`.
+fn write_day_breakdown(
+    out: &mut String,
+    day: &DayAggregate,
+    dim: bool,
+    penalties_follow: bool,
+) {
+    let temp = avg_day_axis(day, |b| b.temperature);
+    let wind = avg_day_axis(day, |b| b.wind);
+    let precip = avg_day_axis(day, |b| b.precipitation);
+    let prob = avg_day_axis(day, |b| b.precip_probability);
+    let ground = avg_day_axis(day, |b| b.ground);
+    let (precip_combined, _) = combined_precip(precip, prob);
+
+    let rows = [
+        ("Temp", temp),
+        ("Vind", wind),
+        ("Nedbør", precip_combined),
+        ("Bakke", ground),
+    ];
+    let last_idx = rows.len() - 1;
+    for (i, (label, value)) in rows.iter().enumerate() {
+        let is_last_breakdown = i == last_idx;
+        let branch = if is_last_breakdown && !penalties_follow {
+            "└─"
+        } else {
+            "├─"
+        };
+        let _ = writeln!(out, "             {branch} {}", format_axis_row(label, *value, dim));
+    }
+}
+
+/// One row of the breakdown tree: dim label, score-coloured bar, and the
+/// numeric value. Label width is fixed so all rows align under each other.
+fn format_axis_row(label: &str, value: u8, dim: bool) -> String {
+    const LABEL_WIDTH: usize = 7; // "Nedbør " is the longest, 6 chars + 1 pad.
+    let label_padded = format!("{label:<LABEL_WIDTH$}");
+    let label_p = theme::paint_dim(&label_padded);
+    let value_str = format!("{value:>3}");
+    let value_p = if dim {
+        theme::paint_dim(&value_str)
+    } else {
+        theme::paint_score_str(&value_str, value)
+    };
+    format!("{label_p} {} {value_p}", colored_bar(value))
+}
+
+fn avg_day_axis<F>(day: &DayAggregate, f: F) -> u8
+where
+    F: Fn(&grusindeks_core::score::ScoreBreakdown) -> u8,
+{
+    let n = day.points.len() as u32;
+    if n == 0 {
+        return 0;
+    }
+    let sum: u32 = day
+        .points
+        .iter()
+        .map(|p| u32::from(f(&p.day_score.score.breakdown)))
+        .sum();
+    (sum / n) as u8
 }
 
 /// Format a single penalty line: "Vind: snitt 8.2 m/s" with the
@@ -703,12 +796,166 @@ mod tests {
         let forecast = MultiDayForecast { days: vec![day] };
         let default_out = render_multi_day("Oslo", 20.0, &forecast, false);
         let verbose_out = render_multi_day("Oslo", 20.0, &forecast, true);
-        let count = |s: &str| s.matches("└─").count();
+        // Penalty rows are tree-prefixed (`├─`/`└─`) AND contain `: ` between
+        // the component label and its message. Breakdown rows share the
+        // tree prefix but never carry a colon, which is what lets us count
+        // penalty rows specifically.
+        let count_penalty_rows = |s: &str| {
+            s.lines()
+                .filter(|line| {
+                    (line.contains("├─") || line.contains("└─")) && line.contains(": ")
+                })
+                .count()
+        };
         assert!(
-            count(&verbose_out) > count(&default_out),
+            count_penalty_rows(&verbose_out) > count_penalty_rows(&default_out),
             "verbose should add penalty rows: default={}, verbose={}\n--- default ---\n{default_out}\n--- verbose ---\n{verbose_out}",
-            count(&default_out),
-            count(&verbose_out),
+            count_penalty_rows(&default_out),
+            count_penalty_rows(&verbose_out),
+        );
+    }
+
+    fn at(date: NaiveDate, h: u32) -> DateTime<Utc> {
+        Utc.from_utc_datetime(&date.and_hms_opt(h, 0, 0).unwrap())
+    }
+
+    fn one_day_forecast(date: NaiveDate) -> MultiDayForecast {
+        use crate::aggregate::DayAggregate;
+        use grusindeks_core::daily::compute_day;
+
+        let win = RideWindow::from_hours(at(date, 6), 12);
+        let now = at(date, 5);
+        let center = Point::new(59.9139, 10.7522);
+        let hours: Vec<HourlyConditions> = (6..18)
+            .map(|h| HourlyConditions::minimal(at(date, h), 17.0, 2.0, 0.0))
+            .collect();
+        let day = DayAggregate::from_points(
+            date,
+            win,
+            center,
+            vec![(center, compute_day(&hours, win, 0.0, now))],
+        );
+        MultiDayForecast { days: vec![day] }
+    }
+
+    fn day_with(date: NaiveDate, mean: u8, confidence: Confidence) -> DayAggregate {
+        use crate::aggregate::DayPointScore;
+        use grusindeks_core::daily::DayScore;
+        use grusindeks_core::score::{score, ScoreBreakdown};
+
+        let win = RideWindow::from_hours(at(date, 6), 12);
+        let center = Point::new(59.9139, 10.7522);
+        let dummy_score = score(&[] as &[HourlyConditions], win, 0.0);
+        let day_score = DayScore {
+            window: win,
+            score: grusindeks_core::score::Grusindeks {
+                total: mean,
+                breakdown: ScoreBreakdown {
+                    temperature: 0,
+                    wind: 0,
+                    precipitation: 0,
+                    precip_probability: 0,
+                    ground: 0,
+                },
+                ..dummy_score
+            },
+            confidence,
+            hours_with_data: 12,
+            optimal_window: None,
+            weather_icon: "☀",
+        };
+        DayAggregate {
+            date,
+            window: win,
+            min: mean,
+            mean,
+            max: mean,
+            confidence,
+            optimal_window: None,
+            points: vec![DayPointScore {
+                point: center,
+                bearing_deg: 0.0,
+                bearing_label: "senter",
+                day_score,
+            }],
+        }
+    }
+
+    #[test]
+    fn pick_best_day_breaks_ties_by_confidence_then_earliest_date() {
+        use chrono::Duration;
+        let today = NaiveDate::from_ymd_opt(2026, 4, 26).unwrap();
+
+        // Three days, all score 90: high-conf tomorrow, low-conf today,
+        // medium-conf in two days. Best should be tomorrow (highest
+        // confidence wins the mean tie).
+        let days = vec![
+            day_with(today, 90, Confidence::Lav),
+            day_with(today + Duration::days(1), 90, Confidence::Hoy),
+            day_with(today + Duration::days(2), 90, Confidence::Middels),
+        ];
+        let best = pick_best_day(&days).expect("non-empty");
+        assert_eq!(best.date, today + Duration::days(1));
+
+        // All same confidence + same mean → earliest date wins.
+        let days_same_conf = vec![
+            day_with(today + Duration::days(2), 80, Confidence::Hoy),
+            day_with(today + Duration::days(1), 80, Confidence::Hoy),
+            day_with(today, 80, Confidence::Hoy),
+        ];
+        let best = pick_best_day(&days_same_conf).expect("non-empty");
+        assert_eq!(best.date, today, "earliest date should win on full tie");
+
+        // Higher mean still beats higher confidence.
+        let days_mean_wins = vec![
+            day_with(today, 70, Confidence::Hoy),
+            day_with(today + Duration::days(3), 95, Confidence::Lav),
+        ];
+        let best = pick_best_day(&days_mean_wins).expect("non-empty");
+        assert_eq!(best.mean, 95, "higher mean should still win over confidence");
+    }
+
+    #[test]
+    fn multi_day_render_shows_breakdown_for_today_by_default() {
+        let today = Local::now().date_naive();
+        let forecast = one_day_forecast(today);
+        let out = render_multi_day("Oslo", 20.0, &forecast, false);
+        // The chip uses "Temp " — penalties use the longer "Temperatur",
+        // and the headline doesn't mention either, so this is unique
+        // to the breakdown line.
+        assert!(
+            out.contains("Temp "),
+            "expected today's breakdown line in output:\n{out}"
+        );
+    }
+
+    #[test]
+    fn multi_day_render_omits_breakdown_for_non_today_by_default() {
+        let today = Local::now().date_naive();
+        let future = today + chrono::Duration::days(2);
+        let forecast = one_day_forecast(future);
+        let out = render_multi_day("Oslo", 20.0, &forecast, false);
+        assert!(
+            !out.contains("Temp "),
+            "future day should not show breakdown by default:\n{out}"
+        );
+    }
+
+    #[test]
+    fn multi_day_render_verbose_extends_breakdown_to_every_day() {
+        let today = Local::now().date_naive();
+        let mut forecast = one_day_forecast(today);
+        forecast
+            .days
+            .extend(one_day_forecast(today + chrono::Duration::days(1)).days);
+
+        let count = |s: &str| s.matches("Temp ").count();
+        let default_chips = count(&render_multi_day("Oslo", 20.0, &forecast, false));
+        let verbose_chips = count(&render_multi_day("Oslo", 20.0, &forecast, true));
+        // Default: today only → 1 "Temp " hit. Verbose: today + tomorrow → 2.
+        assert!(
+            verbose_chips > default_chips,
+            "verbose should add breakdown rows: default={default_chips}, verbose={verbose_chips}"
         );
     }
 

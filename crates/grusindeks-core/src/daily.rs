@@ -32,6 +32,17 @@ impl Confidence {
             Confidence::Lav => "lav",
         }
     }
+
+    /// Sortable rank where higher = more trustworthy. Used to break ties
+    /// when picking a "best day" in the multi-day view: a `Høy`-konfidens
+    /// 90 should beat a `Lav`-konfidens 90.
+    pub fn rank(self) -> u8 {
+        match self {
+            Confidence::Hoy => 2,
+            Confidence::Middels => 1,
+            Confidence::Lav => 0,
+        }
+    }
 }
 
 /// A sub-window of the day that scores meaningfully better than the day
