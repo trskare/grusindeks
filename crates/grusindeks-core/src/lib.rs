@@ -7,5 +7,6 @@
 pub mod daily;
 pub mod drying;
 pub mod geo;
+pub mod lang;
 pub mod score;
 pub mod types;

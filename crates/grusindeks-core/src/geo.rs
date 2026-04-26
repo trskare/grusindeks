@@ -86,12 +86,22 @@ pub fn sample_around(center: Point, radius_km: f64) -> Vec<Point> {
     out
 }
 
-/// Convert a bearing (0–360°) to a short Norwegian compass label.
-/// Useful for output formatting ("verste punkt: NV").
-pub fn bearing_label_no(bearing_deg: f64) -> &'static str {
+/// Convert a bearing (0–360°) to a short compass label in the requested
+/// language. Norwegian uses Ø (NØ/Ø/SØ); Swedish uses Ö (NÖ/Ö/SÖ).
+pub fn bearing_label(bearing_deg: f64, lang: crate::lang::Language) -> &'static str {
+    use crate::lang::Language;
     let b = ((bearing_deg % 360.0) + 360.0) % 360.0;
     let idx = ((b / 45.0).round() as usize) % 8;
-    ["N", "NØ", "Ø", "SØ", "S", "SV", "V", "NV"][idx]
+    match lang {
+        Language::Norwegian => ["N", "NØ", "Ø", "SØ", "S", "SV", "V", "NV"][idx],
+        Language::Swedish => ["N", "NÖ", "Ö", "SÖ", "S", "SV", "V", "NV"][idx],
+    }
+}
+
+/// Backwards-compatible Norwegian-only bearing label. Prefer
+/// [`bearing_label`] in new code.
+pub fn bearing_label_no(bearing_deg: f64) -> &'static str {
+    bearing_label(bearing_deg, crate::lang::Language::Norwegian)
 }
 
 /// Initial bearing from `from` to `to`, in degrees clockwise from north.
@@ -251,7 +261,7 @@ mod tests {
         }
     }
 
-    // ---- bearing_label_no ----
+    // ---- bearing_label ----
 
     #[rstest]
     #[case(0.0, "N")]
@@ -265,8 +275,16 @@ mod tests {
     #[case(360.0, "N")] // wraps
     #[case(22.0, "N")] // rounds to nearest
     #[case(23.0, "NØ")]
-    fn bearing_labels(#[case] deg: f64, #[case] expected: &str) {
+    fn bearing_labels_norwegian(#[case] deg: f64, #[case] expected: &str) {
         assert_eq!(bearing_label_no(deg), expected);
+    }
+
+    #[rstest]
+    #[case(45.0, "NÖ")]
+    #[case(90.0, "Ö")]
+    #[case(135.0, "SÖ")]
+    fn bearing_labels_swedish(#[case] deg: f64, #[case] expected: &str) {
+        assert_eq!(bearing_label(deg, crate::lang::Language::Swedish), expected);
     }
 
     // ---- bearing_deg ----

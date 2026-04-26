@@ -201,6 +201,7 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
                 days: day_windows,
                 frost_source_id: frost_source_id.as_deref(),
                 history_hours: 168,
+                lang: cfg.language,
                 progress: &progress,
             },
         )
@@ -219,6 +220,7 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
                 location.radius_km,
                 &forecast,
                 cli.verbose,
+                cfg.language,
             );
             print!("{body}");
         }
@@ -235,6 +237,7 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
             window: win,
             frost_source_id: frost_source_id.as_deref(),
             history_hours: 168,
+            lang: cfg.language,
             progress: &progress,
         },
     )
@@ -256,6 +259,7 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
             win,
             &agg,
             cli.verbose,
+            cfg.language,
         );
         print!("{body}");
     }

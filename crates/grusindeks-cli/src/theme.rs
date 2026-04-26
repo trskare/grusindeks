@@ -27,11 +27,11 @@ pub const PURPLE: Rgb = Rgb(0xd3, 0x86, 0x9b);
 /// uses, so the colour and the label always agree.
 pub fn score_color(total: u8) -> Rgb {
     match total {
-        0..=24 => RED,       // Dårlig
-        25..=44 => ORANGE,   // Marginalt
-        45..=64 => YELLOW,   // OK
-        65..=84 => GREEN,    // Bra
-        _ => AQUA,           // Strålende
+        0..=24 => RED,     // Dårlig
+        25..=44 => ORANGE, // Marginalt
+        45..=64 => YELLOW, // OK
+        65..=84 => GREEN,  // Bra
+        _ => AQUA,         // Strålende
     }
 }
 
@@ -57,15 +57,22 @@ pub fn component_color(c: Component) -> Rgb {
     }
 }
 
-/// Norwegian label prefix for a component, used on penalty rows.
-pub fn component_label_no(c: Component) -> &'static str {
-    match c {
-        Component::Temperature => "Temperatur",
-        Component::Wind => "Vind",
-        Component::Precipitation => "Nedbør",
-        Component::PrecipProbability => "Sannsynlighet",
-        Component::Ground => "Bakke",
-        Component::HardCap => "Advarsel",
+/// Localized label prefix for a component, used on penalty rows.
+pub fn component_label(c: Component, lang: grusindeks_core::lang::Language) -> &'static str {
+    use grusindeks_core::lang::Language;
+    match (lang, c) {
+        (Language::Norwegian, Component::Temperature) => "Temperatur",
+        (Language::Norwegian, Component::Wind) => "Vind",
+        (Language::Norwegian, Component::Precipitation) => "Nedbør",
+        (Language::Norwegian, Component::PrecipProbability) => "Sannsynlighet",
+        (Language::Norwegian, Component::Ground) => "Bakke",
+        (Language::Norwegian, Component::HardCap) => "Advarsel",
+        (Language::Swedish, Component::Temperature) => "Temperatur",
+        (Language::Swedish, Component::Wind) => "Vind",
+        (Language::Swedish, Component::Precipitation) => "Nederbörd",
+        (Language::Swedish, Component::PrecipProbability) => "Sannolikhet",
+        (Language::Swedish, Component::Ground) => "Mark",
+        (Language::Swedish, Component::HardCap) => "Varning",
     }
 }
 
@@ -127,8 +134,8 @@ pub fn paint_severity(s: &str, sev: Severity) -> String {
     format!("{}", s.if_supports_color(Stdout, |x| x.style(style)))
 }
 
-pub fn paint_component_label(c: Component) -> String {
-    let label = component_label_no(c);
+pub fn paint_component_label(c: Component, lang: grusindeks_core::lang::Language) -> String {
+    let label = component_label(c, lang);
     let style = Style::new().color(component_color(c)).bold();
     format!("{}", label.if_supports_color(Stdout, |x| x.style(style)))
 }
@@ -155,8 +162,14 @@ mod tests {
     fn severity_color_orders_by_intensity() {
         // The exact RGBs are an implementation detail; what we care about
         // is that the three are distinct so the eye can tell them apart.
-        assert_ne!(severity_color(Severity::Minor), severity_color(Severity::Major));
-        assert_ne!(severity_color(Severity::Major), severity_color(Severity::Critical));
+        assert_ne!(
+            severity_color(Severity::Minor),
+            severity_color(Severity::Major)
+        );
+        assert_ne!(
+            severity_color(Severity::Major),
+            severity_color(Severity::Critical)
+        );
     }
 
     #[test]
