@@ -110,7 +110,13 @@ pub fn paint_bar_filled(s: &str, total: u8) -> String {
 }
 
 pub fn paint_bar_empty(s: &str) -> String {
-    let style = Style::new().color(GRAY);
+    // Foreground AND background both gray → the `▒` glyph's pattern
+    // disappears (same colour on same colour) and the cell renders as
+    // a solid gray rectangle that matches `paint_bar_partial`'s right
+    // portion exactly. With NO_COLOR / non-TTY the styling is a no-op
+    // and we fall back to the raw `▒` glyph, which still reads as
+    // "empty bar" in plain text.
+    let style = Style::new().color(GRAY).on_color(GRAY);
     format!("{}", s.if_supports_color(Stdout, |x| x.style(style)))
 }
 

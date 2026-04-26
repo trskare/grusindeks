@@ -191,7 +191,7 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
     let client = build_client(&cfg, cli.api_base.as_ref(), cli.frost_base.as_ref())?;
 
     if days > 1 {
-        let day_windows = build_day_windows(Local::now().date_naive(), days)?;
+        let day_windows = build_day_windows(Local::now().date_naive(), days, Utc::now())?;
         let progress = TerminalProgress::new();
         let result = run_forecast(
             &client,
@@ -270,23 +270,41 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
 /// no time arguments — today plus the next five days.
 const DEFAULT_FORECAST_DAYS: u8 = 6;
 
-/// Local "ride hours" used for the multi-day day window. Wide enough to
-/// catch most realistic ride times while still excluding the dead-of-night
-/// hours that would skew the average for no real benefit.
-const RIDE_HOURS_LOCAL: (u32, u32) = (6, 22);
-
-/// Build `n` consecutive day windows starting at `start_date` (local). Each
-/// window covers `RIDE_HOURS_LOCAL` in local time, converted to UTC.
-fn build_day_windows(start_date: NaiveDate, n: u8) -> Result<Vec<DayWindow>> {
-    let (h_start, h_end) = RIDE_HOURS_LOCAL;
+/// Build `n` consecutive day windows starting at `start_date` (local).
+///
+/// Each future day spans the *whole* local calendar day (00:00–24:00).
+/// "Today" is clipped to start at the current moment instead of midnight
+/// — by the time the user runs grusindeks, anything before "now" is
+/// history and dragging the score with it just produces a fictional
+/// number. If the clipped today-window has zero hours left (running at
+/// midnight exactly), today is dropped from the forecast.
+fn build_day_windows(
+    start_date: NaiveDate,
+    n: u8,
+    now: DateTime<Utc>,
+) -> Result<Vec<DayWindow>> {
     let mut out = Vec::with_capacity(n as usize);
     for offset in 0..i64::from(n) {
         let date = start_date + ChronoDuration::days(offset);
-        let start = local_to_utc(date.and_time(NaiveTime::from_hms_opt(h_start, 0, 0).unwrap()))?;
-        let end = local_to_utc(date.and_time(NaiveTime::from_hms_opt(h_end, 0, 0).unwrap()))?;
+        let day_start = local_to_utc(date.and_time(NaiveTime::MIN))?;
+        let day_end = local_to_utc(
+            (date + ChronoDuration::days(1)).and_time(NaiveTime::MIN),
+        )?;
+        // Clip "today" so the window starts at `now` rather than at
+        // local midnight that's already in the past.
+        let start = if day_start < now && now < day_end {
+            now
+        } else {
+            day_start
+        };
+        if start >= day_end {
+            // Today has fully ended (running exactly at the day's end):
+            // drop it.
+            continue;
+        }
         out.push(DayWindow {
             date,
-            window: RideWindow { start, end },
+            window: RideWindow { start, end: day_end },
         });
     }
     Ok(out)

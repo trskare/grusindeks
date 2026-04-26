@@ -69,7 +69,12 @@ fn colored_bar(value: u8) -> String {
 
     let filled = "█".repeat(full);
     let empty_cells = BAR_FULL_CELLS + 1 - full - if trailing.is_some() { 1 } else { 0 };
-    let empty: String = "░".repeat(empty_cells);
+    // `▒` (U+2592, medium shade, ~50% density) instead of `░` (light
+    // shade, ~25%): matches the visual weight of the half-block
+    // partial cell's gray background. With `░` the empty section read
+    // as a noticeably *lighter* grey than the partial cell's filler,
+    // creating an unintended visual seam mid-bar.
+    let empty: String = "▒".repeat(empty_cells);
 
     // The trailing half-block cell needs a *background* colour, not just
     // a foreground — the right portion of `▏▎▍▌▋▊▉` is the cell
@@ -459,7 +464,13 @@ fn write_day_row(
 
     let dim = theme::dim_for_confidence(day.confidence);
 
-    let score_str = format!("{:>3}", day.mean);
+    // Left-aligned to 3 cells. Right-alignment makes "100" extend one
+    // column further left than 2-digit scores (the first digit `1`
+    // lands where the leading space of " 79" sits), which breaks
+    // first-digit visual scanning down the score column. Left-align
+    // anchors all first digits at the same column; the trailing space
+    // for 2-digit values lands harmlessly between score and conf-marker.
+    let score_str = format!("{:<3}", day.mean);
     let score_p = if dim {
         theme::paint_dim(&score_str)
     } else {
@@ -490,36 +501,22 @@ fn write_day_row(
     );
 
     let is_today = day.date == today_local;
+    let penalty_take = center.score.penalties.len();
 
     // Sub-axis breakdown (Temp/Vind/Nedbør/Bakke):
     //   * default mode: today only — that's the day the user acts on
-    //   * --verbose: every day, plus the full penalty list
-    if !verbose && is_today {
-        // No penalties follow in default mode, so the tree closes with
-        // `└─` on the last row.
-        write_day_breakdown(out, day, dim, false, lang);
+    //   * --verbose: every day. The tree's last row closes with `└─`
+    //     unless penalty rows follow (verbose only).
+    if is_today || verbose {
+        write_day_breakdown(out, day, dim, verbose && penalty_take > 0, lang);
     }
 
-    if !verbose {
-        return;
-    }
-
-    // Verbose: per-axis breakdown + full penalty list. The breakdown
-    // tree closes with `└─` only when no penalties follow.
-    let penalty_take = center.score.penalties.len();
-    write_day_breakdown(out, day, dim, penalty_take > 0, lang);
-    for (i, penalty) in center.score.penalties.iter().take(penalty_take).enumerate() {
-        let is_last = i + 1 == penalty_take;
-        let branch = if is_last { "└─" } else { "├─" };
-        let _ = writeln!(
-            out,
-            "{BREAKDOWN_INDENT}{branch} {}",
-            format_penalty_line(penalty, lang)
-        );
-    }
-
-    // "Best luke" hint — only on days where the optimal window improves
-    // by enough to clear the threshold (caller already filtered).
+    // "Beste luke" — a sub-day window that scores significantly higher
+    // than the day's mean. The score layer only emits an `optimal_window`
+    // when the improvement clears its threshold, so rendering it
+    // whenever it's `Some` is correct. Surface it in default mode too:
+    // knowing "today's mean is 70 but 06–09 is 95" is one of the
+    // highest-value signals the renderer can show.
     if let Some(ow) = &center.optimal_window {
         let (luke_phrase, points_word) = match lang {
             Language::Norwegian => ("Beste luke", "poeng"),
@@ -527,13 +524,28 @@ fn write_day_row(
         };
         let _ = writeln!(
             out,
-            "             ★ {luke_phrase}: {}–{} → {} ({}, +{} {})",
+            "{BREAKDOWN_INDENT}★ {luke_phrase}: {}–{} → {} ({}, +{} {})",
             local_hm(ow.window.start),
             local_hm(ow.window.end),
             theme::paint_score(ow.score.total),
             theme::paint_label(mean_label(ow.score.total, lang), ow.score.total),
             ow.improvement,
             points_word,
+        );
+    }
+
+    if !verbose {
+        return;
+    }
+
+    // Verbose-only: full penalty list under each day.
+    for (i, penalty) in center.score.penalties.iter().take(penalty_take).enumerate() {
+        let is_last = i + 1 == penalty_take;
+        let branch = if is_last { "└─" } else { "├─" };
+        let _ = writeln!(
+            out,
+            "{BREAKDOWN_INDENT}{branch} {}",
+            format_penalty_line(penalty, lang)
         );
     }
 }
@@ -568,20 +580,24 @@ fn write_day_breakdown(
     let precip = avg_day_axis(day, |b| b.precipitation);
     let prob = avg_day_axis(day, |b| b.precip_probability);
     let ground = avg_day_axis(day, |b| b.ground);
-    let (precip_combined, _) = combined_precip(precip, prob, lang);
+    // Capture the precip detail (`(mengde X, sjanse Y)`) so we can append
+    // it to the Nedbør row when amount and probability diverge — that's
+    // exactly the case where the combined number alone is misleading
+    // (e.g. 0 mm forecast but 50 % chance lands at ~85, not 100).
+    let (precip_combined, precip_detail) = combined_precip(precip, prob, lang);
 
     let (temp_label, wind_label, precip_label, ground_label) = match lang {
         Language::Norwegian => ("Temp", "Vind", "Nedbør", "Bakke"),
         Language::Swedish => ("Temp", "Vind", "Nederbörd", "Mark"),
     };
-    let rows = [
-        (temp_label, temp),
-        (wind_label, wind),
-        (precip_label, precip_combined),
-        (ground_label, ground),
+    let rows: [(&str, u8, &str); 4] = [
+        (temp_label, temp, ""),
+        (wind_label, wind, ""),
+        (precip_label, precip_combined, precip_detail.as_str()),
+        (ground_label, ground, ""),
     ];
     let last_idx = rows.len() - 1;
-    for (i, (label, value)) in rows.iter().enumerate() {
+    for (i, (label, value, suffix)) in rows.iter().enumerate() {
         let is_last_breakdown = i == last_idx;
         let branch = if is_last_breakdown && !penalties_follow {
             "└─"
@@ -590,8 +606,9 @@ fn write_day_breakdown(
         };
         let _ = writeln!(
             out,
-            "{BREAKDOWN_INDENT}{branch} {}",
-            format_axis_row(label, *value, dim)
+            "{BREAKDOWN_INDENT}{branch} {}{}",
+            format_axis_row(label, *value, dim),
+            theme::paint_dim(suffix),
         );
     }
 }
@@ -606,13 +623,18 @@ fn format_axis_row(label: &str, value: u8, dim: bool) -> String {
     const LABEL_WIDTH: usize = 9;
     let label_padded = format!("{label:<LABEL_WIDTH$}");
     let label_p = theme::paint_dim(&label_padded);
-    let value_str = format!("{value:>3}");
+    // Left-aligned to 3 cells, matching the day-row score so first
+    // digits land in the same column whether the value is 2 or 3 digits.
+    let value_str = format!("{value:<3}");
     let value_p = if dim {
         theme::paint_dim(&value_str)
     } else {
         theme::paint_score_str(&value_str, value)
     };
-    format!("{label_p} {} {value_p}", colored_bar(value))
+    // Two spaces between bar and value, matching the day row's format
+    // string `"  {}  {}{} {}  {}  {}"` so the per-axis score lines up
+    // vertically under the day's mean score.
+    format!("{label_p} {}  {value_p}", colored_bar(value))
 }
 
 fn avg_day_axis<F>(day: &DayAggregate, f: F) -> u8
@@ -643,15 +665,10 @@ fn format_penalty_line(p: &Penalty, lang: Language) -> String {
     )
 }
 
-/// Width-padding for the weather emoji column so single-cell glyphs
+/// Width-padding for the weather icon column so single-cell glyphs
 /// (☀ ☁ ·) and double-cell glyphs (🌧 🌨 🌬 ⛅) leave the same gap
 /// before the bar. We target a fixed 3-cell column for the icon: the
 /// glyph itself takes 1 or 2 cells, the rest is padding.
-///
-/// `unicode-width` reports 1 for the BMP "weather" symbols and 2 for
-/// the emoji weather symbols, which matches what every modern terminal
-/// actually renders, so we use it directly instead of the old hand-tuned
-/// allow-list.
 fn icon_pad(icon: &str) -> &'static str {
     const TARGET: usize = 3;
     let w = UnicodeWidthStr::width(icon);
@@ -1434,7 +1451,7 @@ mod tests {
         // half-block ramp `▏▎▍▌▋▊▉` lives in U+258F..U+2589, so we count
         // bar glyphs by checking the script range rather than enumerating.
         let is_bar =
-            |c: char| matches!(c, '█' | '▉' | '▊' | '▋' | '▌' | '▍' | '▎' | '▏' | '░');
+            |c: char| matches!(c, '█' | '▉' | '▊' | '▋' | '▌' | '▍' | '▎' | '▏' | '▒');
         assert_eq!(
             colored_bar(0).chars().filter(|c| is_bar(*c)).count(),
             10,
