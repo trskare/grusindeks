@@ -28,6 +28,37 @@ I CLI-utskriften vises de to nedbør-signalene som én **Nedbør**-rad
 dukker bare opp når de avviker mer enn 5 poeng — ellers er rommet bare
 støy.
 
+## Installasjon
+
+### Forutsetninger
+
+- Rust 1.80 eller nyere — installer via [rustup](https://rustup.rs):
+  `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+
+Ingen andre system-avhengigheter; HTTP-klienten bruker `rustls` og
+`reqwest`, så du trenger ikke OpenSSL.
+
+### Bygg fra kilde
+
+```sh
+git clone https://github.com/trskare/grusindeks.git
+cd grusindeks
+
+# Optimalisert release-binær:
+cargo build --release
+# Resultatet ligger i ./target/release/grusindeks
+
+# Eller installer globalt i ~/.cargo/bin/:
+cargo install --path crates/grusindeks-cli
+
+# Verifiser:
+grusindeks --version
+```
+
+`cargo build` (uten `--release`) gir en raskere debug-bygg i
+`./target/debug/grusindeks` — fint mens du eksperimenterer, men
+~10× tregere ved kjøring.
+
 ## Bruk
 
 ```sh
