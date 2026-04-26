@@ -114,6 +114,11 @@ pub fn compute_day(
 /// Pick a single weather emoji that best summarises the day. Order of
 /// precedence is "what would a cyclist actually want to see first": storm
 /// wind dominates, then snow, then rain, then cloud cover.
+///
+/// Rain threshold is intentionally tight — `🌧` only fires when there's
+/// enough precipitation that the ride would actually feel wet. A 1-mm
+/// shower spread over a 16-h day window scores ~93/100 and shouldn't
+/// be flagged as a "rain day" or the icon contradicts the score.
 pub fn weather_icon_for(hours: &[&HourlyConditions]) -> &'static str {
     if hours.is_empty() {
         return "·";
@@ -121,6 +126,10 @@ pub fn weather_icon_for(hours: &[&HourlyConditions]) -> &'static str {
     let n = hours.len() as f64;
     let mean_temp = hours.iter().map(|h| h.temperature_c).sum::<f64>() / n;
     let total_precip: f64 = hours.iter().map(|h| h.precipitation_mm).sum();
+    let max_hourly_precip = hours
+        .iter()
+        .map(|h| h.precipitation_mm)
+        .fold(f64::NEG_INFINITY, f64::max);
     let max_wind = hours
         .iter()
         .map(|h| h.wind_speed_ms)
@@ -137,7 +146,12 @@ pub fn weather_icon_for(hours: &[&HourlyConditions]) -> &'static str {
     if max_wind.is_finite() && max_wind > 10.0 {
         return "🌬";
     }
-    if total_precip > 1.0 {
+    // Rain icon only when intensity *or* accumulation actually matters
+    // for the ride. Tuned to roughly match the scoring drizzle threshold
+    // (0.5 mm/h) and a multi-hour wet stretch (~3 mm total).
+    let notable_rain = (max_hourly_precip.is_finite() && max_hourly_precip > 0.5)
+        || total_precip > 3.0;
+    if notable_rain {
         return if mean_temp <= 0.0 { "🌨" } else { "🌧" };
     }
     match mean_cloud {
@@ -146,7 +160,6 @@ pub fn weather_icon_for(hours: &[&HourlyConditions]) -> &'static str {
         Some(_) => "☀",
         // Long-range forecasts often miss cloud cover. Fall back to a
         // neutral cloudy-ish glyph rather than promising sunshine.
-        None if total_precip > 0.0 => "🌧",
         None => "⛅",
     }
 }
@@ -439,13 +452,27 @@ mod tests {
     }
 
     #[test]
-    fn weather_icon_rain_when_total_precip_above_1mm_and_warm() {
-        // Light rain across the window, warm enough to be liquid.
+    fn weather_icon_rain_when_max_hourly_above_drizzle_threshold() {
+        // One hour of moderate rain (0.8 mm/h) is enough to flag the
+        // day as 🌧, even though the total is small.
+        let mut hs: Vec<_> = (6..18)
+            .map(|h| HourlyConditions {
+                cloud_area_fraction: Some(90.0),
+                ..HourlyConditions::minimal(t(2026, 4, 26, h), 8.0, 2.0, 0.0)
+            })
+            .collect();
+        hs[3].precipitation_mm = 0.8;
+        let refs: Vec<&HourlyConditions> = hs.iter().collect();
+        assert_eq!(weather_icon_for(&refs), "🌧");
+    }
+
+    #[test]
+    fn weather_icon_rain_when_total_above_3mm_even_if_no_spike() {
+        // Wet all day at low intensity (0.3 mm/h × 12 h = 3.6 mm total).
         let hs: Vec<_> = (6..18)
             .map(|h| HourlyConditions {
-                precipitation_mm: 0.2,
                 cloud_area_fraction: Some(90.0),
-                ..HourlyConditions::minimal(t(2026, 4, 26, h), 8.0, 2.0, 0.2)
+                ..HourlyConditions::minimal(t(2026, 4, 26, h), 8.0, 2.0, 0.3)
             })
             .collect();
         let refs: Vec<&HourlyConditions> = hs.iter().collect();
@@ -453,13 +480,33 @@ mod tests {
     }
 
     #[test]
-    fn weather_icon_snow_when_precip_and_freezing() {
-        let hs: Vec<_> = (6..18)
+    fn weather_icon_brief_shower_falls_back_to_cloud_not_rain() {
+        // A single light hour (0.2 mm) over a 12-h day → cycling-wise
+        // a non-event. Score sits in the 90s so the icon must agree.
+        let mut hs: Vec<_> = (6..18)
             .map(|h| HourlyConditions {
-                cloud_area_fraction: Some(90.0),
-                ..HourlyConditions::minimal(t(2026, 4, 26, h), -3.0, 2.0, 0.2)
+                cloud_area_fraction: Some(60.0),
+                ..HourlyConditions::minimal(t(2026, 4, 26, h), 12.0, 2.0, 0.0)
             })
             .collect();
+        hs[5].precipitation_mm = 0.2;
+        let refs: Vec<&HourlyConditions> = hs.iter().collect();
+        let icon = weather_icon_for(&refs);
+        assert!(
+            icon == "⛅" || icon == "☀" || icon == "☁",
+            "expected a cloud/sun glyph for a 0.2 mm shower, got {icon:?}"
+        );
+    }
+
+    #[test]
+    fn weather_icon_snow_when_precip_and_freezing() {
+        let mut hs: Vec<_> = (6..18)
+            .map(|h| HourlyConditions {
+                cloud_area_fraction: Some(90.0),
+                ..HourlyConditions::minimal(t(2026, 4, 26, h), -3.0, 2.0, 0.0)
+            })
+            .collect();
+        hs[3].precipitation_mm = 0.8;
         let refs: Vec<&HourlyConditions> = hs.iter().collect();
         assert_eq!(weather_icon_for(&refs), "🌨");
     }
