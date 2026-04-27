@@ -224,9 +224,25 @@ async fn fetch_forecasts_parallel(
     }
     let mut out = Vec::with_capacity(points.len());
     while let Some(joined) = set.join_next().await {
-        let (p, hours) = joined??;
-        out.push((p, hours));
-        progress.forecast_point_done();
+        match joined {
+            Ok(Ok((p, hours))) => {
+                out.push((p, hours));
+                progress.forecast_point_done();
+            }
+            // First failure wins. Abort the remaining fan-out tasks so we
+            // don't sit through up to 15s of timeouts on requests we no
+            // longer care about, then surface the original error.
+            Ok(Err(e)) => {
+                set.abort_all();
+                progress.forecast_finished();
+                return Err(e);
+            }
+            Err(join_err) => {
+                set.abort_all();
+                progress.forecast_finished();
+                return Err(join_err.into());
+            }
+        }
     }
     progress.forecast_finished();
     // JoinSet yields tasks in completion order — i.e. whichever HTTP
