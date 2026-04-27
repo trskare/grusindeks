@@ -460,6 +460,13 @@ fn prob_penalty(subscore: u8, max_prob: Option<f64>, lang: Language) -> Option<P
 }
 
 fn ground_penalty(subscore: u8, ground_water_mm: f64, lang: Language) -> Option<Penalty> {
+    // Wet-side narrative only. Below/at the optimum the score deficit
+    // comes from the dry floor or `apply_drought_penalty`, and saying
+    // "våt fra forrige døgn (0.0 mm)" next to "tørt og løst dekke"
+    // would be self-contradictory.
+    if ground_water_mm <= thresholds::GROUND_OPTIMAL_MM {
+        return None;
+    }
     let severity = severity_for(subscore)?;
     let saturated = ground_water_mm >= thresholds::GROUND_SATURATED;
     let message_no = match (lang, saturated) {
@@ -1325,6 +1332,30 @@ mod tests {
             "expected '4 døgn' in {:?}",
             drought.message_no
         );
+    }
+
+    #[test]
+    fn score_wet_message_does_not_fire_during_drought() {
+        // Parched surface (0 mm + 7 dry days) lowers the ground subscore
+        // via apply_drought_penalty into the Minor band. The drought
+        // penalty owns the narrative; the wet-side message must not also
+        // appear with "0.0 mm" — that would contradict it.
+        let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
+        let surface = SurfaceState {
+            accumulated_mm: 0.0,
+            hours_since_meaningful_rain: 168.0,
+        };
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            Some(surface),
+            Language::Norwegian,
+        );
+        let wet = s
+            .penalties
+            .iter()
+            .find(|p| p.message_no.to_lowercase().contains("våt"));
+        assert!(wet.is_none(), "got {:?}", s.penalties);
     }
 
     #[test]
