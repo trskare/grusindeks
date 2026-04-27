@@ -420,6 +420,7 @@ fn build_client(
     let ua = UserAgent::new(APP, VERSION, &cfg.user_agent_contact)
         .map_err(|e| anyhow!("invalid User-Agent (check user_agent_contact): {e}"))?;
     let mut mcfg = MetClientConfig::production(ua, cfg.frost.client_id.clone());
+    let api_base_overridden = api_base.is_some();
     if let Some(u) = api_base {
         mcfg.api_base = u.clone();
     }
@@ -427,6 +428,21 @@ fn build_client(
         mcfg.frost_base = u.clone();
     }
     mcfg.timeout = StdDuration::from_secs(15);
+    // Cache only the anonymous api.met.no endpoints — Frost stays off the
+    // disk cache because of basic auth and per-request time-range
+    // semantics. Skip caching entirely when api_base is overridden
+    // (typically a wiremock from the integration suite); otherwise the
+    // tests would pollute the user's real cache directory and revalidation
+    // traffic would surprise the mocks. A failure to derive the cache
+    // dir is also non-fatal: drop back to the un-cached path with a
+    // warning so the CLI still works on environments where ProjectDirs
+    // can't resolve a home.
+    if !api_base_overridden {
+        match Config::default_cache_dir() {
+            Ok(dir) => mcfg.cache_dir = Some(dir),
+            Err(e) => tracing::warn!("disk cache disabled — could not resolve cache dir: {e}"),
+        }
+    }
     Ok(MetClient::new(mcfg)?)
 }
 

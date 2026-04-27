@@ -104,7 +104,8 @@ pub fn parse(body: &str) -> Result<Nowcast, ClientError> {
 }
 
 /// Fetch the nowcast for `point`. Coordinates are truncated to 4
-/// decimals (TOS).
+/// decimals (TOS). Goes through [`MetClient::fetch_text`] so the disk
+/// cache (when configured) revalidates with `If-Modified-Since`.
 pub async fn fetch(client: &MetClient, point: Point) -> Result<Nowcast, ClientError> {
     let p = point.truncated();
     let mut url = client.api_url(PATH)?;
@@ -113,13 +114,7 @@ pub async fn fetch(client: &MetClient, point: Point) -> Result<Nowcast, ClientEr
         .append_pair("lat", &format!("{:.4}", p.lat))
         .append_pair("lon", &format!("{:.4}", p.lon));
 
-    let resp = client.http().get(url).send().await?;
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let body = resp.text().await.ok();
-        return Err(ClientError::Http { status, body });
-    }
-    let body = resp.text().await?;
+    let body = client.fetch_text(url).await?;
     parse(&body)
 }
 
@@ -221,6 +216,7 @@ mod tests {
             frost_base: Url::parse(&format!("{}/", server.uri())).unwrap(),
             frost_client_id: None,
             timeout: Duration::from_secs(5),
+            cache_dir: None,
         };
         let client = MetClient::new(cfg).unwrap();
 

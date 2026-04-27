@@ -307,6 +307,7 @@ mod tests {
             frost_base: Url::parse(&format!("{}/", server.uri())).unwrap(),
             frost_client_id: with_client_id.then_some("test-client-id".into()),
             timeout: Duration::from_secs(5),
+            cache_dir: None,
         }
     }
 

@@ -114,11 +114,24 @@ const fn default_radius_km() -> f64 {
 }
 
 impl Config {
-    /// Default file location: `~/.config/grusindeks/config.toml` on Linux/macOS.
+    /// Default file location for the user config. Resolves to the
+    /// platform-appropriate config dir via `directories::ProjectDirs`:
+    /// Linux/BSD `~/.config/grusindeks`, macOS
+    /// `~/Library/Application Support/grusindeks`, Windows
+    /// `%APPDATA%\grusindeks\config`.
     pub fn default_path() -> Result<PathBuf> {
         let dirs = ProjectDirs::from("", "", "grusindeks")
             .ok_or_else(|| anyhow!("could not determine config directory for this OS"))?;
         Ok(dirs.config_dir().join("config.toml"))
+    }
+
+    /// Disk cache directory used by the MET HTTP client. Honours
+    /// `Expires` / `If-Modified-Since` revalidation on the anonymous
+    /// `api.met.no` endpoints (locationforecast, nowcast) per the MET TOS.
+    pub fn default_cache_dir() -> Result<PathBuf> {
+        let dirs = ProjectDirs::from("", "", "grusindeks")
+            .ok_or_else(|| anyhow!("could not determine cache directory for this OS"))?;
+        Ok(dirs.cache_dir().to_path_buf())
     }
 
     pub fn load_from(path: &Path) -> Result<Self> {

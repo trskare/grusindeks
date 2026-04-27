@@ -8,10 +8,13 @@
 //! `base_url` is injectable so tests can point the client at a local
 //! `wiremock` server instead of the real MET endpoints.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use thiserror::Error;
 use url::Url;
+
+use crate::cache::Cache;
 
 /// Errors surfaced by the client. Network/HTTP details are kept opaque so
 /// callers don't need to depend on `reqwest` directly.
@@ -99,6 +102,12 @@ pub struct MetClientConfig {
     /// Frost requires HTTP Basic auth with a `client_id` (password is empty).
     pub frost_client_id: Option<String>,
     pub timeout: Duration,
+    /// Directory used by the disk cache. `Some(path)` enables `Expires` /
+    /// `If-Modified-Since` revalidation on the anonymous `api.met.no`
+    /// endpoints (locationforecast, nowcast). `None` disables caching —
+    /// useful for tests that drive a wiremock with no need to keep state
+    /// between assertions.
+    pub cache_dir: Option<PathBuf>,
 }
 
 impl MetClientConfig {
@@ -113,6 +122,7 @@ impl MetClientConfig {
                 .expect("default Frost base URL is valid"),
             frost_client_id,
             timeout: Duration::from_secs(15),
+            cache_dir: None,
         }
     }
 }
@@ -123,6 +133,7 @@ impl MetClientConfig {
 pub struct MetClient {
     http: reqwest::Client,
     config: MetClientConfig,
+    cache: Option<Cache>,
 }
 
 impl MetClient {
@@ -131,7 +142,12 @@ impl MetClient {
             .user_agent(config.user_agent.as_str())
             .timeout(config.timeout)
             .build()?;
-        Ok(Self { http, config })
+        let cache = config.cache_dir.as_ref().map(|d| Cache::new(d.clone()));
+        Ok(Self {
+            http,
+            config,
+            cache,
+        })
     }
 
     pub fn http(&self) -> &reqwest::Client {
@@ -140,6 +156,34 @@ impl MetClient {
 
     pub fn config(&self) -> &MetClientConfig {
         &self.config
+    }
+
+    /// Disk cache for anonymous `api.met.no` GETs. `None` when caching is
+    /// disabled in the config (e.g. tests). Endpoints that talk to
+    /// authenticated services (Frost basic auth) bypass the cache entirely
+    /// and call [`http`] directly.
+    pub fn cache(&self) -> Option<&Cache> {
+        self.cache.as_ref()
+    }
+
+    /// Fetch `url` as a string body, going through the disk cache when
+    /// configured. Honors `Expires` and `If-Modified-Since` per the MET
+    /// TOS — the same behaviour the cache module's tests already cover.
+    /// When no cache directory is configured we fall back to a direct
+    /// GET, mirroring the legacy code path so wiremock-based tests don't
+    /// see surprise revalidation traffic.
+    pub async fn fetch_text(&self, url: Url) -> Result<String, ClientError> {
+        if let Some(cache) = &self.cache {
+            let (body, _outcome) = cache.get_or_revalidate(&self.http, url).await?;
+            return Ok(body);
+        }
+        let resp = self.http.get(url).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.ok();
+            return Err(ClientError::Http { status, body });
+        }
+        Ok(resp.text().await?)
     }
 
     /// Build an absolute URL relative to `api_base`.
@@ -266,6 +310,7 @@ mod tests {
             frost_base: Url::parse(&format!("{}/", server.uri())).unwrap(),
             frost_client_id: None,
             timeout: Duration::from_secs(5),
+            cache_dir: None,
         };
         let client = MetClient::new(cfg).unwrap();
 
@@ -291,6 +336,7 @@ mod tests {
             frost_base: Url::parse(&format!("{}/", server.uri())).unwrap(),
             frost_client_id: None,
             timeout: Duration::from_secs(5),
+            cache_dir: None,
         };
         let client = MetClient::new(cfg).unwrap();
         let url = client
