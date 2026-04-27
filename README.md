@@ -89,7 +89,7 @@ grusindeks --place oslo --days 5 --json
 ### Dag-for-dag prognose
 
 Uten `--window` / `--hours` defaulter CLI-en til en **6-dagers
-oversikt**. Hver dag scores over ride-vinduet **06:00–22:00 lokal tid**,
+oversikt**. Hver dag scores over sykkelvinduet **06:00–22:00 lokal tid**,
 og rapporten består av:
 
 - **Tittel-linje** — `Grusindeks · {sted} · {radius} km · N dager`
@@ -289,7 +289,7 @@ ekstra 20 poeng (saturerer på 0).
 
 ### 3. Nedbør — mengde (25%)
 
-Snitt nedbør (mm/h) over ride-vinduet. 100 ved 0; faller til 60 ved
+Snitt nedbør (mm/h) over sykkelvinduet. 100 ved 0; faller til 60 ved
 duskregn-terskel (0.5 mm/h), 20 ved tungt regn (2 mm/h), 0 ved 5+ mm/h.
 
 | mm/h | Score |
