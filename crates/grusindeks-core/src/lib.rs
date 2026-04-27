@@ -6,6 +6,7 @@
 
 pub mod daily;
 pub mod drying;
+pub mod felt_temp;
 pub mod geo;
 pub mod lang;
 pub mod score;

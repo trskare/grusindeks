@@ -252,7 +252,10 @@ mod tests {
         );
         assert_eq!(agg.max, good.total);
         assert_eq!(agg.min, bad.total);
-        assert_eq!(agg.mean, (good.total / 2 + bad.total / 2));
+        // Use the same floor-divided sum as `from_points`; halving each
+        // total before adding can lose a point to integer rounding when
+        // either total is odd.
+        assert_eq!(agg.mean, (good.total + bad.total) / 2);
         assert_eq!(agg.worst().score.total, bad.total);
         assert_eq!(agg.best().score.total, good.total);
     }

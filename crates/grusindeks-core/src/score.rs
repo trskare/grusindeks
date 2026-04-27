@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::drying::SurfaceState;
+use crate::felt_temp::apparent_temp;
 use crate::lang::Language;
 use crate::types::{HourlyConditions, RideWindow};
 
@@ -22,10 +23,10 @@ pub mod thresholds {
 
     // ---- Wind (m/s) ----
     pub const WIND_PERFECT_MAX: f64 = 3.0;
-    pub const WIND_OK_MAX: f64 = 7.0; // 100 -> 60 over [3, 7]
-    pub const WIND_POOR_MAX: f64 = 12.0; // 60 -> 20 over [7, 12]
-    pub const WIND_OK_AT_OK_MAX: u8 = 60;
-    pub const WIND_POOR_AT_POOR_MAX: u8 = 20;
+    pub const WIND_OK_MAX: f64 = 7.0; // 100 -> 50 over [3, 7]
+    pub const WIND_POOR_MAX: f64 = 12.0; // 50 -> 12 over [7, 12]
+    pub const WIND_OK_AT_OK_MAX: u8 = 50;
+    pub const WIND_POOR_AT_POOR_MAX: u8 = 12;
     /// Penalty (subtracted from wind sub-score) when gust > 1.5 × mean wind.
     pub const GUST_PENALTY: i32 = 20;
     pub const GUST_RATIO_THRESHOLD: f64 = 1.5;
@@ -44,9 +45,11 @@ pub mod thresholds {
     /// grus pakker seg og ruller best — bone-dry is slightly worse, very
     /// wet is much worse.
     pub const GROUND_OPTIMAL_MM: f64 = 0.4;
-    /// Subscore at exactly 0 mm accumulated water — small bonus for "lett
-    /// fuktig" without hammering the score on a clear summer day.
-    pub const GROUND_DRY_FLOOR_SCORE: u8 = 95;
+    /// Subscore at exactly 0 mm accumulated water — bone-dry loose gravel
+    /// is genuinely 60–80 % slower (Crr) than lightly damp packed gravel,
+    /// so the dry floor sits a few points below the optimum even before
+    /// the drought ramp kicks in.
+    pub const GROUND_DRY_FLOOR_SCORE: u8 = 92;
 
     /// Hours-since-meaningful-rain at which the drought penalty starts to
     /// kick in (3 døgn).
@@ -54,9 +57,11 @@ pub mod thresholds {
     /// Hours at which the drought penalty saturates (7 døgn).
     pub const DROUGHT_FULL_HOURS: f64 = 168.0;
     /// Maximum points the drought penalty can subtract from the ground
-    /// subscore. Soft hint by design — wet ground stays the dominant
-    /// negative factor.
-    pub const DROUGHT_MAX_PENALTY: u8 = 10;
+    /// subscore. Calibrated against gravel-tire Crr data (≈ 60–80 %
+    /// rolling-resistance hit on bone-dry loose gravel) — wet ground is
+    /// still the dominant negative factor, but a week of drought now
+    /// shows up as a clearly worse ride.
+    pub const DROUGHT_MAX_PENALTY: u8 = 15;
 
     // ---- Hard caps ----
     pub const HARD_CAP_PRECIP_MM_PER_HOUR: f64 = 5.0;
@@ -64,8 +69,13 @@ pub mod thresholds {
     pub const HARD_CAP_TOTAL: u8 = 25;
 
     // ---- Weights (must sum to 100) ----
-    pub const W_TEMP: u8 = 15;
-    pub const W_WIND: u8 = 20;
+    // Temperature is the apparent ("felt-T") axis: it already folds in
+    // wind chill on the cold side and heat index on the warm side, so
+    // it carries more weight than rå-temperatur did. Wind drops slightly
+    // since it now represents handling/effort rather than thermal
+    // comfort (the comfort half lives in temperature).
+    pub const W_TEMP: u8 = 18;
+    pub const W_WIND: u8 = 17;
     pub const W_PRECIP: u8 = 25;
     pub const W_PROB: u8 = 10;
     pub const W_GROUND: u8 = 30;
@@ -149,9 +159,9 @@ pub struct Grusindeks {
 
 /// Sub-score used for the ground axis when no historic surface
 /// observations are available (e.g. the user hasn't configured Frost, or
-/// the Frost call failed). Sits between the dry-floor (95) and saturated
-/// (0) so we don't reward a place we can't actually evaluate, while still
-/// not punishing it harder than the worst real ground we'd score.
+/// the Frost call failed). Sits between the dry-floor and saturated so
+/// we don't reward a place we can't actually evaluate, while still not
+/// punishing it harder than the worst real ground we'd score.
 pub const GROUND_UNKNOWN_SCORE: u8 = 80;
 
 /// Compute the Grusindeks for the slice of `hours` that overlap `window`.
@@ -194,6 +204,14 @@ pub fn score(
         .iter()
         .filter_map(|h| h.wind_gust_ms)
         .fold(f64::NEG_INFINITY, f64::max);
+    let mean_humidity_opt = {
+        let (sum, count) = in_window
+            .iter()
+            .filter_map(|h| h.relative_humidity)
+            .filter(|x| x.is_finite())
+            .fold((0.0_f64, 0_usize), |(s, c), v| (s + v, c + 1));
+        (count > 0).then(|| sum / count as f64)
+    };
     let mean_precip = in_window.iter().map(|h| h.precipitation_mm).sum::<f64>() / n.max(1.0);
     let max_precip = in_window
         .iter()
@@ -218,8 +236,9 @@ pub fn score(
         ),
         None => GROUND_UNKNOWN_SCORE,
     };
+    let felt_temp = apparent_temp(mean_temp, mean_wind, mean_humidity_opt);
     let breakdown = ScoreBreakdown {
-        temperature: temp_subscore(mean_temp),
+        temperature: temp_subscore(felt_temp),
         wind: wind_subscore(mean_wind, max_gust_opt),
         precipitation: precip_subscore(mean_precip),
         precip_probability: precip_prob_subscore(max_prob_opt),
@@ -243,7 +262,7 @@ pub fn score(
     };
 
     let mut penalties = Vec::new();
-    if let Some(p) = temp_penalty(breakdown.temperature, mean_temp, lang) {
+    if let Some(p) = temp_penalty(breakdown.temperature, mean_temp, felt_temp, lang) {
         penalties.push(p);
     }
     if let Some(p) = wind_penalty(breakdown.wind, mean_wind, max_gust_opt, lang) {
@@ -325,14 +344,30 @@ fn severity_for(subscore: u8) -> Option<Severity> {
     }
 }
 
-fn temp_penalty(subscore: u8, mean_temp: f64, lang: Language) -> Option<Penalty> {
+fn temp_penalty(subscore: u8, mean_temp: f64, felt_temp: f64, lang: Language) -> Option<Penalty> {
     let severity = severity_for(subscore)?;
     let cold = mean_temp < thresholds::TEMP_OPTIMAL_LOW;
-    let message_no = match (lang, cold) {
-        (Language::Norwegian, true) => format!("kjølig, snitt {mean_temp:.0} °C"),
-        (Language::Norwegian, false) => format!("varmt, snitt {mean_temp:.0} °C"),
-        (Language::Swedish, true) => format!("kallt, medel {mean_temp:.0} °C"),
-        (Language::Swedish, false) => format!("varmt, medel {mean_temp:.0} °C"),
+    // Surface "felt-T" only when it diverges meaningfully from air temp
+    // (>= 2 °C). Otherwise it's just noise and the wind/humidity context
+    // is already covered by the other axes.
+    let show_felt = felt_temp.is_finite() && (felt_temp - mean_temp).abs() >= 2.0;
+    let message_no = match (lang, cold, show_felt) {
+        (Language::Norwegian, true, true) => {
+            format!("kjølig, snitt {mean_temp:.0} °C, føles som {felt_temp:.0} °C")
+        }
+        (Language::Norwegian, false, true) => {
+            format!("varmt, snitt {mean_temp:.0} °C, føles som {felt_temp:.0} °C")
+        }
+        (Language::Norwegian, true, false) => format!("kjølig, snitt {mean_temp:.0} °C"),
+        (Language::Norwegian, false, false) => format!("varmt, snitt {mean_temp:.0} °C"),
+        (Language::Swedish, true, true) => {
+            format!("kallt, medel {mean_temp:.0} °C, känns som {felt_temp:.0} °C")
+        }
+        (Language::Swedish, false, true) => {
+            format!("varmt, medel {mean_temp:.0} °C, känns som {felt_temp:.0} °C")
+        }
+        (Language::Swedish, true, false) => format!("kallt, medel {mean_temp:.0} °C"),
+        (Language::Swedish, false, false) => format!("varmt, medel {mean_temp:.0} °C"),
     };
     Some(Penalty {
         component: Component::Temperature,
@@ -702,9 +737,9 @@ mod tests {
     #[rstest]
     #[case(0.0, None, 100)]
     #[case(3.0, None, 100)]
-    #[case(7.0, None, 60)]
-    #[case(12.0, None, 20)]
-    #[case(15.0, None, 12)] // 20 − (3 × 2.5) = 12; > 15 m/s also hits hard cap
+    #[case(7.0, None, 50)]
+    #[case(12.0, None, 12)]
+    #[case(15.0, None, 4)] // 12 − (3 × 2.5) = 4.5 → round 4; > 15 m/s also hard caps
     #[case(20.0, None, 0)]
     fn wind_subscore_no_gust(#[case] mean: f64, #[case] gust: Option<f64>, #[case] expected: u8) {
         assert_eq!(wind_subscore(mean, gust), expected);
@@ -754,8 +789,8 @@ mod tests {
     #[rstest]
     // Bone-dry sits at the dry-side floor (lett fuktig is the optimum).
     #[case(0.0, thresholds::GROUND_DRY_FLOOR_SCORE)]
-    // Halfway between 0 mm and the optimum: 95 → 100 lerp at midpoint.
-    #[case(0.2, 98)]
+    // Halfway between 0 mm and the optimum: 92 → 100 lerp at midpoint.
+    #[case(0.2, 96)]
     // Optimum.
     #[case(thresholds::GROUND_OPTIMAL_MM, 100)]
     // Wet side: linear from 100 at 0.4 mm to 0 at 5 mm — 2.5 mm is at
@@ -772,9 +807,9 @@ mod tests {
     #[rstest]
     #[case(60.0, 100, 100)] // under trigger → no change
     #[case(72.0, 100, 100)] // exactly at trigger → no change
-    #[case(120.0, 100, 95)] // halfway through → -5
-    #[case(168.0, 100, 90)] // saturates at -10
-    #[case(240.0, 100, 90)] // beyond → still -10
+    #[case(120.0, 100, 92)] // halfway through → -8 (round of 7.5)
+    #[case(168.0, 100, 85)] // saturates at -15
+    #[case(240.0, 100, 85)] // beyond → still -15
     #[case(120.0, 3, 0)] // saturating subtract floors at 0
     fn drought_penalty_examples(#[case] hours: f64, #[case] base: u8, #[case] expected: u8) {
         assert_eq!(apply_drought_penalty(base, hours), expected);
@@ -883,10 +918,11 @@ mod tests {
             Language::Norwegian,
         );
         assert!(!s.hard_capped);
-        // Temp=100, wind=100, precip=100, prob=95, ground=95 (lett-fuktig
-        // optimum sits at 0.4 mm; 0 mm scores GROUND_DRY_FLOOR_SCORE = 95).
-        // Weighted: 15*100 + 20*100 + 25*100 + 10*95 + 30*95 = 9800 / 100 = 98
-        assert_eq!(s.total, 98);
+        // 17 °C is inside the felt-T pass-through band (10 < T < 27 with
+        // RH unset), so apparent_temp == mean_temp. Sub-scores: temp=100,
+        // wind=100, precip=100, prob=95, ground=92 (bone-dry floor).
+        // Weighted: 18*100 + 17*100 + 25*100 + 10*95 + 30*92 = 9710 / 100 = 97
+        assert_eq!(s.total, 97);
         assert_eq!(s.label, "Strålende");
     }
 
@@ -938,9 +974,10 @@ mod tests {
         ); // ground saturated
         assert!(!wet.hard_capped);
         assert!(wet.total < dry.total);
-        // Ground sub-score worth 30 points; bone-dry now sits at 95 (not
-        // 100), so the integer-rounded total diff is 29, not 30.
-        assert_eq!(dry.total - wet.total, 29);
+        // Ground axis is 30 % weight. Bone-dry floor sits at 92 and
+        // saturated at 0, so the swing is 92 of 30, ≈ 27.6 → 28 after
+        // integer rounding.
+        assert_eq!(dry.total - wet.total, 28);
     }
 
     #[test]
@@ -959,7 +996,7 @@ mod tests {
             Language::Norwegian,
         );
         assert!(!s.hard_capped);
-        assert_eq!(s.total, 98);
+        assert_eq!(s.total, 97);
     }
 
     #[test]
@@ -1314,9 +1351,9 @@ mod tests {
 
     #[test]
     fn score_dry_and_drought_combine_within_soft_hint_budget() {
-        // Worst-case dry+drought against a perfect day: lett-fuktig floor
-        // (-5 on ground subscore) plus full drought (-10) is bounded
-        // within the agreed "soft hint" budget — total drop ≤ 5 points.
+        // Worst-case dry+drought against a perfect (lett-fuktig) day:
+        // dry-floor (-8 on ground) plus full drought (-15) is bounded
+        // within the agreed "soft hint" budget — total drop ≤ 7 points.
         let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         let baseline = score(
             &hours,
@@ -1337,10 +1374,11 @@ mod tests {
             Language::Norwegian,
         );
         assert!(parched.total < baseline.total);
-        // Ground delta is 100 → 95-10 = 85, contribution diff 30·15/100 = 4.5
-        // → integer total drop should be ≤ 5.
+        // Baseline ground = 100 (lett-fuktig optimum); parched ground =
+        // dry-floor 92 − drought 15 = 77. Contribution diff: 30·23/100
+        // = 6.9 → integer drop ≤ 7.
         assert!(
-            baseline.total - parched.total <= 5,
+            baseline.total - parched.total <= 7,
             "drop {} exceeds soft-hint budget",
             baseline.total - parched.total
         );
@@ -1357,7 +1395,7 @@ mod tests {
         assert_eq!(precip_subscore(f64::NAN), 0);
         // Probability missing/NaN both fall back to neutral 50.
         assert_eq!(precip_prob_subscore(Some(f64::NAN)), 50);
-        // Ground unknown falls back to the dry floor (95) — same as 0 mm,
+        // Ground unknown falls back to the dry floor — same as 0 mm,
         // since "we don't know" shouldn't be rendered as a wet penalty.
         assert_eq!(
             ground_subscore(f64::NAN),
@@ -1391,8 +1429,8 @@ mod tests {
             Language::Norwegian,
         );
         // Ground subscore is fixed at GROUND_UNKNOWN_SCORE — falls
-        // between dry-floor (95) and saturated (0) so we don't reward a
-        // place we can't actually evaluate.
+        // between dry-floor and saturated so we don't reward a place we
+        // can't actually evaluate.
         assert_eq!(s.breakdown.ground, GROUND_UNKNOWN_SCORE);
     }
 
@@ -1459,6 +1497,113 @@ mod tests {
             Language::Norwegian,
         );
         // Same expected total as `perfect_conditions_yield_high_score`.
-        assert_eq!(s.total, 98);
+        assert_eq!(s.total, 97);
+    }
+
+    // ---- Felt-T (apparent temperature) integration ----
+
+    #[test]
+    fn score_uses_wind_chill_on_cold_windy_days() {
+        // 5 °C ambient: calm chills only from the cyclist's self-wind
+        // (~5 m/s effective); windy chills harder and must score lower.
+        // Picked above 0 °C so the calm version stays in the linear band
+        // instead of saturating at the temp_subscore floor.
+        let calm: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions::minimal(t(h), 5.0, 0.5, 0.0))
+            .collect();
+        let windy: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions::minimal(t(h), 5.0, 10.0, 0.0))
+            .collect();
+        let calm_score = score(
+            &calm,
+            RideWindow::from_hours(t(14), 3),
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        let windy_score = score(
+            &windy,
+            RideWindow::from_hours(t(14), 3),
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert!(windy_score.breakdown.temperature < calm_score.breakdown.temperature);
+        // 5 °C + 10 m/s ambient combines with cyclist self-wind to push
+        // felt-T below 0 °C — temperature subscore should be well under
+        // halfway.
+        assert!(
+            windy_score.breakdown.temperature < 40,
+            "got {}",
+            windy_score.breakdown.temperature
+        );
+    }
+
+    #[test]
+    fn cold_windy_temp_penalty_mentions_felt_temp() {
+        let hours: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions::minimal(t(h), 2.0, 9.0, 0.0))
+            .collect();
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        let temp_pen = s
+            .penalties
+            .iter()
+            .find(|p| p.component == Component::Temperature)
+            .expect("expected a temperature penalty on a cold windy day");
+        assert!(
+            temp_pen.message_no.contains("føles som"),
+            "penalty message did not mention felt-T: {:?}",
+            temp_pen.message_no
+        );
+    }
+
+    #[test]
+    fn score_uses_heat_index_on_warm_humid_days() {
+        // 28 °C with high RH triggers the heat-index branch and lowers
+        // the temperature subscore vs the same air temp at low RH.
+        let humid: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions {
+                relative_humidity: Some(85.0),
+                ..HourlyConditions::minimal(t(h), 28.0, 2.0, 0.0)
+            })
+            .collect();
+        let dry: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions {
+                relative_humidity: Some(30.0),
+                ..HourlyConditions::minimal(t(h), 28.0, 2.0, 0.0)
+            })
+            .collect();
+        let humid_score = score(
+            &humid,
+            RideWindow::from_hours(t(14), 3),
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        let dry_score = score(
+            &dry,
+            RideWindow::from_hours(t(14), 3),
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert!(humid_score.breakdown.temperature < dry_score.breakdown.temperature);
+    }
+
+    #[test]
+    fn score_passes_through_temp_in_neutral_band() {
+        // 17 °C, no wind, no humidity → no felt-T adjustment. Temperature
+        // subscore must be 100 just as before the felt-T change.
+        let hours: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions::minimal(t(h), 17.0, 0.0, 0.0))
+            .collect();
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert_eq!(s.breakdown.temperature, 100);
     }
 }
