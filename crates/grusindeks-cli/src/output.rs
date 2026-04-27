@@ -854,14 +854,66 @@ fn pad_right(coloured: &str, visible: &str, target_visible_width: usize) -> Stri
     }
 }
 
+/// Indent before the tree-prefix on hourly breakdown rows. Sized so the
+/// breakdown cells land flush under the parent row's cells, letting the
+/// reader trace a vertical line from a sub-score to the day's mean.
+///
+/// Math: parent row puts its first cell at column 15 (2 indent + 11
+/// day-label + 2). Breakdown row layout is
+/// `<indent>├─ <label-padded-9> <cells>`, so indent + 2 + 1 + 9 + 1 = 15,
+/// giving indent = 2.
+const HOURLY_BREAKDOWN_INDENT: &str = "  ";
+
+/// Map a 0–100 score to a 2-cell shading glyph. Pairs with `score_color`
+/// so the colour and the shading-density agree: the higher the score, the
+/// denser the block. Five buckets share four glyphs — `dårlig` and
+/// `marginalt` both use `░░` and rely on the colour gradient (red vs
+/// orange) to differentiate. With `NO_COLOR` the two lowest buckets read
+/// as one "kjør ikke"-zone, which is the right call ergonomically.
+fn hourly_block_glyph(mean: u8) -> &'static str {
+    match mean {
+        0..=24 => "░░",
+        25..=44 => "░░",
+        45..=64 => "▒▒",
+        65..=84 => "▓▓",
+        _ => "██",
+    }
+}
+
+/// Glyph-prefixed legend for the hourly view: each bucket label is
+/// preceded by its shading glyph in the bucket colour, so the legend
+/// doubles as a colour *and* glyph key.
+fn hourly_bucket_legend(lang: Language) -> String {
+    let (d, m, ok, b, s) = match lang {
+        Language::Norwegian => ("dårlig", "marginalt", "ok", "bra", "strålende"),
+        Language::Swedish => ("dåligt", "marginellt", "ok", "bra", "strålande"),
+    };
+    format!(
+        "{} {} · {} {} · {} {} · {} {} · {} {}",
+        theme::paint_score_str("░", 0),
+        theme::paint_label(d, 0),
+        theme::paint_score_str("░", 25),
+        theme::paint_label(m, 25),
+        theme::paint_score_str("▒", 45),
+        theme::paint_label(ok, 45),
+        theme::paint_score_str("▓", 65),
+        theme::paint_label(b, 65),
+        theme::paint_score_str("█", 85),
+        theme::paint_label(s, 85),
+    )
+}
+
 /// Render the hourly forecast: one row per day, one column per local hour
 /// in the configured daytime window. Cells outside a day's clipped ride
 /// window (typically the past hours of "today") render as a dim `··`
-/// placeholder so the grid stays visually aligned.
+/// placeholder so the grid stays visually aligned. With `verbose`, each
+/// day expands into 4 sub-rows (Temp / Vind / Nedbør / Bakke) so the
+/// reader can see *which* axis dragged a low-scoring hour down.
 pub fn render_hourly(
     label: &str,
     radius_km: f64,
     forecast: &HourlyForecast,
+    verbose: bool,
     lang: Language,
 ) -> String {
     let mut out = String::new();
@@ -892,10 +944,12 @@ pub fn render_hourly(
 
     // Header row — same indent and day-label width as the multi-day
     // renderer, so the eye doesn't have to re-anchor when switching views.
+    // Hour columns are 2 chars wide ("10".."21"), matching the heatmap
+    // glyph width below.
     let header_cells: String = forecast
         .header_hours
         .iter()
-        .map(|h| format!("{h:>3}"))
+        .map(|h| format!("{h:>2}"))
         .collect::<Vec<_>>()
         .join(" ");
     let _ = writeln!(
@@ -907,7 +961,14 @@ pub fn render_hourly(
 
     let today_local: NaiveDate = Local::now().date_naive();
     for day in &forecast.days {
-        write_hourly_day_row(&mut out, day, &forecast.header_hours, today_local, lang);
+        write_hourly_day_row(
+            &mut out,
+            day,
+            &forecast.header_hours,
+            today_local,
+            verbose,
+            lang,
+        );
     }
 
     let _ = writeln!(out);
@@ -919,10 +980,10 @@ pub fn render_hourly(
         out,
         "  {}   {}",
         theme::paint_dim(scale_label),
-        bucket_legend(lang)
+        hourly_bucket_legend(lang)
     );
     let placeholder_note = match lang {
-        Language::Norwegian => "··      utenfor ride-vinduet",
+        Language::Norwegian => "··      utenfor sykkelvinduet",
         Language::Swedish => "··      utanför åkfönstret",
     };
     let _ = writeln!(out, "  {}", theme::paint_dim(placeholder_note));
@@ -932,38 +993,21 @@ pub fn render_hourly(
 /// One day's row in the hourly grid. Maps each header column (a local
 /// clock hour) to the day's matching `HourScore`, painting the score with
 /// its bucket colour. Hours outside the day's clipped ride window render
-/// as a dim `··` placeholder.
+/// as a dim `··` placeholder. With `verbose`, four sub-rows follow with
+/// the per-axis breakdown for the same hour columns.
 fn write_hourly_day_row(
     out: &mut String,
     day: &crate::aggregate::HourlyDayAggregate,
     header_hours: &[u8],
     today_local: NaiveDate,
+    verbose: bool,
     lang: Language,
 ) {
     let label = day_label(day.date, today_local, lang);
     let label_p = theme::paint_fg(&label);
     let mut cells: Vec<String> = Vec::with_capacity(header_hours.len());
     for &col_h in header_hours {
-        // Match the column to a scored hour by *local* clock hour. UTC
-        // hours shift across a DST boundary; matching on local keeps the
-        // header columns honest.
-        let scored = day.hours.iter().find(|h| {
-            let local_hour = h.time.with_timezone(&Local).hour() as u8;
-            local_hour == col_h && h.time.with_timezone(&Local).date_naive() == day.date
-        });
-        let cell = match scored {
-            Some(h) => {
-                let dim = h.confidence == Confidence::Lav;
-                let body = format!("{:>3}", h.mean);
-                if dim {
-                    theme::paint_dim(&body)
-                } else {
-                    theme::paint_score_str(&body, h.mean)
-                }
-            }
-            None => theme::paint_dim(" ··"),
-        };
-        cells.push(cell);
+        cells.push(hourly_cell(day, col_h, |h| h.mean));
     }
     let _ = writeln!(
         out,
@@ -971,6 +1015,105 @@ fn write_hourly_day_row(
         pad_right(&label_p, &label, 11),
         cells.join(" "),
     );
+
+    if verbose {
+        write_hourly_day_breakdown(out, day, header_hours, lang);
+    }
+}
+
+/// Render one heatmap cell for a column in a day's row. `score_of` picks
+/// either the mean or one of the breakdown axes off the matched
+/// `HourScore`. Hours outside the day's clipped ride window render as a
+/// dim `··` placeholder; low-confidence hours keep their cell glyph but
+/// drop the colour so the eye gravitates to trustworthy data.
+fn hourly_cell<F>(day: &crate::aggregate::HourlyDayAggregate, col_hour: u8, score_of: F) -> String
+where
+    F: Fn(&crate::aggregate::HourScore) -> u8,
+{
+    // Match the column to a scored hour by *local* clock hour. UTC hours
+    // shift across a DST boundary; matching on local keeps the header
+    // columns honest.
+    let scored = day.hours.iter().find(|h| {
+        let local_hour = h.time.with_timezone(&Local).hour() as u8;
+        local_hour == col_hour && h.time.with_timezone(&Local).date_naive() == day.date
+    });
+    match scored {
+        Some(h) => {
+            let value = score_of(h);
+            let glyph = hourly_block_glyph(value);
+            if h.confidence == Confidence::Lav {
+                theme::paint_dim(glyph)
+            } else {
+                theme::paint_score_str(glyph, value)
+            }
+        }
+        None => theme::paint_dim(".."),
+    }
+}
+
+/// Per-axis breakdown rows under a day's main row. Four sub-rows
+/// (Temp / Vind / Nedbør / Bakke), each rendered as its own heatmap
+/// strip aligned under the day's cells. Surfaces *why* a low-scoring
+/// hour scores low (regn? vind? bakke?) without forcing the user back
+/// into the daily view.
+fn write_hourly_day_breakdown(
+    out: &mut String,
+    day: &crate::aggregate::HourlyDayAggregate,
+    header_hours: &[u8],
+    lang: Language,
+) {
+    let (temp_label, wind_label, precip_label, ground_label) = match lang {
+        Language::Norwegian => ("Temp", "Vind", "Nedbør", "Bakke"),
+        Language::Swedish => ("Temp", "Vind", "Nederbörd", "Mark"),
+    };
+    // Type-erased per-axis pickers, so we can drive the four rows from
+    // one loop. Nedbør folds amount + probability into the same combined
+    // value the daily view shows, so the two surfaces agree on what a
+    // "rain row" means.
+    type Picker<'a> = (&'a str, Box<dyn Fn(&crate::aggregate::HourScore) -> u8>);
+    let pickers: [Picker<'_>; 4] = [
+        (
+            temp_label,
+            Box::new(|h: &crate::aggregate::HourScore| h.breakdown.temperature),
+        ),
+        (
+            wind_label,
+            Box::new(|h: &crate::aggregate::HourScore| h.breakdown.wind),
+        ),
+        (
+            precip_label,
+            Box::new(move |h: &crate::aggregate::HourScore| {
+                combined_precip(
+                    h.breakdown.precipitation,
+                    h.breakdown.precip_probability,
+                    lang,
+                )
+            }),
+        ),
+        (
+            ground_label,
+            Box::new(|h: &crate::aggregate::HourScore| h.breakdown.ground),
+        ),
+    ];
+    let last_idx = pickers.len() - 1;
+    for (i, (axis_label, picker)) in pickers.iter().enumerate() {
+        let branch = if i == last_idx { "└─" } else { "├─" };
+        let mut cells: Vec<String> = Vec::with_capacity(header_hours.len());
+        for &col_h in header_hours {
+            cells.push(hourly_cell(day, col_h, picker.as_ref()));
+        }
+        // Indent + branch + space + 9-char label puts the first cell at
+        // column 15, flush under the parent row's first cell. The label
+        // itself is dim'd so the bright row is the data, not the prose.
+        let label_padded = format!("{axis_label:<9}");
+        let _ = writeln!(
+            out,
+            "{HOURLY_BREAKDOWN_INDENT}{} {} {}",
+            theme::paint_dim(branch),
+            theme::paint_dim(&label_padded),
+            cells.join(" "),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1735,6 +1878,171 @@ mod tests {
             colored_bar(95),
             colored_bar(100),
             "half-block sub-cells must distinguish 95 from 100"
+        );
+    }
+
+    fn hour_score_at(date: NaiveDate, local_hour: u32, mean: u8) -> crate::aggregate::HourScore {
+        // Build a UTC instant whose *local* hour is `local_hour` on `date`.
+        // The hourly renderer matches columns by local clock hour, so the
+        // tests must use local time when constructing fixtures.
+        let local_dt = Local
+            .from_local_datetime(&date.and_hms_opt(local_hour, 0, 0).unwrap())
+            .single()
+            .expect("local time should be unambiguous in these tests");
+        crate::aggregate::HourScore {
+            time: local_dt.with_timezone(&Utc),
+            mean,
+            min: mean,
+            max: mean,
+            breakdown: grusindeks_core::score::ScoreBreakdown {
+                temperature: mean,
+                wind: mean,
+                precipitation: mean,
+                precip_probability: mean,
+                ground: mean,
+            },
+            confidence: Confidence::Hoy,
+        }
+    }
+
+    fn hourly_fixture(verbose_window: &[u8]) -> crate::aggregate::HourlyForecast {
+        let date = Local::now().date_naive();
+        // Score climbs linearly across the window so the test can assert
+        // every glyph bucket appears at least once for a wide-enough window.
+        let hours = verbose_window
+            .iter()
+            .enumerate()
+            .map(|(i, &h)| hour_score_at(date, h.into(), 10 + (i as u8) * 8))
+            .collect();
+        let day = crate::aggregate::HourlyDayAggregate {
+            date,
+            daytime_window: RideWindow::from_hours(
+                Local
+                    .from_local_datetime(&date.and_hms_opt(verbose_window[0].into(), 0, 0).unwrap())
+                    .single()
+                    .unwrap()
+                    .with_timezone(&Utc),
+                verbose_window.len() as i64,
+            ),
+            hours,
+        };
+        crate::aggregate::HourlyForecast {
+            header_hours: verbose_window.to_vec(),
+            days: vec![day],
+        }
+    }
+
+    #[test]
+    fn hourly_block_glyph_maps_buckets_at_boundaries() {
+        // 5 score buckets, 4 distinct glyphs (`dårlig` and `marginalt`
+        // share `░░` and lean on colour to differentiate). Boundaries here
+        // mirror `theme::score_color`'s match arms — if those drift, this
+        // test catches the divergence.
+        assert_eq!(hourly_block_glyph(0), "░░");
+        assert_eq!(hourly_block_glyph(24), "░░");
+        assert_eq!(hourly_block_glyph(25), "░░");
+        assert_eq!(hourly_block_glyph(44), "░░");
+        assert_eq!(hourly_block_glyph(45), "▒▒");
+        assert_eq!(hourly_block_glyph(64), "▒▒");
+        assert_eq!(hourly_block_glyph(65), "▓▓");
+        assert_eq!(hourly_block_glyph(84), "▓▓");
+        assert_eq!(hourly_block_glyph(85), "██");
+        assert_eq!(hourly_block_glyph(100), "██");
+    }
+
+    #[test]
+    fn hourly_render_uses_block_glyphs_not_score_digits() {
+        let forecast = hourly_fixture(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
+        let out = render_hourly("Oslo", 20.0, &forecast, false, Language::Norwegian);
+        // Wide score range across the day → all four glyph variants should
+        // surface somewhere in the output (header + cells + legend).
+        assert!(out.contains("░░"), "expected ░░ glyph in {out}");
+        assert!(out.contains("▒▒"), "expected ▒▒ glyph in {out}");
+        assert!(out.contains("▓▓"), "expected ▓▓ glyph in {out}");
+        assert!(out.contains("██"), "expected ██ glyph in {out}");
+    }
+
+    #[test]
+    fn hourly_render_default_omits_breakdown_rows() {
+        let forecast = hourly_fixture(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
+        let out = render_hourly("Oslo", 20.0, &forecast, false, Language::Norwegian);
+        // Tree-branch glyphs only appear in the verbose breakdown — their
+        // absence proves the default view stayed lean.
+        assert!(!out.contains("├─"), "default should not draw tree: {out}");
+        assert!(!out.contains("└─"), "default should not draw tree: {out}");
+        // Axis labels also live only in verbose rows for hourly.
+        assert!(
+            !out.contains("Temp "),
+            "default should hide axis labels: {out}"
+        );
+    }
+
+    #[test]
+    fn hourly_render_verbose_emits_four_breakdown_rows_per_day() {
+        let forecast = hourly_fixture(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
+        let out = render_hourly("Oslo", 20.0, &forecast, true, Language::Norwegian);
+        // Three intermediate branches and one closing branch per day.
+        assert_eq!(
+            out.matches("├─").count(),
+            3,
+            "expected 3 ├─ branches in {out}"
+        );
+        assert_eq!(
+            out.matches("└─").count(),
+            1,
+            "expected 1 └─ branch in {out}"
+        );
+        // All four axis labels show up under the day.
+        assert!(out.contains("Temp"), "missing Temp row: {out}");
+        assert!(out.contains("Vind"), "missing Vind row: {out}");
+        assert!(out.contains("Nedbør"), "missing Nedbør row: {out}");
+        assert!(out.contains("Bakke"), "missing Bakke row: {out}");
+    }
+
+    #[test]
+    fn hourly_render_verbose_breakdown_aligns_under_day_cells() {
+        let forecast = hourly_fixture(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
+        let out = render_hourly("Oslo", 20.0, &forecast, true, Language::Norwegian);
+        // A breakdown row's first cell must occupy the same *visible*
+        // column as the day row's first cell. Colour helpers are no-ops
+        // off-TTY, but `├─` is a 3-byte UTF-8 sequence whose visible
+        // width is 1 col per char — so we measure with `unicode-width`,
+        // not byte offsets.
+        let lines: Vec<&str> = out.lines().collect();
+        let day_idx = lines
+            .iter()
+            .position(|l| l.contains("i dag"))
+            .expect("day row must exist");
+        let temp_idx = lines
+            .iter()
+            .position(|l| l.contains("Temp"))
+            .expect("Temp breakdown row must exist");
+        let first_cell_col = |line: &str| {
+            let byte_idx = line
+                .char_indices()
+                .find(|(_, c)| matches!(c, '░' | '▒' | '▓' | '█'))
+                .map(|(i, _)| i)?;
+            Some(UnicodeWidthStr::width(&line[..byte_idx]))
+        };
+        assert_eq!(
+            first_cell_col(lines[day_idx]),
+            first_cell_col(lines[temp_idx]),
+            "breakdown cells must align under day cells:\n  day: {}\n temp: {}",
+            lines[day_idx],
+            lines[temp_idx],
+        );
+    }
+
+    #[test]
+    fn hourly_render_handles_empty_forecast() {
+        let forecast = crate::aggregate::HourlyForecast {
+            header_hours: vec![],
+            days: vec![],
+        };
+        let out = render_hourly("Oslo", 20.0, &forecast, false, Language::Norwegian);
+        assert!(
+            out.contains("Ingen timer"),
+            "expected empty-window message: {out}"
         );
     }
 }

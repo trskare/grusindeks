@@ -270,8 +270,13 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
             });
             println!("{}", serde_json::to_string_pretty(&v)?);
         } else {
-            let body =
-                output::render_hourly(&location.name, location.radius_km, &hourly, cfg.language);
+            let body = output::render_hourly(
+                &location.name,
+                location.radius_km,
+                &hourly,
+                cli.verbose,
+                cfg.language,
+            );
             print!("{body}");
         }
         return Ok(());
