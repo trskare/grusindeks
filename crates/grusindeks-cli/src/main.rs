@@ -16,7 +16,7 @@ use grusindeks_core::types::{Location, RideWindow};
 use grusindeks_met::client::{MetClient, MetClientConfig, UserAgent};
 use url::Url;
 
-use crate::config::Config;
+use crate::config::{Config, DaytimeWindow};
 use crate::progress::TerminalProgress;
 use crate::run::{run_forecast, run_score, DayWindow, ForecastInputs, ScoreInputs};
 
@@ -191,7 +191,12 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
     let client = build_client(&cfg, cli.api_base.as_ref(), cli.frost_base.as_ref())?;
 
     if days > 1 {
-        let day_windows = build_day_windows(Local::now().date_naive(), days, Utc::now())?;
+        let day_windows = build_day_windows(
+            Local::now().date_naive(),
+            days,
+            Utc::now(),
+            cfg.daytime_window,
+        )?;
         let progress = TerminalProgress::new();
         let result = run_forecast(
             &client,
@@ -272,30 +277,29 @@ const DEFAULT_FORECAST_DAYS: u8 = 6;
 
 /// Build `n` consecutive day windows starting at `start_date` (local).
 ///
-/// Each future day spans the *whole* local calendar day (00:00–24:00).
-/// "Today" is clipped to start at the current moment instead of midnight
-/// — by the time the user runs grusindeks, anything before "now" is
-/// history and dragging the score with it just produces a fictional
-/// number. If the clipped today-window has zero hours left (running at
-/// midnight exactly), today is dropped from the forecast.
-fn build_day_windows(start_date: NaiveDate, n: u8, now: DateTime<Utc>) -> Result<Vec<DayWindow>> {
+/// Each day spans the configured `daytime` window in local time — the
+/// hours someone might actually ride. Including the cold dawn / late
+/// night would drag the daily mean toward unrepresentative values.
+/// "Today" is additionally clipped to start at `now` instead of the
+/// configured daytime start when that's already in the past — anything
+/// before `now` is history. If today's daytime has fully ended by `now`,
+/// today is dropped from the forecast.
+fn build_day_windows(
+    start_date: NaiveDate,
+    n: u8,
+    now: DateTime<Utc>,
+    daytime: DaytimeWindow,
+) -> Result<Vec<DayWindow>> {
     let mut out = Vec::with_capacity(n as usize);
     for offset in 0..i64::from(n) {
         let date = start_date + ChronoDuration::days(offset);
-        let day_start = local_to_utc(date.and_time(NaiveTime::MIN))?;
-        let day_end = local_to_utc((date + ChronoDuration::days(1)).and_time(NaiveTime::MIN))?;
-        // Clip "today" so the window starts at `now` rather than at
-        // local midnight that's already in the past.
-        let start = if day_start < now && now < day_end {
-            now
-        } else {
-            day_start
-        };
-        if start >= day_end {
-            // Today has fully ended (running exactly at the day's end):
-            // drop it.
+        let day_start = local_to_utc(date.and_time(daytime.start))?;
+        let day_end = local_to_utc(date.and_time(daytime.end))?;
+        if day_end <= now {
+            // Day's daytime has fully ended (today already past 22:00).
             continue;
         }
+        let start = if day_start < now { now } else { day_start };
         out.push(DayWindow {
             date,
             window: RideWindow {
@@ -379,6 +383,78 @@ fn local_to_utc(naive: chrono::NaiveDateTime) -> Result<DateTime<Utc>> {
     match Local.from_local_datetime(&naive).single() {
         Some(t) => Ok(t.with_timezone(&Utc)),
         None => bail!("ambiguous local time {naive}"),
+    }
+}
+
+#[cfg(test)]
+mod build_day_windows_tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    fn dt(date: NaiveDate, h: u32, m: u32) -> DateTime<Utc> {
+        local_to_utc(date.and_hms_opt(h, m, 0).unwrap()).unwrap()
+    }
+
+    fn dw() -> DaytimeWindow {
+        DaytimeWindow::default()
+    }
+
+    #[test]
+    fn future_day_uses_full_daytime_window() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 27).unwrap();
+        let now = dt(today, 9, 0);
+        let days = build_day_windows(today, 3, now, dw()).unwrap();
+        let tomorrow = today.succ_opt().unwrap();
+        let tomorrow_win = days.iter().find(|d| d.date == tomorrow).unwrap();
+        assert_eq!(tomorrow_win.window.start, dt(tomorrow, 10, 0));
+        assert_eq!(tomorrow_win.window.end, dt(tomorrow, 22, 0));
+    }
+
+    #[test]
+    fn today_before_daytime_starts_at_daytime_start() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 27).unwrap();
+        let now = dt(today, 6, 0);
+        let days = build_day_windows(today, 1, now, dw()).unwrap();
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].window.start, dt(today, 10, 0));
+        assert_eq!(days[0].window.end, dt(today, 22, 0));
+    }
+
+    #[test]
+    fn today_during_daytime_is_clipped_to_now() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 27).unwrap();
+        let now = dt(today, 14, 30);
+        let days = build_day_windows(today, 1, now, dw()).unwrap();
+        assert_eq!(days[0].window.start, now);
+        assert_eq!(days[0].window.end, dt(today, 22, 0));
+    }
+
+    #[test]
+    fn today_dropped_when_past_daytime_end() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 27).unwrap();
+        let tomorrow = today.succ_opt().unwrap();
+        let now = dt(today, 22, 30);
+        let days = build_day_windows(today, 2, now, dw()).unwrap();
+        // Today should be dropped, tomorrow should still appear in full.
+        assert!(
+            !days.iter().any(|d| d.date == today),
+            "today should be dropped"
+        );
+        let tw = days.iter().find(|d| d.date == tomorrow).unwrap();
+        assert_eq!(tw.window.start, dt(tomorrow, 10, 0));
+    }
+
+    #[test]
+    fn custom_daytime_window_is_honored() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 27).unwrap();
+        let now = dt(today, 5, 0);
+        let custom = DaytimeWindow {
+            start: NaiveTime::from_hms_opt(7, 0, 0).unwrap(),
+            end: NaiveTime::from_hms_opt(19, 0, 0).unwrap(),
+        };
+        let days = build_day_windows(today, 1, now, custom).unwrap();
+        assert_eq!(days[0].window.start, dt(today, 7, 0));
+        assert_eq!(days[0].window.end, dt(today, 19, 0));
     }
 }
 

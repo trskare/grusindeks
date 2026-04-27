@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
+use chrono::NaiveTime;
 use directories::ProjectDirs;
 use grusindeks_core::geo::Point;
 use grusindeks_core::lang::Language;
@@ -25,12 +26,63 @@ pub struct Config {
     #[serde(default)]
     pub language: Language,
 
+    /// Local-time window the multi-day forecast averages over each day.
+    /// Defaults to 10:00–22:00 — wide enough to cover most ride plans
+    /// without dragging in the cold dawn / late-night hours that nobody
+    /// rides through.
+    #[serde(default)]
+    pub daytime_window: DaytimeWindow,
+
     #[serde(default)]
     pub frost: FrostConfig,
 
     /// Named ride locations.
     #[serde(default)]
     pub places: std::collections::BTreeMap<String, PlaceConfig>,
+}
+
+/// Local-time window used to clip each day in the multi-day forecast.
+/// Parsed from a `"HH:MM-HH:MM"` TOML string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct DaytimeWindow {
+    pub start: NaiveTime,
+    pub end: NaiveTime,
+}
+
+impl Default for DaytimeWindow {
+    fn default() -> Self {
+        Self {
+            start: NaiveTime::from_hms_opt(10, 0, 0).expect("10:00 is a valid time"),
+            end: NaiveTime::from_hms_opt(22, 0, 0).expect("22:00 is a valid time"),
+        }
+    }
+}
+
+impl TryFrom<String> for DaytimeWindow {
+    type Error = String;
+
+    fn try_from(s: String) -> Result<Self, String> {
+        let (a, b) = s
+            .split_once('-')
+            .ok_or_else(|| format!("daytime_window must be HH:MM-HH:MM, got {s:?}"))?;
+        let start = NaiveTime::parse_from_str(a.trim(), "%H:%M")
+            .map_err(|e| format!("invalid start in daytime_window {s:?}: {e}"))?;
+        let end = NaiveTime::parse_from_str(b.trim(), "%H:%M")
+            .map_err(|e| format!("invalid end in daytime_window {s:?}: {e}"))?;
+        if end <= start {
+            return Err(format!(
+                "daytime_window end must be after start, got {s:?}"
+            ));
+        }
+        Ok(Self { start, end })
+    }
+}
+
+impl From<DaytimeWindow> for String {
+    fn from(d: DaytimeWindow) -> Self {
+        format!("{}-{}", d.start.format("%H:%M"), d.end.format("%H:%M"))
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -102,6 +154,11 @@ default_place = "oslo"
 
 # Optional: UI language. "norwegian" (default) or "swedish".
 # language = "swedish"
+
+# Optional: local-time window the multi-day forecast averages over each
+# day. Default 10:00-22:00. Narrow it if you only ride mornings, widen
+# it if you also want pre-dawn rides factored in.
+# daytime_window = "10:00-22:00"
 
 [frost]
 # Register a free client_id at https://frost.met.no/auth/requestCredentials.html
@@ -200,6 +257,61 @@ frost_source_id = "SN50540"
         let cfg: Config = toml::from_str(Config::example_template()).unwrap();
         assert!(!cfg.user_agent_contact.is_empty());
         assert!(cfg.places.contains_key("oslo"));
+    }
+
+    #[test]
+    fn default_daytime_window_is_10_to_22() {
+        let dir = TempDir::new().unwrap();
+        let p = write_cfg(&dir, "user_agent_contact = \"dev@example.invalid\"\n");
+        let cfg = Config::load_from(&p).unwrap();
+        assert_eq!(
+            cfg.daytime_window.start,
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap()
+        );
+        assert_eq!(
+            cfg.daytime_window.end,
+            NaiveTime::from_hms_opt(22, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn loads_overridden_daytime_window() {
+        let dir = TempDir::new().unwrap();
+        let p = write_cfg(
+            &dir,
+            "user_agent_contact = \"dev@example.invalid\"\ndaytime_window = \"08:00-20:00\"\n",
+        );
+        let cfg = Config::load_from(&p).unwrap();
+        assert_eq!(
+            cfg.daytime_window.start,
+            NaiveTime::from_hms_opt(8, 0, 0).unwrap()
+        );
+        assert_eq!(
+            cfg.daytime_window.end,
+            NaiveTime::from_hms_opt(20, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_daytime_window_with_end_before_start() {
+        let dir = TempDir::new().unwrap();
+        let p = write_cfg(
+            &dir,
+            "user_agent_contact = \"dev@example.invalid\"\ndaytime_window = \"20:00-08:00\"\n",
+        );
+        let err = Config::load_from(&p).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.to_lowercase().contains("daytime_window"), "got {msg}");
+    }
+
+    #[test]
+    fn rejects_daytime_window_with_bad_format() {
+        let dir = TempDir::new().unwrap();
+        let p = write_cfg(
+            &dir,
+            "user_agent_contact = \"dev@example.invalid\"\ndaytime_window = \"morning\"\n",
+        );
+        assert!(Config::load_from(&p).is_err());
     }
 
     #[test]
