@@ -68,7 +68,7 @@ fn score_errors_with_helpful_message_when_config_missing() {
         .unwrap()
         .arg("--config")
         .arg(&cfg)
-        .args(["score", "--lat", "59.9139", "--lon", "10.7522"])
+        .args(["--lat", "59.9139", "--lon", "10.7522"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("grusindeks config init"));
@@ -100,7 +100,7 @@ radius_km = 20.0
         .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
         .arg("--config")
         .arg(&cfg)
-        .args(["score", "--place", "oslo", "--hours", "3"])
+        .args(["--place", "oslo", "--hours", "3"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Grusindeks for oslo"))
@@ -129,9 +129,7 @@ async fn score_json_output_is_valid_json() {
         .arg("--json")
         // --hours forces single-day mode; the default is now the
         // six-day forecast which yields a different JSON shape.
-        .args([
-            "score", "--lat", "59.9139", "--lon", "10.7522", "--hours", "3",
-        ])
+        .args(["--lat", "59.9139", "--lon", "10.7522", "--hours", "3"])
         .assert()
         .success()
         .get_output()
@@ -173,7 +171,7 @@ radius_km = 20.0
         .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
         .arg("--config")
         .arg(&cfg)
-        .args(["score", "--place", "oslo", "--days", "5"])
+        .args(["--place", "oslo", "--days", "5"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Grusindeks · oslo"))
@@ -181,6 +179,90 @@ radius_km = 20.0
         // The bucket legend chip lives once in the footer; pin against
         // it instead of the old per-row "ⓘ" glyph that has been removed.
         .stdout(predicate::str::contains("Skala"));
+}
+
+#[tokio::test]
+async fn score_with_best_window_surfaces_a_window_per_day() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_m("/weatherapi/locationforecast/2.0/complete"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(LOCATIONFORECAST_FIXTURE))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let cfg = write_config(
+        &dir,
+        r#"user_agent_contact = "dev@example.invalid"
+[places.oslo]
+lat = 59.9139
+lon = 10.7522
+radius_km = 20.0
+"#,
+    );
+
+    let out = Command::cargo_bin("grusindeks")
+        .unwrap()
+        .env("GRUSINDEKS_API_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
+        .arg("--config")
+        .arg(&cfg)
+        .args(["--place", "oslo", "--days", "3", "--best-window", "2"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body = String::from_utf8(out).unwrap();
+    // Either label is fine — both indicate that a sub-window surfaced.
+    // What we assert is that *at least one* day in the multi-day output
+    // shows a sub-window suggestion, which is the contract of
+    // `--best-window`.
+    assert!(
+        body.contains("Beste vindu") || body.contains("Beste luke"),
+        "expected a sub-window suggestion in --best-window output: {body}"
+    );
+}
+
+#[tokio::test]
+async fn score_best_window_rejects_zero_hours() {
+    let dir = TempDir::new().unwrap();
+    let cfg = write_config(&dir, "user_agent_contact = \"dev@example.invalid\"\n");
+    Command::cargo_bin("grusindeks")
+        .unwrap()
+        .arg("--config")
+        .arg(&cfg)
+        .args(["--lat", "59.9139", "--lon", "10.7522", "--best-window", "0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--best-window må være minst 1 time",
+        ));
+}
+
+#[tokio::test]
+async fn score_best_window_rejects_combination_with_single_day_modes() {
+    let dir = TempDir::new().unwrap();
+    let cfg = write_config(&dir, "user_agent_contact = \"dev@example.invalid\"\n");
+    Command::cargo_bin("grusindeks")
+        .unwrap()
+        .arg("--config")
+        .arg(&cfg)
+        .args([
+            "--lat",
+            "59.9139",
+            "--lon",
+            "10.7522",
+            "--hours",
+            "3",
+            "--best-window",
+            "2",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--best-window gjelder bare multi-dags-prognosen",
+        ));
 }
 
 #[tokio::test]
@@ -192,7 +274,6 @@ async fn score_with_days_and_window_errors_clearly() {
         .arg("--config")
         .arg(&cfg)
         .args([
-            "score",
             "--lat",
             "59.9139",
             "--lon",
@@ -228,9 +309,7 @@ async fn score_with_days_json_carries_forecast_field() {
         .arg("--config")
         .arg(&cfg)
         .arg("--json")
-        .args([
-            "score", "--lat", "59.9139", "--lon", "10.7522", "--days", "3",
-        ])
+        .args(["--lat", "59.9139", "--lon", "10.7522", "--days", "3"])
         .assert()
         .success()
         .get_output()
@@ -349,7 +428,7 @@ radius_km = 20.0
         .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
         .arg("--config")
         .arg(&cfg)
-        .args(["score", "--place", "oslo", "--hours", "3"])
+        .args(["--place", "oslo", "--hours", "3"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Grusindeks for oslo"));
@@ -411,7 +490,7 @@ radius_km = 20.0
         .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
         .arg("--config")
         .arg(&cfg)
-        .args(["score", "--place", "oslo", "--hours", "3"])
+        .args(["--place", "oslo", "--hours", "3"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Grusindeks for oslo"));
@@ -438,7 +517,7 @@ async fn score_truncates_coordinates_in_query_string() {
         .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
         .arg("--config")
         .arg(&cfg)
-        .args(["score", "--lat", "59.913918", "--lon", "10.752230"])
+        .args(["--lat", "59.913918", "--lon", "10.752230"])
         .assert()
         .success();
 

@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use crate::drying::SurfaceState;
 use crate::lang::Language;
-use crate::score::{score, Grusindeks};
+use crate::score::{score, thresholds, Grusindeks, ScoreBreakdown};
 use crate::types::{HourlyConditions, Resolution, RideWindow};
 
 /// How much the user should trust a forecast. Drops as the horizon grows
@@ -57,6 +57,37 @@ impl Confidence {
     }
 }
 
+/// Why a sub-window scored highest, in one word: the axis where the
+/// window beats the day mean by the largest weighted margin. `None`
+/// when no axis stands out (uniform day — every sub-window scores the
+/// same on every axis).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BestWindowReason {
+    /// The window is the warmest stretch of the day (felt-T).
+    Temperatur,
+    /// The window has the lowest wind / gusts.
+    Vind,
+    /// The window is the driest stretch — least precipitation amount
+    /// and/or the lowest probability of rain.
+    Nedbor,
+}
+
+impl BestWindowReason {
+    /// Short comparative phrase suitable for trailing the "Beste vindu"
+    /// line. Lowercase, a couple of words tops.
+    pub fn label(self, lang: Language) -> &'static str {
+        match (lang, self) {
+            (Language::Norwegian, BestWindowReason::Temperatur) => "mildest",
+            (Language::Norwegian, BestWindowReason::Vind) => "minst vind",
+            (Language::Norwegian, BestWindowReason::Nedbor) => "tørrest",
+            (Language::Swedish, BestWindowReason::Temperatur) => "mildast",
+            (Language::Swedish, BestWindowReason::Vind) => "minst vind",
+            (Language::Swedish, BestWindowReason::Nedbor) => "torrast",
+        }
+    }
+}
+
 /// A sub-window of the day that scores meaningfully better than the day
 /// as a whole — the "go ride now" suggestion.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -66,6 +97,10 @@ pub struct OptimalWindow {
     /// `optimal.total - day.total`. Always > 0 by construction; the caller
     /// decides what threshold counts as "meaningfully" better.
     pub improvement: u8,
+    /// One-word "why this window is best" — derived from the per-axis
+    /// breakdown delta against the day mean. `None` on uniform days where
+    /// no single axis dominates the improvement.
+    pub reason: Option<BestWindowReason>,
 }
 
 /// One day's worth of summary data.
@@ -96,6 +131,28 @@ pub const DEFAULT_OPTIMAL_IMPROVEMENT: u8 = 10;
 /// hours matches the default ride window in the single-day score command.
 pub const DEFAULT_OPTIMAL_WINDOW_HOURS: i64 = 3;
 
+/// How `compute_day` should look for the per-day "best sub-window".
+///
+/// The defaults reproduce the historical "Beste luke" behaviour: a 3-hour
+/// sub-window is only surfaced when it scores ≥ 10 points above the day
+/// mean. Callers that want to expose a window every day (e.g. the CLI's
+/// `--best-window` flag) construct one with `min_improvement: 0` and
+/// `length_hours` set to the desired sub-window size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BestWindowConfig {
+    pub length_hours: i64,
+    pub min_improvement: u8,
+}
+
+impl Default for BestWindowConfig {
+    fn default() -> Self {
+        Self {
+            length_hours: DEFAULT_OPTIMAL_WINDOW_HOURS,
+            min_improvement: DEFAULT_OPTIMAL_IMPROVEMENT,
+        }
+    }
+}
+
 /// Compute the `DayScore` for the given `day_window`.
 ///
 /// `now` is used to compute the forecast horizon for confidence.
@@ -104,12 +161,15 @@ pub const DEFAULT_OPTIMAL_WINDOW_HOURS: i64 = 3;
 /// ground axis then falls back to a neutral, "we don't know" value
 /// rather than pretending the gravel is bone-dry. `lang` controls the
 /// language of the embedded `Grusindeks` label and penalty messages.
+/// `best_window` controls the optional sub-window probe — see
+/// [`BestWindowConfig`].
 pub fn compute_day(
     hours: &[HourlyConditions],
     day_window: RideWindow,
     surface: Option<SurfaceState>,
     now: DateTime<Utc>,
     lang: Language,
+    best_window: BestWindowConfig,
 ) -> DayScore {
     let in_window: Vec<&HourlyConditions> = hours
         .iter()
@@ -119,14 +179,9 @@ pub fn compute_day(
     let day_score = score(hours, day_window, surface, lang);
     let confidence = confidence_for(&in_window, day_window, now);
 
-    let optimal_window = find_best_window(
-        hours,
-        day_window,
-        DEFAULT_OPTIMAL_WINDOW_HOURS,
-        surface,
-        lang,
-    )
-    .filter(|ow| ow.improvement >= DEFAULT_OPTIMAL_IMPROVEMENT);
+    let optimal_window =
+        find_best_window(hours, day_window, best_window.length_hours, surface, lang)
+            .filter(|ow| ow.improvement >= best_window.min_improvement);
 
     let weather_icon = weather_icon_for(&in_window);
 
@@ -214,7 +269,8 @@ pub fn find_best_window(
         return None;
     }
 
-    let day_total = score(hours, day_window, surface, lang).total;
+    let day_score = score(hours, day_window, surface, lang);
+    let day_total = day_score.total;
     let len = Duration::hours(length_hours);
 
     let mut best: Option<(RideWindow, Grusindeks)> = None;
@@ -241,12 +297,56 @@ pub fn find_best_window(
 
     best.map(|(window, s)| {
         let improvement = s.total.saturating_sub(day_total);
+        let reason = pick_reason(&s.breakdown, &day_score.breakdown);
         OptimalWindow {
             window,
             score: s,
             improvement,
+            reason,
         }
     })
+}
+
+/// Identify the single axis where the window beats the day average by the
+/// largest *weighted* margin. Weights mirror the score's: temperature 18,
+/// wind 17, precipitation amount 25 + probability 10 (combined), ground 30.
+///
+/// Ground is excluded on purpose: the surface state at the start of the
+/// day is shared across every sub-window, so `ground` deltas are always 0.
+/// Including it would just dilute the comparison.
+///
+/// Returns `None` when no axis has a strictly positive weighted delta — in
+/// practice that means a uniform day where every sub-window scores the
+/// same. The renderer treats `None` as "no reason to surface".
+fn pick_reason(window: &ScoreBreakdown, day: &ScoreBreakdown) -> Option<BestWindowReason> {
+    let weighted =
+        |w: u8, d: u8, weight: u8| -> i32 { (i32::from(w) - i32::from(d)) * i32::from(weight) };
+    let temp = weighted(window.temperature, day.temperature, thresholds::W_TEMP);
+    let wind = weighted(window.wind, day.wind, thresholds::W_WIND);
+    let precip = weighted(
+        window.precipitation,
+        day.precipitation,
+        thresholds::W_PRECIP,
+    ) + weighted(
+        window.precip_probability,
+        day.precip_probability,
+        thresholds::W_PROB,
+    );
+
+    let max = temp.max(wind).max(precip);
+    if max <= 0 {
+        return None;
+    }
+    if precip == max {
+        // Tie-break against precipitation first: rain dominates a ride
+        // experientially. If two axes are equal, the user cares about
+        // "is it dry?" before "is it warm?".
+        Some(BestWindowReason::Nedbor)
+    } else if wind == max {
+        Some(BestWindowReason::Vind)
+    } else {
+        Some(BestWindowReason::Temperatur)
+    }
 }
 
 /// Heuristic confidence for a day:
@@ -407,6 +507,7 @@ mod tests {
             Some(SurfaceState::default()),
             now,
             Language::Norwegian,
+            BestWindowConfig::default(),
         );
 
         assert!(ds.optimal_window.is_some(), "expected a luke to be flagged");
@@ -427,8 +528,103 @@ mod tests {
             Some(SurfaceState::default()),
             now,
             Language::Norwegian,
+            BestWindowConfig::default(),
         );
         assert!(ds.optimal_window.is_none());
+    }
+
+    #[test]
+    fn best_window_reason_is_nedbor_for_dry_stretch_in_a_rainy_day() {
+        // Dry early, rain mid-day, dry late: the 3h "luke" picks the dry
+        // stretch and its dominant edge over the day mean is precipitation.
+        let mut hours: Vec<HourlyConditions> =
+            (6..9).map(|h| nice_hour(t(2026, 4, 26, h))).collect();
+        hours.extend((9..15).map(|h| awful_hour(t(2026, 4, 26, h))));
+        hours.extend((15..20).map(|h| nice_hour(t(2026, 4, 26, h))));
+        let day = day_window(6, 14);
+        let ow = find_best_window(
+            &hours,
+            day,
+            3,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        )
+        .expect("non-empty");
+        assert_eq!(ow.reason, Some(BestWindowReason::Nedbor));
+    }
+
+    #[test]
+    fn best_window_reason_is_vind_when_only_wind_axis_differs() {
+        // Same temperature/precip across the day; only wind drops in a
+        // 3h stretch in the middle. The reason picker should single out
+        // wind even though it's not the dominant weight.
+        let mut hours: Vec<HourlyConditions> =
+            (6..18).map(|h| nice_hour(t(2026, 4, 26, h))).collect();
+        // First 3h: windy.
+        for hour in hours.iter_mut().take(3) {
+            hour.wind_speed_ms = 9.0;
+        }
+        // Last 3h: also windy.
+        for hour in hours.iter_mut().skip(9) {
+            hour.wind_speed_ms = 9.0;
+        }
+        // Middle 9..12 stays calm (2 m/s) — the best 3h window.
+        let day = day_window(6, 12);
+        let ow = find_best_window(
+            &hours,
+            day,
+            3,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        )
+        .expect("non-empty");
+        assert_eq!(ow.reason, Some(BestWindowReason::Vind));
+    }
+
+    #[test]
+    fn best_window_reason_is_none_for_uniform_day() {
+        // Every sub-window scores identical → no axis stands out.
+        let hours: Vec<HourlyConditions> = (6..18).map(|h| nice_hour(t(2026, 4, 26, h))).collect();
+        let day = day_window(6, 12);
+        let ow = find_best_window(
+            &hours,
+            day,
+            3,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        )
+        .expect("non-empty");
+        assert_eq!(ow.reason, None);
+        assert_eq!(ow.improvement, 0);
+    }
+
+    #[test]
+    fn compute_day_with_zero_threshold_always_emits_window() {
+        // Same uniform day as above, but with `min_improvement: 0` (the
+        // mode the CLI's `--best-window` flag activates). The window must
+        // surface — even though `improvement == 0`. This is the contract
+        // the CLI relies on: every day in the multi-day forecast gets a
+        // top-scoring sub-window when the user asks for one.
+        let hours: Vec<HourlyConditions> = (6..18).map(|h| nice_hour(t(2026, 4, 26, h))).collect();
+        let day = day_window(6, 12);
+        let now = t(2026, 4, 26, 5);
+        let cfg = BestWindowConfig {
+            length_hours: 2,
+            min_improvement: 0,
+        };
+        let ds = compute_day(
+            &hours,
+            day,
+            Some(SurfaceState::default()),
+            now,
+            Language::Norwegian,
+            cfg,
+        );
+        let ow = ds
+            .optimal_window
+            .expect("expected a best window with zero threshold");
+        assert_eq!(ow.improvement, 0);
+        assert_eq!(ow.window.duration_hours(), 2);
     }
 
     // ---- confidence_for ----
@@ -447,6 +643,7 @@ mod tests {
             Some(SurfaceState::default()),
             now,
             Language::Norwegian,
+            BestWindowConfig::default(),
         );
         assert_eq!(ds.confidence, Confidence::Hoy);
     }
@@ -463,6 +660,7 @@ mod tests {
             Some(SurfaceState::default()),
             now,
             Language::Norwegian,
+            BestWindowConfig::default(),
         );
         assert_eq!(ds.confidence, Confidence::Middels);
     }
@@ -479,6 +677,7 @@ mod tests {
             Some(SurfaceState::default()),
             now,
             Language::Norwegian,
+            BestWindowConfig::default(),
         );
         assert_eq!(ds.confidence, Confidence::Lav);
     }
@@ -496,6 +695,7 @@ mod tests {
             Some(SurfaceState::default()),
             now,
             Language::Norwegian,
+            BestWindowConfig::default(),
         );
         assert_eq!(ds.confidence, Confidence::Lav);
     }
@@ -511,6 +711,7 @@ mod tests {
             Some(SurfaceState::default()),
             now,
             Language::Norwegian,
+            BestWindowConfig::default(),
         );
         assert_eq!(ds.hours_with_data, 12);
     }
@@ -645,6 +846,7 @@ mod tests {
             Some(SurfaceState::default()),
             now,
             Language::Norwegian,
+            BestWindowConfig::default(),
         );
         assert_eq!(ds.weather_icon, "☀");
     }

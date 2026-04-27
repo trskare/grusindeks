@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
-use grusindeks_core::daily::compute_day;
+use grusindeks_core::daily::{compute_day, BestWindowConfig};
 use grusindeks_core::drying::{drying_step, DryingParams, SurfaceState};
 use grusindeks_core::geo::{sample_around, Point};
 use grusindeks_core::lang::Language;
@@ -94,6 +94,12 @@ pub struct ForecastInputs<'a> {
     pub history_hours: i64,
     /// Language for human-readable labels and penalty messages.
     pub lang: Language,
+    /// How `compute_day` should look for the per-day "best sub-window".
+    /// Default: 3-hour windows, only surfaced when ≥10 points above the
+    /// day mean. The CLI's `--best-window` flag overrides this with a
+    /// user-chosen length and `min_improvement = 0` so every day shows
+    /// its top-scoring sub-window.
+    pub best_window: BestWindowConfig,
     pub progress: &'a dyn ProgressSink,
 }
 
@@ -149,7 +155,14 @@ pub async fn run_forecast(
     for (dw, day_surface) in inputs.days.iter().zip(projected_per_day.iter()) {
         let mut day_points = Vec::with_capacity(per_point_hours.len());
         for (p, hours) in &per_point_hours {
-            let ds = compute_day(hours, dw.window, *day_surface, now, inputs.lang);
+            let ds = compute_day(
+                hours,
+                dw.window,
+                *day_surface,
+                now,
+                inputs.lang,
+                inputs.best_window,
+            );
             day_points.push((*p, ds));
         }
         days.push(DayAggregate::from_points(
@@ -488,9 +501,7 @@ mod tests {
     // ---- project_states_for_days ----
 
     fn ts(h: i64) -> DateTime<Utc> {
-        chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 4, 27, 0, 0, 0)
-            .unwrap()
-            + Duration::hours(h)
+        chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 4, 27, 0, 0, 0).unwrap() + Duration::hours(h)
     }
 
     fn dry_hour(h: i64) -> HourlyConditions {

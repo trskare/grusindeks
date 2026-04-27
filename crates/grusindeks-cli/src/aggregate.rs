@@ -301,6 +301,7 @@ mod tests {
                         Some(SurfaceState::default()),
                         now,
                         Language::Norwegian,
+                        grusindeks_core::daily::BestWindowConfig::default(),
                     ),
                 ),
                 (
@@ -311,6 +312,7 @@ mod tests {
                         Some(SurfaceState::default()),
                         now,
                         Language::Norwegian,
+                        grusindeks_core::daily::BestWindowConfig::default(),
                     ),
                 ),
             ],
@@ -347,6 +349,7 @@ mod tests {
                         Some(SurfaceState::default()),
                         now,
                         Language::Norwegian,
+                        grusindeks_core::daily::BestWindowConfig::default(),
                     ),
                 ),
                 (
@@ -357,6 +360,7 @@ mod tests {
                         Some(SurfaceState::default()),
                         now,
                         Language::Norwegian,
+                        grusindeks_core::daily::BestWindowConfig::default(),
                     ),
                 ),
             ],

@@ -517,19 +517,40 @@ fn write_day_row(
     // knowing "today's mean is 70 but 06–09 is 95" is one of the
     // highest-value signals the renderer can show.
     if let Some(ow) = &center.optimal_window {
-        let (luke_phrase, points_word) = match lang {
-            Language::Norwegian => ("Beste luke", "poeng"),
-            Language::Swedish => ("Bästa lucka", "poäng"),
+        // "Luke" (NO) / "lucka" (SE) means an *opening* — it implies the
+        // sub-window is meaningfully better than the day around it. When
+        // the improvement is zero (which only happens when the user opted
+        // in to `--best-window`, since the default config still filters
+        // sub-windows that don't clear the threshold), the word is
+        // misleading and the "+0 poeng" suffix is noise. Use "vindu" /
+        // "fönster" instead and drop the suffix.
+        let (phrase, points_word) = match (lang, ow.improvement) {
+            (Language::Norwegian, 0) => ("Beste vindu", "poeng"),
+            (Language::Norwegian, _) => ("Beste luke", "poeng"),
+            (Language::Swedish, 0) => ("Bästa fönster", "poäng"),
+            (Language::Swedish, _) => ("Bästa lucka", "poäng"),
         };
+        let suffix = if ow.improvement > 0 {
+            format!(", +{} {}", ow.improvement, points_word)
+        } else {
+            String::new()
+        };
+        // One-word "why this window" trailer. Only rendered when the score
+        // layer found a clear axis winner — uniform days return None and
+        // the line stays clean.
+        let reason_trailer = ow
+            .reason
+            .map(|r| format!(" — {}", theme::paint_dim(r.label(lang))))
+            .unwrap_or_default();
         let _ = writeln!(
             out,
-            "{BREAKDOWN_INDENT}★ {luke_phrase}: {}–{} → {} ({}, +{} {})",
+            "{BREAKDOWN_INDENT}★ {phrase}: {}–{} → {} ({}{}){}",
             local_hm(ow.window.start),
             local_hm(ow.window.end),
             theme::paint_score(ow.score.total),
             theme::paint_label(mean_label(ow.score.total, lang), ow.score.total),
-            ow.improvement,
-            points_word,
+            suffix,
+            reason_trailer,
         );
     }
 
@@ -955,6 +976,7 @@ mod tests {
                     Some(SurfaceState::default()),
                     now,
                     Language::Norwegian,
+                    grusindeks_core::daily::BestWindowConfig::default(),
                 ),
             )],
         );
@@ -989,6 +1011,7 @@ mod tests {
                     Some(SurfaceState::default()),
                     now,
                     Language::Norwegian,
+                    grusindeks_core::daily::BestWindowConfig::default(),
                 ),
             )],
         );
@@ -1000,6 +1023,100 @@ mod tests {
         assert!(
             out.contains("★ Beste:") && out.contains("╭"),
             "expected best-day callout in {out}"
+        );
+    }
+
+    #[test]
+    fn multi_day_render_appends_one_word_reason_after_optimal_window() {
+        // Mixed day with a clear dry "luke": the trailing reason should
+        // surface as "tørrest" so the user gets a one-glance "why".
+        use crate::aggregate::DayAggregate;
+        use grusindeks_core::daily::compute_day;
+
+        fn awful(time_h: u32) -> HourlyConditions {
+            HourlyConditions {
+                probability_of_precip: Some(95.0),
+                ..HourlyConditions::minimal(t(time_h), 5.0, 11.0, 3.0)
+            }
+        }
+
+        let win = RideWindow::from_hours(t(6), 12);
+        let now = t(5);
+        let center = Point::new(59.9139, 10.7522);
+        let mut hours: Vec<_> = (6..9).map(perfect).collect();
+        hours.extend((9..15).map(awful));
+        hours.extend((15..18).map(perfect));
+        let day = DayAggregate::from_points(
+            NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
+            win,
+            center,
+            vec![(
+                center,
+                compute_day(
+                    &hours,
+                    win,
+                    Some(SurfaceState::default()),
+                    now,
+                    Language::Norwegian,
+                    grusindeks_core::daily::BestWindowConfig::default(),
+                ),
+            )],
+        );
+        let forecast = MultiDayForecast { days: vec![day] };
+        let out = render_multi_day("Oslo", 20.0, &forecast, true, Language::Norwegian);
+        assert!(
+            out.contains("tørrest"),
+            "expected 'tørrest' reason after Beste luke line: {out}"
+        );
+    }
+
+    #[test]
+    fn multi_day_render_uses_vindu_label_and_omits_zero_improvement_suffix() {
+        // Uniformly perfect day + `--best-window`-style config (min_improvement: 0)
+        // → optimal_window is Some with improvement == 0. The renderer must:
+        //   1. say "Beste vindu" instead of "Beste luke" (luke implies a
+        //      contrast against the rest of the day);
+        //   2. drop the "+0 poeng" suffix entirely (noise).
+        use crate::aggregate::DayAggregate;
+        use grusindeks_core::daily::{compute_day, BestWindowConfig};
+
+        let win = RideWindow::from_hours(t(6), 12);
+        let now = t(5);
+        let center = Point::new(59.9139, 10.7522);
+        let hours: Vec<_> = (6..18).map(perfect).collect();
+        let cfg = BestWindowConfig {
+            length_hours: 2,
+            min_improvement: 0,
+        };
+        let day = DayAggregate::from_points(
+            NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
+            win,
+            center,
+            vec![(
+                center,
+                compute_day(
+                    &hours,
+                    win,
+                    Some(SurfaceState::default()),
+                    now,
+                    Language::Norwegian,
+                    cfg,
+                ),
+            )],
+        );
+        let forecast = MultiDayForecast { days: vec![day] };
+        let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
+        assert!(
+            out.contains("Beste vindu"),
+            "expected 'Beste vindu' label when improvement is 0, got: {out}"
+        );
+        assert!(
+            !out.contains("Beste luke"),
+            "should not say 'Beste luke' when improvement is 0: {out}"
+        );
+        assert!(
+            !out.contains("+0 poeng"),
+            "should drop the '+0 poeng' suffix: {out}"
         );
     }
 
@@ -1034,6 +1151,7 @@ mod tests {
                     Some(SurfaceState::default()),
                     now,
                     Language::Norwegian,
+                    grusindeks_core::daily::BestWindowConfig::default(),
                 ),
             )],
         );
@@ -1072,6 +1190,7 @@ mod tests {
                     Some(SurfaceState::new(5.0)),
                     now,
                     Language::Norwegian,
+                    grusindeks_core::daily::BestWindowConfig::default(),
                 ),
             )],
         );
@@ -1195,6 +1314,7 @@ mod tests {
                         Some(SurfaceState::new(1.0)),
                         now,
                         Language::Norwegian,
+                        grusindeks_core::daily::BestWindowConfig::default(),
                     ),
                 )],
             );
@@ -1238,6 +1358,7 @@ mod tests {
                     Some(SurfaceState::new(5.0)),
                     now,
                     Language::Norwegian,
+                    grusindeks_core::daily::BestWindowConfig::default(),
                 ),
             )],
         );
@@ -1287,6 +1408,7 @@ mod tests {
                     Some(SurfaceState::default()),
                     now,
                     Language::Norwegian,
+                    grusindeks_core::daily::BestWindowConfig::default(),
                 ),
             )],
         );

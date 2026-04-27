@@ -16,6 +16,8 @@ use grusindeks_core::types::{Location, RideWindow};
 use grusindeks_met::client::{MetClient, MetClientConfig, UserAgent};
 use url::Url;
 
+use grusindeks_core::daily::BestWindowConfig;
+
 use crate::config::{Config, DaytimeWindow};
 use crate::progress::TerminalProgress;
 use crate::run::{run_forecast, run_score, DayWindow, ForecastInputs, ScoreInputs};
@@ -26,9 +28,14 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// grusindeks — Grusindeks for sykling på grus.
 ///
 /// Kjør `grusindeks` uten argumenter for å se en seks-dagers oversikt fra og
-/// med i dag. Bruk `grusindeks score` for et enkelt tidsvindu, eller
-/// `grusindeks config init` for å sette opp.
-#[derive(Debug, Parser)]
+/// med i dag. Spesifiser `--window` / `--hours` for et enkelt tidsvindu, eller
+/// kjør `grusindeks config init` for å sette opp.
+///
+/// Defaulting:
+/// * No `--window` and no `--hours` set → multi-day (`--days` or 6).
+/// * `--window` set → single-day with that window.
+/// * `--hours` set (without `--window`) → single-day with `now..now+hours`.
+#[derive(Debug, Default, Parser)]
 #[command(name = "grusindeks", version, about, long_about = None)]
 struct Cli {
     /// Path to config file. Defaults to ~/.config/grusindeks/config.toml.
@@ -51,28 +58,6 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(Debug, Subcommand)]
-enum Command {
-    /// Compute the Grusindeks for a location and time window.
-    Score(ScoreArgs),
-    /// Manage the configuration file.
-    Config {
-        #[command(subcommand)]
-        action: ConfigAction,
-    },
-}
-
-/// Arguments for the score command. Defaulting rules:
-///
-/// * No `--window` and no `--hours` set → multi-day (`--days` or 6).
-/// * `--window` set → single-day with that window.
-/// * `--hours` set (without `--window`) → single-day with `now..now+hours`.
-#[derive(Debug, Default, clap::Args)]
-struct ScoreArgs {
     #[arg(long)]
     lat: Option<f64>,
     #[arg(long)]
@@ -95,6 +80,23 @@ struct ScoreArgs {
     /// ikke kombineres med dette.
     #[arg(long)]
     days: Option<u8>,
+    /// Vis det beste N-timers vinduet for hver dag i multi-dags-prognosen
+    /// (uavhengig av hvor mye bedre det er enn dagsgjennomsnittet).
+    /// Uten verdi: 2 timer.
+    #[arg(long = "best-window", num_args = 0..=1, default_missing_value = "2", value_name = "TIMER")]
+    best_window: Option<i64>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Manage the configuration file.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -131,10 +133,10 @@ async fn main() -> Result<()> {
             println!("{}", p.display());
             Ok(())
         }
-        Some(Command::Score(args)) => cmd_score(&cli, args).await,
-        // No subcommand → run `score` with all defaults, which gives the
-        // six-day forecast for the configured `default_place`.
-        None => cmd_score(&cli, &ScoreArgs::default()).await,
+        // No subcommand → score the configured `default_place` (or whatever
+        // location the user passed via --lat/--lon/--place). Default with
+        // no time arguments is the six-day forecast.
+        None => cmd_score(&cli).await,
     }
 }
 
@@ -157,12 +159,12 @@ fn cmd_config_init(config_arg: Option<&std::path::Path>) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
+async fn cmd_score(cli: &Cli) -> Result<()> {
     // Resolve which mode (single-day window vs multi-day forecast) the
     // user is asking for. `--window` and `--hours` both imply single-day;
     // anything else falls into the new default (six-day forecast).
-    let single_day = args.window.is_some() || args.hours.is_some();
-    let days = match (single_day, args.days) {
+    let single_day = cli.window.is_some() || cli.hours.is_some();
+    let days = match (single_day, cli.days) {
         (true, Some(_)) => bail!("--window/--hours kan ikke brukes sammen med --days"),
         (true, None) => 1,
         (false, Some(d)) => d,
@@ -171,9 +173,27 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
     if days == 0 {
         bail!("--days må være minst 1");
     }
-    if days > 1 && args.window.is_some() {
+    if days > 1 && cli.window.is_some() {
         bail!("--window kan ikke brukes sammen med --days > 1");
     }
+    if single_day && cli.best_window.is_some() {
+        bail!("--best-window gjelder bare multi-dags-prognosen — kan ikke kombineres med --window/--hours");
+    }
+    if let Some(h) = cli.best_window {
+        if h < 1 {
+            bail!("--best-window må være minst 1 time");
+        }
+    }
+    let best_window = match cli.best_window {
+        Some(h) => BestWindowConfig {
+            length_hours: h,
+            // Override the default improvement filter so every day surfaces
+            // its top-scoring sub-window, even on uniform days where the
+            // window only matches the day mean.
+            min_improvement: 0,
+        },
+        None => BestWindowConfig::default(),
+    };
 
     let cfg_path = match cli.config.clone() {
         Some(p) => p,
@@ -186,7 +206,7 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
         )
     })?;
 
-    let location = resolve_location(&cfg, args.lat, args.lon, args.place.clone(), args.radius_km)?;
+    let location = resolve_location(&cfg, cli.lat, cli.lon, cli.place.clone(), cli.radius_km)?;
     let frost_source_id = location_frost_source(&cfg, &location);
     let client = build_client(&cfg, cli.api_base.as_ref(), cli.frost_base.as_ref())?;
 
@@ -207,6 +227,7 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
                 frost_source_id: frost_source_id.as_deref(),
                 history_hours: 168,
                 lang: cfg.language,
+                best_window,
                 progress: &progress,
             },
         )
@@ -232,7 +253,7 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
         return Ok(());
     }
 
-    let win = resolve_window(args.window.as_deref(), args.hours.unwrap_or(3))?;
+    let win = resolve_window(cli.window.as_deref(), cli.hours.unwrap_or(3))?;
     let progress = TerminalProgress::new();
     let result = run_score(
         &client,
@@ -271,8 +292,8 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
     Ok(())
 }
 
-/// Default horizon when the user runs `grusindeks` (or `grusindeks score`) with
-/// no time arguments — today plus the next five days.
+/// Default horizon when the user runs `grusindeks` with no time arguments
+/// — today plus the next five days.
 const DEFAULT_FORECAST_DAYS: u8 = 6;
 
 /// Build `n` consecutive day windows starting at `start_date` (local).

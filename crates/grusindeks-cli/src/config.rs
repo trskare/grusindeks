@@ -71,9 +71,7 @@ impl TryFrom<String> for DaytimeWindow {
         let end = NaiveTime::parse_from_str(b.trim(), "%H:%M")
             .map_err(|e| format!("invalid end in daytime_window {s:?}: {e}"))?;
         if end <= start {
-            return Err(format!(
-                "daytime_window end must be after start, got {s:?}"
-            ));
+            return Err(format!("daytime_window end must be after start, got {s:?}"));
         }
         Ok(Self { start, end })
     }
