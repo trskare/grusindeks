@@ -112,7 +112,7 @@ og rapporten består av:
   ett-ords forklaring som peker på aksen der vinduet trekker mest fra
   dagsgjennomsnittet: `tørrest`, `minst vind`, eller temperatur-grunner
   som splittes i to regimer — `mildest` når vinduets felt-temp ligger i
-  12–22 °C-platået, og `minst kald` ellers.
+  16–22 °C-platået, og `minst kald` ellers.
 - **`--best-window [TIMER]`** — opt-in alternativ som viser dagens
   beste sub-vindu uansett forbedring (default 2 timer). Når sub-vinduet
   faktisk slår dagsgjennomsnittet brukes den vanlige `Beste luke`-merkingen
@@ -249,13 +249,17 @@ temperature) for en syklist. Tre regimer:
 - **Mellom (10–27 °C):** ingen justering — felt-T = lufttemperatur.
 
 Den justerte verdien mappes til en sub-score: platå på 100 mellom
-12–22 °C, lineær fall-off til 0 ved −5 °C / 35 °C.
+**16–22 °C**, knekk ved 12 °C (≈ 75 — der man begynner å trenge ekstra
+lag som vest og armere, med påfølgende svette-i-motbakke /
+kuldegysninger-i-utforkjøring), deretter brattere fall-off til 0 ved
+−5 °C. Varm-siden faller lineært til 0 ved 35 °C.
 
 | Lufttemp °C | Vind m/s | RH % | Felt-T °C  | Score | Kommentar                    |
 |------------:|---------:|-----:|-----------:|------:|------------------------------|
 | 17          | 2        | —    | 17.0       |  100  | nøytral pass-through         |
-|  5          | 1        | —    |  1.3       |   37  | selv-vind kjøler litt        |
-|  5          | 10       | —    | −0.7       |   25  | vind morder komforten        |
+| 13          | 2        | —    | 13.0       |   81  | vest/armere — på kanten      |
+|  5          | 1        | —    |  1.3       |   28  | selv-vind kjøler litt        |
+|  5          | 10       | —    | −0.7       |   19  | vind morder komforten        |
 |  0          | 5        | —    | −6.0       |    0  | under temp-floor (−5 °C)     |
 | 28          | 2        | 60   | 29.4       |   43  | heat index begynner å bite   |
 | 28          | 2        | 85   | 33.3       |   13  | tropisk fuktig               |
