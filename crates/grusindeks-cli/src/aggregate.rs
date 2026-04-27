@@ -43,11 +43,19 @@ impl AggregateScore {
         points: Vec<(Point, Grusindeks)>,
         lang: Language,
     ) -> Self {
+        // Caller may pass `center` with >4 decimals while `points` came
+        // back from sample_around() which truncates to 4. Compare on the
+        // truncated form so the centre is still detectable.
+        let center_truncated = center.truncated();
         let scored: Vec<PointScore> = points
             .into_iter()
             .map(|(p, s)| {
-                let is_center = p == center;
-                let b = if is_center { 0.0 } else { bearing_deg(center, p) };
+                let is_center = p == center_truncated;
+                let b = if is_center {
+                    0.0
+                } else {
+                    bearing_deg(center_truncated, p)
+                };
                 PointScore {
                     point: p,
                     bearing_deg: b,
@@ -146,11 +154,16 @@ impl DayAggregate {
         points: Vec<(Point, DayScore)>,
         lang: Language,
     ) -> Self {
+        let center_truncated = center.truncated();
         let scored: Vec<DayPointScore> = points
             .into_iter()
             .map(|(p, ds)| {
-                let is_center = p == center;
-                let b = if is_center { 0.0 } else { bearing_deg(center, p) };
+                let is_center = p == center_truncated;
+                let b = if is_center {
+                    0.0
+                } else {
+                    bearing_deg(center_truncated, p)
+                };
                 DayPointScore {
                     point: p,
                     bearing_deg: b,
@@ -187,7 +200,7 @@ impl DayAggregate {
         // recorded delta must agree.
         let optimal_window = scored
             .iter()
-            .find(|p| p.point == center)
+            .find(|p| p.is_center)
             .and_then(|p| p.day_score.optimal_window.clone())
             .map(|mut ow| {
                 let day_breakdown = aggregate_breakdown(&scored);

@@ -429,9 +429,20 @@ fn resolve_window(window: Option<&str>, hours: i64) -> Result<RideWindow> {
 }
 
 fn local_to_utc(naive: chrono::NaiveDateTime) -> Result<DateTime<Utc>> {
-    match Local.from_local_datetime(&naive).single() {
-        Some(t) => Ok(t.with_timezone(&Utc)),
-        None => bail!("ambiguous local time {naive}"),
+    use chrono::LocalResult;
+    match Local.from_local_datetime(&naive) {
+        LocalResult::Single(t) => Ok(t.with_timezone(&Utc)),
+        // Spring-forward gap: the wall-clock time literally doesn't exist
+        // (e.g. 02:30 on the morning Norway moves to summer time). Saying
+        // "ambiguous" here is wrong — the clock skips this minute.
+        LocalResult::None => bail!(
+            "lokal tid {naive} finnes ikke (sommer-/vintertid-overgang); velg et tidspunkt før eller etter overgangen"
+        ),
+        // Fall-back overlap: 02:30 happens twice on the morning we wind
+        // clocks back. We pick neither — let the user pin the right one.
+        LocalResult::Ambiguous(_, _) => bail!(
+            "lokal tid {naive} er tvetydig (forekommer to ganger ved sommer-/vintertid-overgang)"
+        ),
     }
 }
 

@@ -131,9 +131,14 @@ pub async fn run_forecast(
     // semantics and avoids per-bush divergence. `None` (Frost
     // unavailable) propagates through unchanged.
     let day_starts: Vec<DateTime<Utc>> = inputs.days.iter().map(|d| d.window.start).collect();
+    // sample_around() truncates every point to 4 decimals before fetching
+    // (TOS), but `inputs.center` may carry full precision from --lat/--lon.
+    // Compare on the truncated form so a center with 5+ decimals still
+    // matches its corresponding fetched point.
+    let center_truncated = inputs.center.truncated();
     let center_hours = per_point_hours
         .iter()
-        .find(|(p, _)| *p == inputs.center)
+        .find(|(p, _)| *p == center_truncated)
         .map(|(_, h)| h.as_slice())
         .unwrap_or_else(|| {
             per_point_hours
