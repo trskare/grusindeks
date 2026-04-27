@@ -136,13 +136,16 @@ pub enum Severity {
 }
 
 /// A human-readable explanation for why a sub-score got reduced. The
-/// `message_no` is in Norwegian and includes the relevant numeric values
-/// (wind speed, mm of rain, °C, etc.) so the CLI can render it as-is.
+/// `message` text is localized in whichever language was passed to
+/// [`score`] and includes the relevant numeric values (wind speed, mm of
+/// rain, °C, etc.) so the CLI can render it as-is. The field name was
+/// historically `message` but the content has always been localized;
+/// renamed in 2026 to match reality and avoid misleading API consumers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Penalty {
     pub component: Component,
     pub severity: Severity,
-    pub message_no: String,
+    pub message: String,
 }
 
 /// The Grusindeks for one location and ride window.
@@ -204,7 +207,7 @@ pub fn score(
     // produced things like "snitt -0 °C, føles som -5 °C" backed by a
     // 71/100 "Bra" label, which masked upstream parser regressions.
     if in_window.is_empty() {
-        let message_no = match lang {
+        let message = match lang {
             Language::Norwegian => {
                 "Ingen prognosedata for valgt vindu — score er ikke beregnet".to_string()
             }
@@ -230,7 +233,7 @@ pub fn score(
             penalties: vec![Penalty {
                 component: Component::NoData,
                 severity: Severity::Critical,
-                message_no,
+                message,
             }],
         };
     }
@@ -331,7 +334,7 @@ pub fn score(
     }
     if hard_capped {
         if max_precip.is_finite() && max_precip > thresholds::HARD_CAP_PRECIP_MM_PER_HOUR {
-            let message_no = match lang {
+            let message = match lang {
                 Language::Norwegian => {
                     format!("Kraftig regn ventet ({max_precip:.1} mm/t) — score hard-cappet")
                 }
@@ -342,11 +345,11 @@ pub fn score(
             penalties.push(Penalty {
                 component: Component::HardCap,
                 severity: Severity::Critical,
-                message_no,
+                message,
             });
         }
         if max_wind.is_finite() && max_wind > thresholds::HARD_CAP_WIND_MS {
-            let message_no = match lang {
+            let message = match lang {
                 Language::Norwegian => {
                     format!("Stormvind ventet ({max_wind:.1} m/s) — score hard-cappet")
                 }
@@ -357,7 +360,7 @@ pub fn score(
             penalties.push(Penalty {
                 component: Component::HardCap,
                 severity: Severity::Critical,
-                message_no,
+                message,
             });
         }
     }
@@ -391,7 +394,7 @@ fn temp_penalty(subscore: u8, mean_temp: f64, felt_temp: f64, lang: Language) ->
     // (>= 2 °C). Otherwise it's just noise and the wind/humidity context
     // is already covered by the other axes.
     let show_felt = felt_temp.is_finite() && (felt_temp - mean_temp).abs() >= 2.0;
-    let message_no = match (lang, cold, show_felt) {
+    let message = match (lang, cold, show_felt) {
         (Language::Norwegian, true, true) => {
             format!("kjølig, snitt {mean_temp:.0} °C, føles som {felt_temp:.0} °C")
         }
@@ -412,7 +415,7 @@ fn temp_penalty(subscore: u8, mean_temp: f64, felt_temp: f64, lang: Language) ->
     Some(Penalty {
         component: Component::Temperature,
         severity,
-        message_no,
+        message,
     })
 }
 
@@ -443,7 +446,7 @@ fn wind_penalty(
         Language::Norwegian => "mye vind",
         Language::Swedish => "mycket vind",
     };
-    let message_no = match (mean_wind, gusty, max_gust) {
+    let message = match (mean_wind, gusty, max_gust) {
         // Gust dominated, mean still calm.
         (m, true, Some(g)) if m <= thresholds::WIND_PERFECT_MAX => {
             format!("{gust_word} {gust_prep} {g:.0} m/s")
@@ -461,14 +464,14 @@ fn wind_penalty(
     Some(Penalty {
         component: Component::Wind,
         severity,
-        message_no,
+        message,
     })
 }
 
 fn precip_penalty(subscore: u8, mean_precip: f64, lang: Language) -> Option<Penalty> {
     let severity = severity_for(subscore)?;
     let heavy = mean_precip > thresholds::PRECIP_HEAVY;
-    let message_no = match (lang, heavy) {
+    let message = match (lang, heavy) {
         (Language::Norwegian, true) => format!("kraftig regn, snitt {mean_precip:.1} mm/t"),
         (Language::Norwegian, false) => format!("{mean_precip:.1} mm/t i snitt"),
         (Language::Swedish, true) => format!("kraftigt regn, medel {mean_precip:.1} mm/h"),
@@ -477,7 +480,7 @@ fn precip_penalty(subscore: u8, mean_precip: f64, lang: Language) -> Option<Pena
     Some(Penalty {
         component: Component::Precipitation,
         severity,
-        message_no,
+        message,
     })
 }
 
@@ -488,14 +491,14 @@ fn precip_penalty(subscore: u8, mean_precip: f64, lang: Language) -> Option<Pena
 fn prob_penalty(subscore: u8, max_prob: Option<f64>, lang: Language) -> Option<Penalty> {
     let severity = severity_for(subscore)?;
     let p = max_prob?.clamp(0.0, 100.0);
-    let message_no = match lang {
+    let message = match lang {
         Language::Norwegian => format!("{p:.0} % sjanse for nedbør"),
         Language::Swedish => format!("{p:.0} % chans för nederbörd"),
     };
     Some(Penalty {
         component: Component::PrecipProbability,
         severity,
-        message_no,
+        message,
     })
 }
 
@@ -509,7 +512,7 @@ fn ground_penalty(subscore: u8, ground_water_mm: f64, lang: Language) -> Option<
     }
     let severity = severity_for(subscore)?;
     let saturated = ground_water_mm >= thresholds::GROUND_SATURATED;
-    let message_no = match (lang, saturated) {
+    let message = match (lang, saturated) {
         (Language::Norwegian, true) => format!("gjennomvåt ({ground_water_mm:.1} mm akkumulert)"),
         (Language::Norwegian, false) => format!("våt fra forrige døgn ({ground_water_mm:.1} mm)"),
         (Language::Swedish, true) => format!("genomblött ({ground_water_mm:.1} mm ackumulerat)"),
@@ -520,7 +523,7 @@ fn ground_penalty(subscore: u8, ground_water_mm: f64, lang: Language) -> Option<
     Some(Penalty {
         component: Component::Ground,
         severity,
-        message_no,
+        message,
     })
 }
 
@@ -530,14 +533,14 @@ fn ground_penalty(subscore: u8, ground_water_mm: f64, lang: Language) -> Option<
 /// scored normally. Always Minor since it doesn't actually mean the
 /// ground is bad — just that we couldn't observe it.
 fn ground_unknown_penalty(lang: Language) -> Option<Penalty> {
-    let message_no = match lang {
+    let message = match lang {
         Language::Norwegian => "bakketilstand ukjent (ingen Frost-observasjoner)".to_string(),
         Language::Swedish => "underlag okänt (inga Frost-observationer)".to_string(),
     };
     Some(Penalty {
         component: Component::Ground,
         severity: Severity::Minor,
-        message_no,
+        message,
     })
 }
 
@@ -564,14 +567,14 @@ fn drought_penalty(
         return None;
     }
     let days = (surface.hours_since_meaningful_rain / 24.0).round() as u32;
-    let message_no = match lang {
+    let message = match lang {
         Language::Norwegian => format!("tørt og løst dekke ({days} døgn uten regn)"),
         Language::Swedish => format!("torrt och löst underlag ({days} dygn utan regn)"),
     };
     Some(Penalty {
         component: Component::Ground,
         severity: Severity::Minor,
-        message_no,
+        message,
     })
 }
 
@@ -917,15 +920,15 @@ mod tests {
             .find(|p| p.severity == Severity::Critical)
             .expect("hard-cap should produce a Critical penalty");
         assert!(
-            crit.message_no.to_lowercase().contains("kraftigt")
-                || crit.message_no.to_lowercase().contains("regn"),
+            crit.message.to_lowercase().contains("kraftigt")
+                || crit.message.to_lowercase().contains("regn"),
             "swedish hard-cap message: {:?}",
-            crit.message_no
+            crit.message
         );
         assert!(
-            crit.message_no.contains("mm/h"),
+            crit.message.contains("mm/h"),
             "swedish should use mm/h not mm/t: {:?}",
-            crit.message_no
+            crit.message
         );
     }
 
@@ -945,12 +948,12 @@ mod tests {
         let drought = s
             .penalties
             .iter()
-            .find(|p| p.message_no.contains("torrt"))
+            .find(|p| p.message.contains("torrt"))
             .expect("expected Swedish drought penalty after 96h");
         assert!(
-            drought.message_no.contains("dygn"),
+            drought.message.contains("dygn"),
             "swedish drought should use 'dygn': {:?}",
-            drought.message_no,
+            drought.message,
         );
     }
 
@@ -1165,9 +1168,9 @@ mod tests {
             temp_pen.severity
         );
         assert!(
-            temp_pen.message_no.contains("0"),
+            temp_pen.message.contains("0"),
             "message should mention the temperature: {:?}",
-            temp_pen.message_no
+            temp_pen.message
         );
     }
 
@@ -1190,9 +1193,9 @@ mod tests {
             .expect("expected wind penalty for 9 m/s");
         assert_eq!(wind_pen.severity, Severity::Major);
         assert!(
-            wind_pen.message_no.contains("9"),
+            wind_pen.message.contains("9"),
             "wind message should cite the speed: {:?}",
-            wind_pen.message_no
+            wind_pen.message
         );
     }
 
@@ -1217,14 +1220,14 @@ mod tests {
             .find(|p| p.component == Component::Wind)
             .expect("gust penalty applied → expected a wind Penalty");
         assert!(
-            wind_pen.message_no.to_lowercase().contains("kast"),
+            wind_pen.message.to_lowercase().contains("kast"),
             "expected gust mention in {:?}",
-            wind_pen.message_no
+            wind_pen.message
         );
         assert!(
-            wind_pen.message_no.contains("8"),
+            wind_pen.message.contains("8"),
             "expected gust value in {:?}",
-            wind_pen.message_no
+            wind_pen.message
         );
     }
 
@@ -1270,9 +1273,9 @@ mod tests {
             .find(|p| p.component == Component::PrecipProbability)
             .expect("expected probability penalty for 90 %");
         assert!(
-            prob_pen.message_no.contains("90"),
+            prob_pen.message.contains("90"),
             "expected 90 %% in {:?}",
-            prob_pen.message_no
+            prob_pen.message
         );
     }
 
@@ -1311,10 +1314,10 @@ mod tests {
             .expect("hard-cap → expected a Critical penalty");
         assert_eq!(crit.component, Component::HardCap);
         assert!(
-            crit.message_no.to_lowercase().contains("kraftig")
-                || crit.message_no.to_lowercase().contains("regn"),
+            crit.message.to_lowercase().contains("kraftig")
+                || crit.message.to_lowercase().contains("regn"),
             "hard-cap message should mention rain: {:?}",
-            crit.message_no
+            crit.message
         );
     }
 
@@ -1335,10 +1338,10 @@ mod tests {
             .find(|p| p.severity == Severity::Critical && p.component == Component::HardCap)
             .expect("storm hard-cap → expected a Critical/HardCap penalty");
         assert!(
-            crit.message_no.to_lowercase().contains("storm")
-                || crit.message_no.to_lowercase().contains("vind"),
+            crit.message.to_lowercase().contains("storm")
+                || crit.message.to_lowercase().contains("vind"),
             "storm message should mention wind: {:?}",
-            crit.message_no
+            crit.message
         );
     }
 
@@ -1408,14 +1411,14 @@ mod tests {
             .penalties
             .iter()
             .find(|p| {
-                p.component == Component::Ground && p.message_no.to_lowercase().contains("tørt")
+                p.component == Component::Ground && p.message.to_lowercase().contains("tørt")
             })
             .expect("expected a tørke penalty after 96h drought");
         assert_eq!(drought.severity, Severity::Minor);
         assert!(
-            drought.message_no.contains("4 døgn"),
+            drought.message.contains("4 døgn"),
             "expected '4 døgn' in {:?}",
-            drought.message_no
+            drought.message
         );
     }
 
@@ -1439,7 +1442,7 @@ mod tests {
         let wet = s
             .penalties
             .iter()
-            .find(|p| p.message_no.to_lowercase().contains("våt"));
+            .find(|p| p.message.to_lowercase().contains("våt"));
         assert!(wet.is_none(), "got {:?}", s.penalties);
     }
 
@@ -1461,7 +1464,7 @@ mod tests {
         let drought = s
             .penalties
             .iter()
-            .find(|p| p.message_no.to_lowercase().contains("tørt"));
+            .find(|p| p.message.to_lowercase().contains("tørt"));
         assert!(drought.is_none(), "got {:?}", s.penalties);
     }
 
@@ -1562,7 +1565,7 @@ mod tests {
         let pen = s
             .penalties
             .iter()
-            .find(|p| p.component == Component::Ground && p.message_no.contains("ukjent"))
+            .find(|p| p.component == Component::Ground && p.message.contains("ukjent"))
             .expect("expected an unknown-ground penalty");
         assert_eq!(pen.severity, Severity::Minor);
     }
@@ -1670,9 +1673,9 @@ mod tests {
             .find(|p| p.component == Component::Temperature)
             .expect("expected a temperature penalty on a cold windy day");
         assert!(
-            temp_pen.message_no.contains("føles som"),
+            temp_pen.message.contains("føles som"),
             "penalty message did not mention felt-T: {:?}",
-            temp_pen.message_no
+            temp_pen.message
         );
     }
 

@@ -75,7 +75,7 @@ pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<Ag
         .into_iter()
         .map(|(p, hours)| (p, score(&hours, inputs.window, surface, inputs.lang)))
         .collect();
-    Ok(AggregateScore::from_points(inputs.center, scored))
+    Ok(AggregateScore::from_points(inputs.center, scored, inputs.lang))
 }
 
 /// One day worth of forecast lookup: a local date label plus the UTC
@@ -170,6 +170,7 @@ pub async fn run_forecast(
             dw.window,
             inputs.center,
             day_points,
+            inputs.lang,
         ));
     }
     Ok(MultiDayForecast { days })

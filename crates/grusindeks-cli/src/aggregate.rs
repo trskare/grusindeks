@@ -7,7 +7,8 @@
 
 use chrono::NaiveDate;
 use grusindeks_core::daily::{reason_for, Confidence, DayScore, OptimalWindow};
-use grusindeks_core::geo::{bearing_deg, bearing_label_no, Point};
+use grusindeks_core::geo::{bearing_deg, bearing_label, Point};
+use grusindeks_core::lang::Language;
 use grusindeks_core::score::{Grusindeks, ScoreBreakdown};
 use grusindeks_core::types::RideWindow;
 use serde::Serialize;
@@ -16,7 +17,15 @@ use serde::Serialize;
 pub struct PointScore {
     pub point: Point,
     pub bearing_deg: f64,
+    /// Compass label localized in the configured language ("NØ"/"NÖ",
+    /// "Ø"/"Ö", …) or the localized "center" word ("senter"/"centrum")
+    /// when `is_center` is true. Renderers must not parse this — use
+    /// `is_center` to detect the center point.
     pub bearing_label: &'static str,
+    /// True when this point sits exactly at the requested ride centre.
+    /// Lets the renderer surface the centre row without string-matching
+    /// on a localized label.
+    pub is_center: bool,
     pub score: Grusindeks,
 }
 
@@ -29,23 +38,25 @@ pub struct AggregateScore {
 }
 
 impl AggregateScore {
-    pub fn from_points(center: Point, points: Vec<(Point, Grusindeks)>) -> Self {
+    pub fn from_points(
+        center: Point,
+        points: Vec<(Point, Grusindeks)>,
+        lang: Language,
+    ) -> Self {
         let scored: Vec<PointScore> = points
             .into_iter()
             .map(|(p, s)| {
-                let b = if p == center {
-                    0.0
-                } else {
-                    bearing_deg(center, p)
-                };
+                let is_center = p == center;
+                let b = if is_center { 0.0 } else { bearing_deg(center, p) };
                 PointScore {
                     point: p,
                     bearing_deg: b,
-                    bearing_label: if p == center {
-                        "senter"
+                    bearing_label: if is_center {
+                        center_label(lang)
                     } else {
-                        bearing_label_no(b)
+                        bearing_label(b, lang)
                     },
+                    is_center,
                     score: s,
                 }
             })
@@ -87,8 +98,21 @@ impl AggregateScore {
 pub struct DayPointScore {
     pub point: Point,
     pub bearing_deg: f64,
+    /// Compass label localized in the configured language. See
+    /// [`PointScore::bearing_label`] — same semantics.
     pub bearing_label: &'static str,
+    /// True when this point sits exactly at the requested ride centre.
+    pub is_center: bool,
     pub day_score: DayScore,
+}
+
+/// Localized "center" compass label. Internal helper so call sites don't
+/// repeat the language match.
+fn center_label(lang: Language) -> &'static str {
+    match lang {
+        Language::Norwegian => "senter",
+        Language::Swedish => "centrum",
+    }
 }
 
 /// One day in the multi-day forecast view, aggregated across all sample
@@ -120,23 +144,22 @@ impl DayAggregate {
         window: RideWindow,
         center: Point,
         points: Vec<(Point, DayScore)>,
+        lang: Language,
     ) -> Self {
         let scored: Vec<DayPointScore> = points
             .into_iter()
             .map(|(p, ds)| {
-                let b = if p == center {
-                    0.0
-                } else {
-                    bearing_deg(center, p)
-                };
+                let is_center = p == center;
+                let b = if is_center { 0.0 } else { bearing_deg(center, p) };
                 DayPointScore {
                     point: p,
                     bearing_deg: b,
-                    bearing_label: if p == center {
-                        "senter"
+                    bearing_label: if is_center {
+                        center_label(lang)
                     } else {
-                        bearing_label_no(b)
+                        bearing_label(b, lang)
                     },
+                    is_center,
                     day_score: ds,
                 }
             })
@@ -225,7 +248,7 @@ impl DayAggregate {
     pub fn center(&self) -> &DayScore {
         self.points
             .iter()
-            .find(|p| p.bearing_label == "senter")
+            .find(|p| p.is_center)
             .map(|p| &p.day_score)
             .unwrap_or(&self.points[0].day_score)
     }
@@ -295,6 +318,7 @@ mod tests {
                 (center, good.clone()),
                 (Point::new(60.0, 10.7522), bad.clone()),
             ],
+            Language::Norwegian,
         );
         assert_eq!(agg.max, good.total);
         assert_eq!(agg.min, bad.total);
@@ -317,7 +341,7 @@ mod tests {
             Language::Norwegian,
         );
         let center = Point::new(59.9139, 10.7522);
-        let agg = AggregateScore::from_points(center, vec![(center, good)]);
+        let agg = AggregateScore::from_points(center, vec![(center, good)], Language::Norwegian);
         assert_eq!(agg.points[0].bearing_label, "senter");
     }
 
@@ -363,6 +387,7 @@ mod tests {
                     ),
                 ),
             ],
+            Language::Norwegian,
         );
         // Center is Hoy, the other is Lav (>50% six-hourly) → worst is Lav.
         assert_eq!(agg.confidence, Confidence::Lav);
@@ -411,6 +436,7 @@ mod tests {
                     ),
                 ),
             ],
+            Language::Norwegian,
         );
         assert!(
             agg.optimal_window.is_some(),
@@ -470,6 +496,7 @@ mod tests {
                     ),
                 ),
             ],
+            Language::Norwegian,
         );
         let ow = agg.optimal_window.expect("center emits a window");
         let displayed_delta = ow.score.total.saturating_sub(agg.mean);
@@ -498,7 +525,7 @@ mod tests {
             Language::Norwegian,
         );
         let center = Point::new(59.9139, 10.7522);
-        let agg = AggregateScore::from_points(center, vec![(center, good)]);
+        let agg = AggregateScore::from_points(center, vec![(center, good)], Language::Norwegian);
         let json = serde_json::to_string(&agg).unwrap();
         assert!(json.contains("\"min\""));
         assert!(json.contains("\"points\""));

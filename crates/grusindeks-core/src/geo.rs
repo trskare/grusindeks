@@ -98,12 +98,6 @@ pub fn bearing_label(bearing_deg: f64, lang: crate::lang::Language) -> &'static 
     }
 }
 
-/// Backwards-compatible Norwegian-only bearing label. Prefer
-/// [`bearing_label`] in new code.
-pub fn bearing_label_no(bearing_deg: f64) -> &'static str {
-    bearing_label(bearing_deg, crate::lang::Language::Norwegian)
-}
-
 /// Initial bearing from `from` to `to`, in degrees clockwise from north.
 pub fn bearing_deg(from: Point, to: Point) -> f64 {
     let lat1 = from.lat.to_radians();
@@ -276,7 +270,7 @@ mod tests {
     #[case(22.0, "N")] // rounds to nearest
     #[case(23.0, "NØ")]
     fn bearing_labels_norwegian(#[case] deg: f64, #[case] expected: &str) {
-        assert_eq!(bearing_label_no(deg), expected);
+        assert_eq!(bearing_label(deg, crate::lang::Language::Norwegian), expected);
     }
 
     #[rstest]

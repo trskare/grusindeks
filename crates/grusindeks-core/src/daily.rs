@@ -39,12 +39,6 @@ impl Confidence {
         }
     }
 
-    /// Backwards-compatible Norwegian-only label. Prefer [`label`] with an
-    /// explicit `Language`.
-    pub fn label_no(self) -> &'static str {
-        self.label(Language::Norwegian)
-    }
-
     /// Sortable rank where higher = more trustworthy. Used to break ties
     /// when picking a "best day" in the multi-day view: a `Høy`-konfidens
     /// 90 should beat a `Lav`-konfidens 90.
