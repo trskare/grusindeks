@@ -15,13 +15,13 @@ use owo_colors::{OwoColorize, Rgb, Stream::Stdout, Style};
 
 pub const FG: Rgb = Rgb(0xeb, 0xdb, 0xb2);
 pub const GRAY: Rgb = Rgb(0x92, 0x83, 0x74);
-pub const RED: Rgb = Rgb(0xfb, 0x49, 0x34);
+pub const RED: Rgb = Rgb(0xcc, 0x24, 0x1d);
 pub const ORANGE: Rgb = Rgb(0xfe, 0x80, 0x19);
 pub const YELLOW: Rgb = Rgb(0xfa, 0xbd, 0x2f);
-pub const GREEN: Rgb = Rgb(0xb8, 0xbb, 0x26);
-pub const AQUA: Rgb = Rgb(0x8e, 0xc0, 0x7c);
+pub const LIME: Rgb = Rgb(0xb8, 0xbb, 0x26);
+pub const GREEN: Rgb = Rgb(0x68, 0x9d, 0x6a);
+pub const AQUA: Rgb = Rgb(0x45, 0x85, 0x88);
 pub const BLUE: Rgb = Rgb(0x83, 0xa5, 0x98);
-pub const PURPLE: Rgb = Rgb(0xd3, 0x86, 0x9b);
 
 /// Color a 0–100 score by the same bucket boundaries `score::label_for`
 /// uses, so the colour and the label always agree.
@@ -30,8 +30,8 @@ pub fn score_color(total: u8) -> Rgb {
         0..=24 => RED,     // Dårlig
         25..=44 => ORANGE, // Marginalt
         45..=64 => YELLOW, // OK
-        65..=84 => GREEN,  // Bra
-        _ => AQUA,         // Strålende
+        65..=84 => LIME,   // Bra
+        _ => GREEN,        // Strålende
     }
 }
 
@@ -52,7 +52,7 @@ pub fn component_color(c: Component) -> Rgb {
         Component::Wind => ORANGE,
         Component::Precipitation => BLUE,
         Component::PrecipProbability => BLUE,
-        Component::Ground => PURPLE,
+        Component::Ground => AQUA,
         Component::HardCap => RED,
         Component::NoData => RED,
     }
@@ -145,7 +145,7 @@ pub fn paint_fg(s: &str) -> String {
 }
 
 pub fn paint_accent(s: &str) -> String {
-    let style = Style::new().color(PURPLE).bold();
+    let style = Style::new().color(AQUA).bold();
     format!("{}", s.if_supports_color(Stdout, |x| x.style(style)))
 }
 
@@ -180,10 +180,29 @@ mod tests {
         assert_eq!(score_color(44), ORANGE);
         assert_eq!(score_color(45), YELLOW);
         assert_eq!(score_color(64), YELLOW);
-        assert_eq!(score_color(65), GREEN);
-        assert_eq!(score_color(84), GREEN);
-        assert_eq!(score_color(85), AQUA);
-        assert_eq!(score_color(100), AQUA);
+        assert_eq!(score_color(65), LIME);
+        assert_eq!(score_color(84), LIME);
+        assert_eq!(score_color(85), GREEN);
+        assert_eq!(score_color(100), GREEN);
+    }
+
+    #[test]
+    fn score_color_buckets_are_distinct() {
+        // Five buckets must each map to a unique colour — otherwise two
+        // labels (e.g. "ok" and "bra") would render in the same colour and
+        // the gradient stops being scannable.
+        let buckets = [
+            score_color(0),
+            score_color(25),
+            score_color(45),
+            score_color(65),
+            score_color(85),
+        ];
+        let unique: std::collections::HashSet<_> = buckets
+            .iter()
+            .map(|rgb| (rgb.0, rgb.1, rgb.2))
+            .collect();
+        assert_eq!(unique.len(), 5, "all five score buckets must use distinct colours");
     }
 
     #[test]
