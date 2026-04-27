@@ -229,6 +229,21 @@ async fn fetch_forecasts_parallel(
         progress.forecast_point_done();
     }
     progress.forecast_finished();
+    // JoinSet yields tasks in completion order — i.e. whichever HTTP
+    // request finished first. Sort by (lat, lon) so downstream aggregation
+    // picks the same "worst point" / "best point" on every run when the
+    // sample disk has score ties, and so the JSON `points[]` array is
+    // stable across invocations.
+    out.sort_by(|(a, _), (b, _)| {
+        a.lat
+            .partial_cmp(&b.lat)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.lon
+                    .partial_cmp(&b.lon)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
     Ok(out)
 }
 
