@@ -233,13 +233,13 @@ mod tests {
         let good = score(
             &(14..17).map(perfect).collect::<Vec<_>>(),
             win,
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         let bad = score(
             &(14..17).map(awful).collect::<Vec<_>>(),
             win,
-            SurfaceState::new(4.5),
+            Some(SurfaceState::new(4.5)),
             Language::Norwegian,
         );
         let center = Point::new(59.9139, 10.7522);
@@ -252,7 +252,10 @@ mod tests {
         );
         assert_eq!(agg.max, good.total);
         assert_eq!(agg.min, bad.total);
-        assert_eq!(agg.mean, (good.total / 2 + bad.total / 2));
+        // Use the same floor-divided sum as `from_points`; halving each
+        // total before adding can lose a point to integer rounding when
+        // either total is odd.
+        assert_eq!(agg.mean, (good.total + bad.total) / 2);
         assert_eq!(agg.worst().score.total, bad.total);
         assert_eq!(agg.best().score.total, good.total);
     }
@@ -263,7 +266,7 @@ mod tests {
         let good = score(
             &(14..17).map(perfect).collect::<Vec<_>>(),
             win,
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         let center = Point::new(59.9139, 10.7522);
@@ -295,7 +298,7 @@ mod tests {
                     compute_day(
                         &hourly,
                         win,
-                        SurfaceState::default(),
+                        Some(SurfaceState::default()),
                         now,
                         Language::Norwegian,
                     ),
@@ -305,7 +308,7 @@ mod tests {
                     compute_day(
                         &six_hourly,
                         win,
-                        SurfaceState::default(),
+                        Some(SurfaceState::default()),
                         now,
                         Language::Norwegian,
                     ),
@@ -341,7 +344,7 @@ mod tests {
                     compute_day(
                         &center_hours,
                         win,
-                        SurfaceState::default(),
+                        Some(SurfaceState::default()),
                         now,
                         Language::Norwegian,
                     ),
@@ -351,7 +354,7 @@ mod tests {
                     compute_day(
                         &other_hours,
                         win,
-                        SurfaceState::default(),
+                        Some(SurfaceState::default()),
                         now,
                         Language::Norwegian,
                     ),
@@ -371,7 +374,7 @@ mod tests {
         let good = score(
             &(14..17).map(perfect).collect::<Vec<_>>(),
             win,
-            SurfaceState::default(),
+            Some(SurfaceState::default()),
             Language::Norwegian,
         );
         let center = Point::new(59.9139, 10.7522);

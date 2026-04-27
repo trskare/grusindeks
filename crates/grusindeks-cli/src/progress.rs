@@ -107,14 +107,14 @@ impl ProgressSink for TerminalProgress {
         }
     }
 
-    fn ground_finished(&self, found: bool) {
+    fn ground_finished(&self, _found: bool) {
+        // Clear (don't leave a final-state line) so the rendered output
+        // owns the terminal alone. Previously we called
+        // `finish_with_message("✓ Historikk hentet")`, which left the
+        // spinner-frame + message visible *next to* the report header
+        // — visible as `⠏ ✓ Historikk hentet ...` lekkasje on first run.
         if let Some(pb) = self.frost.lock().unwrap().take() {
-            let msg = if found {
-                "✓ Historikk hentet"
-            } else {
-                "⚠ Frost feilet — antar tørr bakke"
-            };
-            pb.finish_with_message(msg);
+            pb.finish_and_clear();
         }
     }
 

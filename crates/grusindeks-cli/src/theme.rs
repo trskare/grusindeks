@@ -110,7 +110,24 @@ pub fn paint_bar_filled(s: &str, total: u8) -> String {
 }
 
 pub fn paint_bar_empty(s: &str) -> String {
-    let style = Style::new().color(GRAY);
+    // Foreground AND background both gray → the `▒` glyph's pattern
+    // disappears (same colour on same colour) and the cell renders as
+    // a solid gray rectangle that matches `paint_bar_partial`'s right
+    // portion exactly. With NO_COLOR / non-TTY the styling is a no-op
+    // and we fall back to the raw `▒` glyph, which still reads as
+    // "empty bar" in plain text.
+    let style = Style::new().color(GRAY).on_color(GRAY);
+    format!("{}", s.if_supports_color(Stdout, |x| x.style(style)))
+}
+
+/// Paint the trailing half-block cell of a bar (`▏▎▍▌▋▊▉`). The glyph
+/// is left-aligned in its cell — its right portion shows the cell
+/// *background*, which would otherwise be the terminal background
+/// (a "black gap" between the filled run and the empty run). We paint
+/// foreground with the score colour and background with the same gray
+/// the empty `░` cells use, so the bar reads as continuous.
+pub fn paint_bar_partial(s: &str, total: u8) -> String {
+    let style = Style::new().color(score_color(total)).on_color(GRAY);
     format!("{}", s.if_supports_color(Stdout, |x| x.style(style)))
 }
 
@@ -126,6 +143,14 @@ pub fn paint_fg(s: &str) -> String {
 
 pub fn paint_accent(s: &str) -> String {
     let style = Style::new().color(PURPLE).bold();
+    format!("{}", s.if_supports_color(Stdout, |x| x.style(style)))
+}
+
+/// Paint a string in the score colour without bold — used for the
+/// "best day" callout border, where the colour signals which bucket
+/// the week lands in but the box itself shouldn't shout.
+pub fn paint_score_soft(s: &str, total: u8) -> String {
+    let style = Style::new().color(score_color(total));
     format!("{}", s.if_supports_color(Stdout, |x| x.style(style)))
 }
 

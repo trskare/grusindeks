@@ -176,9 +176,11 @@ radius_km = 20.0
         .args(["score", "--place", "oslo", "--days", "5"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Grusindeks for oslo"))
+        .stdout(predicate::str::contains("Grusindeks · oslo"))
         .stdout(predicate::str::contains("dager"))
-        .stdout(predicate::str::contains("ⓘ"));
+        // The bucket legend chip lives once in the footer; pin against
+        // it instead of the old per-row "ⓘ" glyph that has been removed.
+        .stdout(predicate::str::contains("Skala"));
 }
 
 #[tokio::test]
@@ -288,6 +290,131 @@ radius_km = 20.0
         "default should be 6 days, got {}",
         days.len()
     );
+}
+
+#[tokio::test]
+async fn score_with_frost_configured_calls_observations_endpoint() {
+    // End-to-end Frost path: when both `frost.client_id` and
+    // `frost.source_id` are configured, the binary must hit the
+    // observations endpoint (with the full multi-element query) and
+    // honour the historic data when scoring.
+    let server = MockServer::start().await;
+    let frost_body = r#"{
+        "data": [
+            {"referenceTime": "2026-04-25T22:00:00.000Z",
+             "observations": [
+                {"elementId": "sum(precipitation_amount PT1H)", "value": 1.4},
+                {"elementId": "mean(air_temperature PT1H)",     "value": 8.0},
+                {"elementId": "mean(wind_speed PT1H)",          "value": 3.0},
+                {"elementId": "mean(relative_humidity PT1H)",   "value": 85.0}
+             ]},
+            {"referenceTime": "2026-04-25T23:00:00.000Z",
+             "observations": [
+                {"elementId": "sum(precipitation_amount PT1H)", "value": 2.6},
+                {"elementId": "mean(air_temperature PT1H)",     "value": 8.0},
+                {"elementId": "mean(wind_speed PT1H)",          "value": 3.0},
+                {"elementId": "mean(relative_humidity PT1H)",   "value": 90.0}
+             ]}
+        ]
+    }"#;
+
+    Mock::given(method("GET"))
+        .and(path_m("/weatherapi/locationforecast/2.0/complete"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(LOCATIONFORECAST_FIXTURE))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_m("/observations/v0.jsonld"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(frost_body))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let cfg = write_config(
+        &dir,
+        r#"user_agent_contact = "dev@example.invalid"
+[frost]
+client_id = "test-client-id"
+source_id = "SN18700"
+[places.oslo]
+lat = 59.9139
+lon = 10.7522
+radius_km = 20.0
+"#,
+    );
+
+    Command::cargo_bin("grusindeks")
+        .unwrap()
+        .env("GRUSINDEKS_API_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
+        .arg("--config")
+        .arg(&cfg)
+        .args(["score", "--place", "oslo", "--hours", "3"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Grusindeks for oslo"));
+
+    // Now verify Frost was actually hit with the full multi-element
+    // query. If we ever silently regress to precip-only, this assertion
+    // catches it before the drying model degrades again.
+    let received = server.received_requests().await.unwrap();
+    let frost_hit = received
+        .iter()
+        .find(|r| r.url.path() == "/observations/v0.jsonld");
+    let req = frost_hit.expect("frost observations endpoint was never called");
+    let qs: std::collections::HashMap<_, _> = req.url.query_pairs().into_owned().collect();
+    let elements = qs.get("elements").expect("missing elements query param");
+    assert!(
+        elements.contains("precipitation_amount")
+            && elements.contains("air_temperature")
+            && elements.contains("wind_speed")
+            && elements.contains("relative_humidity"),
+        "expected full multi-element query, got: {elements}",
+    );
+}
+
+#[tokio::test]
+async fn score_falls_back_when_frost_returns_500() {
+    // Frost outage: locationforecast still works, but the observations
+    // endpoint returns 500. The CLI must surface a score (no panic, no
+    // hang) — the ground axis just becomes "unknown" instead of being
+    // computed from observations.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_m("/weatherapi/locationforecast/2.0/complete"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(LOCATIONFORECAST_FIXTURE))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_m("/observations/v0.jsonld"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("upstream broke"))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let cfg = write_config(
+        &dir,
+        r#"user_agent_contact = "dev@example.invalid"
+[frost]
+client_id = "test-client-id"
+source_id = "SN18700"
+[places.oslo]
+lat = 59.9139
+lon = 10.7522
+radius_km = 20.0
+"#,
+    );
+
+    Command::cargo_bin("grusindeks")
+        .unwrap()
+        .env("GRUSINDEKS_API_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
+        .arg("--config")
+        .arg(&cfg)
+        .args(["score", "--place", "oslo", "--hours", "3"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Grusindeks for oslo"));
 }
 
 #[tokio::test]

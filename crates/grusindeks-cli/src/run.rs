@@ -58,14 +58,17 @@ pub struct ScoreInputs<'a> {
 pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<AggregateScore> {
     let points = sample_around(inputs.center, inputs.radius_km);
 
+    // `None` is propagated all the way through scoring so the ground axis
+    // can render as "ukjent" instead of silently masquerading as
+    // "akkurat regnet" (which is what `SurfaceState::default()` would
+    // imply).
     let surface = fetch_ground_state(
         client,
         inputs.frost_source_id,
         inputs.history_hours,
         inputs.progress,
     )
-    .await
-    .unwrap_or_default();
+    .await;
 
     let per_point_hours = fetch_forecasts_parallel(client, &points, inputs.progress).await?;
     let scored: Vec<(Point, _)> = per_point_hours
@@ -109,8 +112,7 @@ pub async fn run_forecast(
         inputs.history_hours,
         inputs.progress,
     )
-    .await
-    .unwrap_or_default();
+    .await;
 
     let now = Utc::now();
     let per_point_hours = fetch_forecasts_parallel(client, &points, inputs.progress).await?;
@@ -170,11 +172,11 @@ async fn fetch_ground_state(
     progress.ground_started();
     let to: DateTime<Utc> = Utc::now();
     let from = to - Duration::hours(history_hours);
-    let result = frost::fetch_hourly_precip(client, src, from, to).await;
+    let result = frost::fetch_hourly_observations(client, src, from, to).await;
     let outcome = match &result {
         Ok(history) => Some(replay_into_state(history, &DryingParams::default())),
         Err(e) => {
-            tracing::warn!("frost lookup failed, assuming dry ground: {e}");
+            tracing::warn!("frost lookup failed, ground state will be reported as unknown: {e}",);
             None
         }
     };
@@ -182,28 +184,65 @@ async fn fetch_ground_state(
     outcome
 }
 
-/// Replay a list of `(time, mm)` precipitation observations through the
-/// drying model. Uses neutral drying conditions for missing temp/wind/etc.,
-/// since Frost-only history doesn't carry those for free.
-fn replay_into_state(history: &[frost::HourlyPrecip], p: &DryingParams) -> SurfaceState {
-    // Conservative neutral assumption: 10°C, 3 m/s wind, 70% humidity, 70%
-    // cloud, no UV. Tunable later if it turns out to be too pessimistic.
+/// Replay a list of Frost observations through the drying model. Uses
+/// the actual observed temperature, wind, and humidity per hour when
+/// they're present; falls back to the previous neutral defaults
+/// (10 °C / 3 m/s / 70 % RH / 70 % cloud / no UV) only for the
+/// individual fields that are missing on the station. This way a real
+/// hot, sunny week dries the bucket faster than a cold, calm one — the
+/// bug the auditors flagged about the ground estimate diverging from
+/// reality on hetebølge / kjølig overskyet uke.
+///
+/// Gap-aware: when consecutive observations are more than ~1.5 hours
+/// apart (Frost outage, sensor maintenance, station reboot) we
+/// synthesise dry filler hours so the drought counter climbs by the real
+/// elapsed time instead of treating the gap as if no time passed at all.
+/// Filler hours use neutral conditions and zero precipitation.
+fn replay_into_state(history: &[frost::HourlyObservation], p: &DryingParams) -> SurfaceState {
     let mut state = SurfaceState::default();
+    let mut prev_time: Option<DateTime<Utc>> = None;
     for h in history {
+        if let Some(prev) = prev_time {
+            let elapsed = h.time - prev;
+            // Allow some slop — Frost timestamps drift by a few minutes
+            // around the hour, so anything under 90 minutes counts as
+            // "the next hour" rather than a gap.
+            let gap_hours = elapsed.num_minutes() as f64 / 60.0;
+            if gap_hours > 1.5 {
+                let filler_count = gap_hours.round() as i64 - 1;
+                for i in 1..=filler_count {
+                    let filler = HourlyConditions {
+                        time: prev + Duration::hours(i),
+                        temperature_c: 10.0,
+                        wind_speed_ms: 3.0,
+                        precipitation_mm: 0.0,
+                        wind_gust_ms: None,
+                        wind_from_deg: None,
+                        probability_of_precip: None,
+                        relative_humidity: Some(70.0),
+                        cloud_area_fraction: Some(70.0),
+                        uv_index_clear_sky: None,
+                        resolution: Resolution::Hourly,
+                    };
+                    state = drying_step(state, &filler, p);
+                }
+            }
+        }
         let synth = HourlyConditions {
             time: h.time,
-            temperature_c: 10.0,
-            wind_speed_ms: 3.0,
-            precipitation_mm: h.mm,
+            temperature_c: h.temp_c.unwrap_or(10.0),
+            wind_speed_ms: h.wind_ms.unwrap_or(3.0),
+            precipitation_mm: h.precip_mm.unwrap_or(0.0),
             wind_gust_ms: None,
             wind_from_deg: None,
             probability_of_precip: None,
-            relative_humidity: Some(70.0),
+            relative_humidity: h.humidity_pct.or(Some(70.0)),
             cloud_area_fraction: Some(70.0),
             uv_index_clear_sky: None,
             resolution: Resolution::Hourly,
         };
         state = drying_step(state, &synth, p);
+        prev_time = Some(h.time);
     }
     state
 }
@@ -302,10 +341,13 @@ mod tests {
     #[test]
     fn heavy_recent_history_leaves_water_on_ground() {
         let now = Utc::now();
-        let history: Vec<frost::HourlyPrecip> = (0..6)
-            .map(|i| frost::HourlyPrecip {
+        let history: Vec<frost::HourlyObservation> = (0..6)
+            .map(|i| frost::HourlyObservation {
                 time: now - Duration::hours(6 - i),
-                mm: 3.0,
+                precip_mm: Some(3.0),
+                temp_c: None,
+                wind_ms: None,
+                humidity_pct: None,
             })
             .collect();
         let state = replay_into_state(&history, &DryingParams::default());
@@ -313,6 +355,75 @@ mod tests {
             state.accumulated_mm > 0.0,
             "expected some accumulation, got {:?}",
             state,
+        );
+    }
+
+    #[test]
+    fn replay_treats_gaps_in_history_as_dry_elapsed_time() {
+        // Two readings 6 hours apart simulate a Frost outage. The
+        // drought counter must climb by the elapsed time, not by 1.
+        let now = Utc::now();
+        let history = vec![
+            frost::HourlyObservation {
+                time: now - Duration::hours(6),
+                precip_mm: Some(0.0),
+                temp_c: Some(15.0),
+                wind_ms: Some(3.0),
+                humidity_pct: Some(50.0),
+            },
+            frost::HourlyObservation {
+                time: now,
+                precip_mm: Some(0.0),
+                temp_c: Some(15.0),
+                wind_ms: Some(3.0),
+                humidity_pct: Some(50.0),
+            },
+        ];
+        let state = replay_into_state(&history, &DryingParams::default());
+        // 1 first reading + 5 filler hours + 1 last reading = 7 dry hours
+        // since the start. (Counter is "since meaningful rain", and
+        // there's been none, so it equals the total elapsed time.)
+        assert!(
+            state.hours_since_meaningful_rain >= 6.0,
+            "drought counter must reflect elapsed gap; got {}",
+            state.hours_since_meaningful_rain,
+        );
+    }
+
+    #[test]
+    fn replay_uses_observed_conditions_not_synthesised_neutral() {
+        // Two histories with identical precipitation but very different
+        // weather should NOT produce identical drying. Hot/sunny dries
+        // faster than cold/cloudy (still, no UV in observations →
+        // sunshine bonus is half-strength either way; cloud is the same).
+        // The dominant effect is temperature and wind.
+        let now = Utc::now();
+        let dry_history: Vec<frost::HourlyObservation> = (0..6)
+            .map(|i| frost::HourlyObservation {
+                time: now - Duration::hours(6 - i),
+                precip_mm: Some(1.0),
+                temp_c: Some(25.0),
+                wind_ms: Some(8.0),
+                humidity_pct: Some(40.0),
+            })
+            .collect();
+        let damp_history: Vec<frost::HourlyObservation> = (0..6)
+            .map(|i| frost::HourlyObservation {
+                time: now - Duration::hours(6 - i),
+                precip_mm: Some(1.0),
+                temp_c: Some(2.0),
+                wind_ms: Some(0.5),
+                humidity_pct: Some(95.0),
+            })
+            .collect();
+        let p = DryingParams::default();
+        let dry_state = replay_into_state(&dry_history, &p);
+        let damp_state = replay_into_state(&damp_history, &p);
+        assert!(
+            dry_state.accumulated_mm < damp_state.accumulated_mm,
+            "hot/windy/dry-air history should leave less water on the surface; got dry={}, damp={}",
+            dry_state.accumulated_mm,
+            damp_state.accumulated_mm,
         );
     }
 }
