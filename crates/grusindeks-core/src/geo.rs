@@ -270,7 +270,10 @@ mod tests {
     #[case(22.0, "N")] // rounds to nearest
     #[case(23.0, "NØ")]
     fn bearing_labels_norwegian(#[case] deg: f64, #[case] expected: &str) {
-        assert_eq!(bearing_label(deg, crate::lang::Language::Norwegian), expected);
+        assert_eq!(
+            bearing_label(deg, crate::lang::Language::Norwegian),
+            expected
+        );
     }
 
     #[rstest]

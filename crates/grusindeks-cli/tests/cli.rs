@@ -223,13 +223,7 @@ async fn score_hourly_rejects_combination_with_window() {
         .arg("--config")
         .arg(&cfg)
         .args([
-            "--lat",
-            "59.9139",
-            "--lon",
-            "10.7522",
-            "--hours",
-            "3",
-            "--hourly",
+            "--lat", "59.9139", "--lon", "10.7522", "--hours", "3", "--hourly",
         ])
         .assert()
         .failure()
@@ -666,8 +660,7 @@ async fn score_against_empty_forecast_surfaces_no_data_not_phantom_score() {
     Mock::given(method("GET"))
         .and(path_m("/weatherapi/locationforecast/2.0/complete"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(r#"{"properties":{"timeseries":[]}}"#),
+            ResponseTemplate::new(200).set_body_string(r#"{"properties":{"timeseries":[]}}"#),
         )
         .mount(&server)
         .await;

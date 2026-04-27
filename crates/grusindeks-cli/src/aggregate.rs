@@ -38,11 +38,7 @@ pub struct AggregateScore {
 }
 
 impl AggregateScore {
-    pub fn from_points(
-        center: Point,
-        points: Vec<(Point, Grusindeks)>,
-        lang: Language,
-    ) -> Self {
+    pub fn from_points(center: Point, points: Vec<(Point, Grusindeks)>, lang: Language) -> Self {
         // Caller may pass `center` with >4 decimals while `points` came
         // back from sample_around() which truncates to 4. Compare on the
         // truncated form so the centre is still detectable.
@@ -227,7 +223,10 @@ impl DayAggregate {
 /// optimal-window reason against it keeps the "why" hint consistent with
 /// the displayed numbers.
 fn aggregate_breakdown(points: &[DayPointScore]) -> ScoreBreakdown {
-    debug_assert!(!points.is_empty(), "DayAggregate requires at least one point");
+    debug_assert!(
+        !points.is_empty(),
+        "DayAggregate requires at least one point"
+    );
     let mean = |f: fn(&ScoreBreakdown) -> u8| -> u8 {
         let totals: Vec<u8> = points
             .iter()

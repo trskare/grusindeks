@@ -839,7 +839,6 @@ fn mean_label(total: u8, lang: Language) -> &'static str {
     grusindeks_core::score::label_for(total, lang)
 }
 
-
 /// Pad a *coloured* string to `target_visible_width`. We can't trust the
 /// formatter's `{:<N}` since ANSI escape codes inflate the length without
 /// adding visible cells. The plain `visible` slice is what the eye sees;
@@ -877,9 +876,8 @@ pub fn render_hourly(
         Language::Norwegian => "time-for-time",
         Language::Swedish => "timme-för-timme",
     };
-    let title = format!(
-        "Grusindeks · {label} · {radius_km:.0} km · {n} {day_word} · {title_suffix}"
-    );
+    let title =
+        format!("Grusindeks · {label} · {radius_km:.0} km · {n} {day_word} · {title_suffix}");
     let _ = writeln!(out, "{}", theme::paint_accent(&title));
     let _ = writeln!(out);
 

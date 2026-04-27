@@ -623,7 +623,13 @@ pub fn temp_subscore(t: f64) -> u8 {
     } else if t > TEMP_OPTIMAL_HIGH {
         lerp_clamped(t, TEMP_OPTIMAL_HIGH, TEMP_ZERO_HIGH, 100, 0)
     } else if t >= TEMP_LAYERED_LOW {
-        lerp_clamped(t, TEMP_LAYERED_LOW, TEMP_OPTIMAL_LOW, TEMP_LAYERED_SCORE, 100)
+        lerp_clamped(
+            t,
+            TEMP_LAYERED_LOW,
+            TEMP_OPTIMAL_LOW,
+            TEMP_LAYERED_SCORE,
+            100,
+        )
     } else {
         lerp_clamped(t, TEMP_ZERO_LOW, TEMP_LAYERED_LOW, 0, TEMP_LAYERED_SCORE)
     }
@@ -1015,10 +1021,7 @@ mod tests {
             Language::Norwegian,
         );
         assert_eq!(s.total, 0);
-        assert!(s
-            .penalties
-            .iter()
-            .any(|p| p.component == Component::NoData));
+        assert!(s.penalties.iter().any(|p| p.component == Component::NoData));
     }
 
     #[test]
@@ -1429,9 +1432,7 @@ mod tests {
         let drought = s
             .penalties
             .iter()
-            .find(|p| {
-                p.component == Component::Ground && p.message.to_lowercase().contains("tørt")
-            })
+            .find(|p| p.component == Component::Ground && p.message.to_lowercase().contains("tørt"))
             .expect("expected a tørke penalty after 96h drought");
         assert_eq!(drought.severity, Severity::Minor);
         assert!(

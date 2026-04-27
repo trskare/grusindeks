@@ -198,11 +198,13 @@ mod tests {
             score_color(65),
             score_color(85),
         ];
-        let unique: std::collections::HashSet<_> = buckets
-            .iter()
-            .map(|rgb| (rgb.0, rgb.1, rgb.2))
-            .collect();
-        assert_eq!(unique.len(), 5, "all five score buckets must use distinct colours");
+        let unique: std::collections::HashSet<_> =
+            buckets.iter().map(|rgb| (rgb.0, rgb.1, rgb.2)).collect();
+        assert_eq!(
+            unique.len(),
+            5,
+            "all five score buckets must use distinct colours"
+        );
     }
 
     #[test]

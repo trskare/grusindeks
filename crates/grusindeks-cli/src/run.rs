@@ -77,7 +77,11 @@ pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<Ag
         .into_iter()
         .map(|(p, hours)| (p, score(&hours, inputs.window, surface, inputs.lang)))
         .collect();
-    Ok(AggregateScore::from_points(inputs.center, scored, inputs.lang))
+    Ok(AggregateScore::from_points(
+        inputs.center,
+        scored,
+        inputs.lang,
+    ))
 }
 
 /// One day worth of forecast lookup: a local date label plus the UTC
@@ -240,12 +244,15 @@ pub async fn run_hourly(client: &MetClient, inputs: HourlyInputs<'_>) -> Result<
     }
 
     let projected: Vec<Option<SurfaceState>> = match surface {
-        Some(initial) => {
-            project_states_for_days(initial, center_hours, &bucket_starts, &DryingParams::default())
-                .into_iter()
-                .map(Some)
-                .collect()
-        }
+        Some(initial) => project_states_for_days(
+            initial,
+            center_hours,
+            &bucket_starts,
+            &DryingParams::default(),
+        )
+        .into_iter()
+        .map(Some)
+        .collect(),
         None => vec![None; bucket_starts.len()],
     };
 
