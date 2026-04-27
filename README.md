@@ -109,8 +109,10 @@ og rapporten består av:
   en `~`-fotnote når noen dag har lav konfidens.
 - **`★ Beste luke`** (kun `--verbose`) — et 3-timers sub-vindu som
   scorer minst 10 poeng bedre enn dagen ellers. Linja avsluttes med en
-  ett-ords forklaring (`tørrest` / `mildest` / `minst vind`) som peker på
-  aksen der vinduet trekker mest fra dagsgjennomsnittet.
+  ett-ords forklaring som peker på aksen der vinduet trekker mest fra
+  dagsgjennomsnittet: `tørrest`, `minst vind`, eller temperatur-grunner
+  som splittes i to regimer — `mildest` når vinduets felt-temp ligger i
+  12–22 °C-platået, og `minst kald` ellers.
 - **`--best-window [TIMER]`** — opt-in alternativ som viser dagens
   beste sub-vindu uansett forbedring (default 2 timer). Når sub-vinduet
   faktisk slår dagsgjennomsnittet brukes den vanlige `Beste luke`-merkingen

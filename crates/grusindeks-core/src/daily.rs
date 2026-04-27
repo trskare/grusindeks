@@ -61,11 +61,22 @@ impl Confidence {
 /// window beats the day mean by the largest weighted margin. `None`
 /// when no axis stands out (uniform day — every sub-window scores the
 /// same on every axis).
+///
+/// The temperature edge splits into two regimes so the label stays
+/// honest. "Mildest" implies the felt-temp plateau (12–22 °C) — using
+/// it when the window is 9 °C is misleading, even if 9 °C is the
+/// warmest stretch of the day. `MinstKald` covers that comparative
+/// case without overselling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum BestWindowReason {
-    /// The window is the warmest stretch of the day (felt-T).
-    Temperatur,
+    /// Window's felt-temperature is in the comfortable plateau (12–22 °C)
+    /// *and* it beats the day mean. Renders "mildest" / "mildast".
+    Mildest,
+    /// Window beats the day mean on temperature, but the felt-temp is
+    /// still outside the plateau — typically the least cold stretch of a
+    /// cold day. Renders "minst kald" / "minst kall".
+    MinstKald,
     /// The window has the lowest wind / gusts.
     Vind,
     /// The window is the driest stretch — least precipitation amount
@@ -78,10 +89,12 @@ impl BestWindowReason {
     /// line. Lowercase, a couple of words tops.
     pub fn label(self, lang: Language) -> &'static str {
         match (lang, self) {
-            (Language::Norwegian, BestWindowReason::Temperatur) => "mildest",
+            (Language::Norwegian, BestWindowReason::Mildest) => "mildest",
+            (Language::Norwegian, BestWindowReason::MinstKald) => "minst kald",
             (Language::Norwegian, BestWindowReason::Vind) => "minst vind",
             (Language::Norwegian, BestWindowReason::Nedbor) => "tørrest",
-            (Language::Swedish, BestWindowReason::Temperatur) => "mildast",
+            (Language::Swedish, BestWindowReason::Mildest) => "mildast",
+            (Language::Swedish, BestWindowReason::MinstKald) => "minst kall",
             (Language::Swedish, BestWindowReason::Vind) => "minst vind",
             (Language::Swedish, BestWindowReason::Nedbor) => "torrast",
         }
@@ -355,7 +368,16 @@ fn pick_reason(window: &ScoreBreakdown, day: &ScoreBreakdown) -> Option<BestWind
     } else if wind == max {
         Some(BestWindowReason::Vind)
     } else {
-        Some(BestWindowReason::Temperatur)
+        // Temperature wins — pick the right comparative. The score
+        // function plateaus at 100 between 12–22 °C felt-temp; anything
+        // less means the window itself is still cold (or, rarely, hot)
+        // even though it's the day's warmest stretch. "Mildest" implies
+        // the plateau, so reserve it for windows actually inside it.
+        if window.temperature >= 100 {
+            Some(BestWindowReason::Mildest)
+        } else {
+            Some(BestWindowReason::MinstKald)
+        }
     }
 }
 
@@ -589,6 +611,74 @@ mod tests {
         )
         .expect("non-empty");
         assert_eq!(ow.reason, Some(BestWindowReason::Vind));
+    }
+
+    #[test]
+    fn best_window_reason_is_minst_kald_when_window_below_plateau() {
+        // Cold day with one slightly warmer 3h stretch. The window's
+        // felt-temp axis is still under 100 (i.e. still outside the
+        // 12–22 °C plateau), so the reason should be MinstKald — not
+        // Mildest, which would oversell a cold day.
+        let mut hours: Vec<HourlyConditions> = (6..18)
+            .map(|h| HourlyConditions {
+                probability_of_precip: Some(5.0),
+                ..HourlyConditions::minimal(t(2026, 4, 26, h), 4.0, 2.0, 0.0)
+            })
+            .collect();
+        // Middle 3h is a touch warmer (8 °C) — still cold, but the
+        // warmest stretch.
+        for hour in hours.iter_mut().skip(3).take(3) {
+            hour.temperature_c = 8.0;
+        }
+        let day = day_window(6, 12);
+        let ow = find_best_window(
+            &hours,
+            day,
+            3,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        )
+        .expect("non-empty");
+        assert_eq!(
+            ow.reason,
+            Some(BestWindowReason::MinstKald),
+            "expected MinstKald for a cold-day temp edge, got {:?}",
+            ow.reason
+        );
+    }
+
+    #[test]
+    fn best_window_reason_is_mildest_when_window_lands_in_temp_plateau() {
+        // Day starts warm but spikes hot in the middle (heat-index regime).
+        // The cool start sits in the 12–22 °C plateau — that's the window
+        // we want flagged as Mildest, not the hot spike.
+        let mut hours: Vec<HourlyConditions> = (6..18)
+            .map(|h| HourlyConditions {
+                probability_of_precip: Some(5.0),
+                relative_humidity: Some(70.0),
+                ..HourlyConditions::minimal(t(2026, 4, 26, h), 17.0, 2.0, 0.0)
+            })
+            .collect();
+        // Hot spike from index 3 onward — pulls the day mean off the
+        // plateau, leaving the early hours as the comfortable stretch.
+        for hour in hours.iter_mut().skip(3) {
+            hour.temperature_c = 32.0;
+        }
+        let day = day_window(6, 12);
+        let ow = find_best_window(
+            &hours,
+            day,
+            3,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        )
+        .expect("non-empty");
+        assert_eq!(
+            ow.reason,
+            Some(BestWindowReason::Mildest),
+            "expected Mildest when window is in plateau, got {:?}",
+            ow.reason
+        );
     }
 
     #[test]
