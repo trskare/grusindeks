@@ -61,8 +61,8 @@ grusindeks --version
 
 ```sh
 # Første gang:
-grusindeks config init
-$EDITOR ~/.config/grusindeks/config.toml   # sett user_agent_contact
+grusindeks config init                  # skriver en startmal
+$EDITOR "$(grusindeks config path)"     # åpner config.toml — sett user_agent_contact
 
 # Score for koordinater nå (3-timers vindu fra nå):
 grusindeks --lat 59.9139 --lon 10.7522
@@ -188,7 +188,16 @@ Grusindeks · Oslo · 20 km · 6 dagar
 
 ### Config
 
-`~/.config/grusindeks/config.toml`:
+Stien er plattform-avhengig (`directories::ProjectDirs`):
+
+| OS         | Sti                                                     |
+| ---------- | ------------------------------------------------------- |
+| Linux/BSD  | `~/.config/grusindeks/config.toml`                      |
+| macOS      | `~/Library/Application Support/grusindeks/config.toml`  |
+| Windows    | `%APPDATA%\grusindeks\config\config.toml`               |
+
+Skriv `grusindeks config path` for å se hvor din ligger — eller bruk
+`--config <PATH>` for å overstyre. Eksempel-innhold:
 
 ```toml
 user_agent_contact = "you@example.com"  # MÅ være satt — kreves av MET TOS
