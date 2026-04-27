@@ -43,11 +43,20 @@ pub mod thresholds {
     pub const GUST_PENALTY: i32 = 20;
     pub const GUST_RATIO_THRESHOLD: f64 = 1.5;
 
-    // ---- Precipitation (mm/h, mean over ride window) ----
-    pub const PRECIP_DRIZZLE: f64 = 0.5; // 100 -> 60
-    pub const PRECIP_HEAVY: f64 = 2.0; // 60 -> 20
-    pub const PRECIP_DRIZZLE_AT: u8 = 60;
-    pub const PRECIP_HEAVY_AT: u8 = 20;
+    // ---- Precipitation (mm/h, blended 50/50 mean+peak over ride window) ----
+    // Four-segment curve: light yrsk drops fast, drizzle and moderate
+    // each take a clear bite, heavy saturates well below the old 5 mm/h
+    // ceiling. The previous curve (drizzle 0.5→60, heavy 2.0→20) let a
+    // genuinely wet ride still score "bra" once the other axes were
+    // good — these breakpoints fix that without touching weights.
+    pub const PRECIP_LIGHT: f64 = 0.2; // 100 -> 70 (yrsk)
+    pub const PRECIP_DRIZZLE: f64 = 0.5; // 70  -> 40 (skikkelig duskregn)
+    pub const PRECIP_MODERATE: f64 = 1.5; // 40  -> 10 (våt sykkeltur)
+    pub const PRECIP_HEAVY: f64 = 3.0; // 10  -> 0  (dårlig idé)
+    pub const PRECIP_LIGHT_AT: u8 = 70;
+    pub const PRECIP_DRIZZLE_AT: u8 = 40;
+    pub const PRECIP_MODERATE_AT: u8 = 10;
+    pub const PRECIP_HEAVY_AT: u8 = 0;
 
     // ---- Ground saturation (mm of accumulated water) ----
     pub const GROUND_SATURATED: f64 = 5.0;
@@ -76,9 +85,20 @@ pub mod thresholds {
     pub const DROUGHT_MAX_PENALTY: u8 = 15;
 
     // ---- Hard caps ----
-    pub const HARD_CAP_PRECIP_MM_PER_HOUR: f64 = 5.0;
+    // Lowered from 5.0 to 3.0 mm/h: 5 mm/h is tropical-storm-grade
+    // intensity; 3 mm/h is already a soaking ride. The cap value
+    // (HARD_CAP_TOTAL) stays at 25 — the threshold change is what makes
+    // the cap actually fire in real-world wet weather.
+    pub const HARD_CAP_PRECIP_MM_PER_HOUR: f64 = 3.0;
     pub const HARD_CAP_WIND_MS: f64 = 15.0;
     pub const HARD_CAP_TOTAL: u8 = 25;
+
+    // ---- Active-rain ground-axis cap ----
+    // Floor that the active-rain ceiling decays toward. Below 30 the
+    // hard-cap takes over anyway (≥ 3 mm/h triggers HARD_CAP_TOTAL=25),
+    // so the active-rain mechanism only needs to bite in the lighter
+    // sone where hard-cap doesn't fire.
+    pub const ACTIVE_RAIN_GROUND_FLOOR: u8 = 30;
 
     // ---- Weights (must sum to 100) ----
     // Temperature is the apparent ("felt-T") axis: it already folds in
@@ -284,18 +304,35 @@ pub fn score(
     let max_gust_opt = max_gust.is_finite().then_some(max_gust);
     let max_prob_opt = max_prob.is_finite().then_some(max_prob);
 
-    let ground = match surface {
+    let ground_dry = match surface {
         Some(s) => apply_drought_penalty(
             ground_subscore(s.accumulated_mm),
             s.hours_since_meaningful_rain,
         ),
         None => GROUND_UNKNOWN_SCORE,
     };
+    // Cap the dry-state ground score by the active-rain ceiling. Without
+    // this, a 1 mm/h shower over a previously-dry surface would still
+    // score the ground axis at ~95 — wrong, because the surface is being
+    // wet right now even if the accumulator hasn't caught up.
+    let ground = ground_dry.min(active_rain_ground_ceiling(max_precip));
+
+    // Blend mean and peak precipitation 50/50 so a single heavy hour
+    // dragged the score even when the surrounding hours stay dry — pure
+    // mean would average that signal away. Pure max would let any peak
+    // alone collapse the whole window, which is too harsh.
+    let max_precip_clamped = if max_precip.is_finite() && max_precip > 0.0 {
+        max_precip
+    } else {
+        0.0
+    };
+    let effective_precip = 0.5 * mean_precip + 0.5 * max_precip_clamped;
+
     let felt_temp = apparent_temp(mean_temp, mean_wind, mean_humidity_opt);
     let breakdown = ScoreBreakdown {
         temperature: temp_subscore(felt_temp),
         wind: wind_subscore(mean_wind, max_gust_opt),
-        precipitation: precip_subscore(mean_precip),
+        precipitation: precip_subscore(effective_precip),
         precip_probability: precip_prob_subscore(max_prob_opt),
         ground,
     };
@@ -678,7 +715,10 @@ pub fn wind_subscore(mean_ms: f64, gust_ms: Option<f64>) -> u8 {
     (base - gust_penalty).clamp(0, 100) as u8
 }
 
-/// Mean precipitation intensity (mm/h) over the ride window.
+/// Effective precipitation intensity (mm/h) for the ride window. Caller
+/// passes the 50/50 blend of the window's mean and peak hour, so a
+/// single lashing-rain hour drags the score even when the surrounding
+/// hours stay dry — `mean` alone would average that signal away.
 pub fn precip_subscore(mm_per_hour: f64) -> u8 {
     use thresholds::*;
     if !mm_per_hour.is_finite() {
@@ -686,19 +726,34 @@ pub fn precip_subscore(mm_per_hour: f64) -> u8 {
     }
     if mm_per_hour <= 0.0 {
         100
+    } else if mm_per_hour <= PRECIP_LIGHT {
+        lerp_clamped(mm_per_hour, 0.0, PRECIP_LIGHT, 100, PRECIP_LIGHT_AT)
     } else if mm_per_hour <= PRECIP_DRIZZLE {
-        lerp_clamped(mm_per_hour, 0.0, PRECIP_DRIZZLE, 100, PRECIP_DRIZZLE_AT)
-    } else if mm_per_hour <= PRECIP_HEAVY {
+        lerp_clamped(
+            mm_per_hour,
+            PRECIP_LIGHT,
+            PRECIP_DRIZZLE,
+            PRECIP_LIGHT_AT,
+            PRECIP_DRIZZLE_AT,
+        )
+    } else if mm_per_hour <= PRECIP_MODERATE {
         lerp_clamped(
             mm_per_hour,
             PRECIP_DRIZZLE,
-            PRECIP_HEAVY,
+            PRECIP_MODERATE,
             PRECIP_DRIZZLE_AT,
-            PRECIP_HEAVY_AT,
+            PRECIP_MODERATE_AT,
         )
     } else {
-        // Drop quickly past 2 mm/h; 0 at >= 5 mm/h.
-        lerp_clamped(mm_per_hour, PRECIP_HEAVY, 5.0, PRECIP_HEAVY_AT, 0)
+        // Drops to 0 at PRECIP_HEAVY (3 mm/h) — at that point the
+        // hard-cap clamps the total score anyway.
+        lerp_clamped(
+            mm_per_hour,
+            PRECIP_MODERATE,
+            PRECIP_HEAVY,
+            PRECIP_MODERATE_AT,
+            PRECIP_HEAVY_AT,
+        )
     }
 }
 
@@ -737,6 +792,23 @@ pub fn ground_subscore(accumulated_mm: f64) -> u8 {
     } else {
         lerp_clamped(accumulated_mm, GROUND_OPTIMAL_MM, GROUND_SATURATED, 100, 0)
     }
+}
+
+/// Active-rain ceiling on the ground subscore. The drying-state
+/// simulation tracks accumulated water minus drying, which lags reality
+/// during the *first* hour of new rain — bone-dry ground a day ago is
+/// still scored as bone-dry even when it's pouring right now.
+///
+/// This cap closes that hole: the ground subscore can never exceed
+/// `100` at zero rain, and decays linearly to `ACTIVE_RAIN_GROUND_FLOOR`
+/// at 2 mm/h. Above 2 mm/h we let the floor stand — the hard-cap fires
+/// at 3 mm/h anyway and clamps the whole score to 25.
+pub fn active_rain_ground_ceiling(max_precip: f64) -> u8 {
+    use thresholds::*;
+    if !max_precip.is_finite() || max_precip <= 0.0 {
+        return 100;
+    }
+    lerp_clamped(max_precip, 0.0, 2.0, 100, ACTIVE_RAIN_GROUND_FLOOR)
 }
 
 /// Subtract drought points from `ground_score`. Zero effect under the
@@ -839,11 +911,15 @@ mod tests {
 
     #[rstest]
     #[case(0.0, 100)]
-    #[case(0.5, 60)]
-    #[case(2.0, 20)]
-    #[case(5.0, 0)]
-    #[case(10.0, 0)] // saturates
-    #[case(0.25, 80)] // halfway in drizzle band
+    #[case(0.1, 85)] // halfway through the light band (0 → 0.2)
+    #[case(0.2, 70)] // PRECIP_LIGHT
+    #[case(0.5, 40)] // PRECIP_DRIZZLE
+    #[case(1.0, 25)] // halfway through the moderate band (0.5 → 1.5)
+    #[case(1.5, 10)] // PRECIP_MODERATE
+    #[case(2.0, 7)] // 1/3 through the heavy band (1.5 → 3.0); 10 - 10/3 ≈ 7
+    #[case(3.0, 0)] // PRECIP_HEAVY — also where hard-cap fires
+    #[case(5.0, 0)] // saturated past PRECIP_HEAVY
+    #[case(10.0, 0)] // still saturated
     fn precipitation_subscore(#[case] mm_h: f64, #[case] expected: u8) {
         assert_eq!(precip_subscore(mm_h), expected);
     }
@@ -875,6 +951,115 @@ mod tests {
     #[case(10.0, 0)] // beyond saturated
     fn ground_subscore_examples(#[case] mm: f64, #[case] expected: u8) {
         assert_eq!(ground_subscore(mm), expected);
+    }
+
+    // ---- active_rain_ground_ceiling ----
+
+    #[rstest]
+    #[case(0.0, 100)] // dry → no cap
+    #[case(-1.0, 100)] // negative / NaN-ish → no cap
+    #[case(0.5, 83)] // 25 % through 0 → 2 mm/h: 100 - 0.25*70 = 82.5 → round 83
+    #[case(1.0, 65)] // 50 % through: 100 - 35 = 65
+    #[case(2.0, 30)] // floor reached
+    #[case(5.0, 30)] // saturates at the floor
+    fn active_rain_ground_ceiling_curve(#[case] max_precip: f64, #[case] expected: u8) {
+        assert_eq!(active_rain_ground_ceiling(max_precip), expected);
+    }
+
+    #[test]
+    fn score_caps_ground_when_actively_raining_on_dry_surface() {
+        // Dry surface state (0 mm accumulated, no drought) — ground
+        // subscore would normally read GROUND_DRY_FLOOR_SCORE (92).
+        // With 1 mm/h rain falling during the window, the ceiling
+        // should kick in and clamp ground to ≈ 65 (active-rain-cap).
+        let win = RideWindow::from_hours(t(14), 3);
+        let surface = Some(SurfaceState::default()); // dry, no drought
+        let raining: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions::minimal(t(h), 17.0, 2.0, 1.0))
+            .collect();
+        let s = score(&raining, win, surface, Language::Norwegian);
+        assert!(
+            s.breakdown.ground <= 65,
+            "ground should be capped by active-rain ceiling, got {}",
+            s.breakdown.ground
+        );
+        assert!(
+            s.breakdown.ground >= thresholds::ACTIVE_RAIN_GROUND_FLOOR,
+            "ground should not undershoot the active-rain floor, got {}",
+            s.breakdown.ground
+        );
+    }
+
+    #[test]
+    fn score_uses_blended_mean_and_peak_precip() {
+        // Three hours: 0, 4, 0 mm/h. Mean = 1.33, peak = 4.0.
+        // Effective = 0.5*1.33 + 0.5*4.0 ≈ 2.67 — well past PRECIP_HEAVY,
+        // so subscore is 0. Pure-mean would land at ≈ 11 with the new
+        // curve (1.33 mm/h is close to PRECIP_MODERATE), so the blend
+        // bites visibly harder.
+        let win = RideWindow::from_hours(t(14), 3);
+        let mut hours: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions::minimal(t(h), 17.0, 2.0, 0.0))
+            .collect();
+        hours[1].precipitation_mm = 4.0;
+        let s = score(
+            &hours,
+            win,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        // Effective ≈ 2.67 mm/h sits 78 % through the heavy band
+        // (1.5 → 3.0), giving subscore ≈ 2. Pure-mean would have used
+        // 1.33 mm/h → subscore ~17, so the blend is roughly 8× harsher
+        // for this peak-heavy distribution.
+        let blended = s.breakdown.precipitation;
+        let pure_mean = precip_subscore(4.0 / 3.0);
+        assert!(
+            blended < pure_mean,
+            "blended precip {blended} should bite harder than pure-mean {pure_mean}"
+        );
+        assert!(
+            blended <= 5,
+            "blended subscore {blended} should be near zero for peak=4 mm/h"
+        );
+        assert!(s.hard_capped, "max ≥ 3 mm/h must trip the hard-cap");
+    }
+
+    #[test]
+    fn precip_curve_drops_faster_in_drizzle_band() {
+        // Regression guard for the calibration change: the old curve
+        // had 0.5 mm/h at 60 and 0.2 mm/h at 80. The new curve sits at
+        // 40 and 70 respectively — the drizzle band must bite harder.
+        assert!(precip_subscore(0.5) <= 40);
+        assert_eq!(precip_subscore(0.2), 70);
+        assert!(
+            precip_subscore(1.0) < 30,
+            "1 mm/h should now sit firmly in the moderate sone"
+        );
+    }
+
+    #[test]
+    fn hard_cap_now_fires_at_three_mm_per_hour() {
+        // Old threshold was 5 mm/h; new is 3 mm/h. A single hour at
+        // 3.5 mm/h should hard-cap a tour that would otherwise score
+        // well above 25.
+        let win = RideWindow::from_hours(t(14), 3);
+        let mut hours: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions::minimal(t(h), 17.0, 2.0, 0.0))
+            .collect();
+        hours[1].precipitation_mm = 3.5;
+        let s = score(
+            &hours,
+            win,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert!(s.hard_capped, "3.5 mm/h should fire the hard-cap");
+        assert!(
+            s.total <= thresholds::HARD_CAP_TOTAL,
+            "total {} should be ≤ HARD_CAP_TOTAL",
+            s.total
+        );
     }
 
     // ---- apply_drought_penalty ----
