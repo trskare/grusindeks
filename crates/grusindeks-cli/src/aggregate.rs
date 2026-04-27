@@ -54,7 +54,7 @@ impl AggregateScore {
         let totals: Vec<u8> = scored.iter().map(|p| p.score.total).collect();
         let min = *totals.iter().min().expect("at least one point");
         let max = *totals.iter().max().expect("at least one point");
-        let mean = (totals.iter().map(|&v| u32::from(v)).sum::<u32>() / totals.len() as u32) as u8;
+        let mean = mean_u8(&totals);
         AggregateScore {
             min,
             mean,
@@ -145,7 +145,7 @@ impl DayAggregate {
         let totals: Vec<u8> = scored.iter().map(|p| p.day_score.score.total).collect();
         let min = *totals.iter().min().expect("at least one point");
         let max = *totals.iter().max().expect("at least one point");
-        let mean = (totals.iter().map(|&v| u32::from(v)).sum::<u32>() / totals.len() as u32) as u8;
+        let mean = mean_u8(&totals);
 
         // Most conservative confidence wins — if any point loses fidelity,
         // surface that to the user.
@@ -191,22 +191,31 @@ impl DayAggregate {
 /// optimal-window reason against it keeps the "why" hint consistent with
 /// the displayed numbers.
 fn aggregate_breakdown(points: &[DayPointScore]) -> ScoreBreakdown {
-    let n = points.len() as u32;
-    debug_assert!(n > 0, "DayAggregate requires at least one point");
-    let sum = |f: fn(&ScoreBreakdown) -> u8| -> u8 {
-        let s: u32 = points
+    debug_assert!(!points.is_empty(), "DayAggregate requires at least one point");
+    let mean = |f: fn(&ScoreBreakdown) -> u8| -> u8 {
+        let totals: Vec<u8> = points
             .iter()
-            .map(|p| u32::from(f(&p.day_score.score.breakdown)))
-            .sum();
-        (s / n) as u8
+            .map(|p| f(&p.day_score.score.breakdown))
+            .collect();
+        mean_u8(&totals)
     };
     ScoreBreakdown {
-        temperature: sum(|b| b.temperature),
-        wind: sum(|b| b.wind),
-        precipitation: sum(|b| b.precipitation),
-        precip_probability: sum(|b| b.precip_probability),
-        ground: sum(|b| b.ground),
+        temperature: mean(|b| b.temperature),
+        wind: mean(|b| b.wind),
+        precipitation: mean(|b| b.precipitation),
+        precip_probability: mean(|b| b.precip_probability),
+        ground: mean(|b| b.ground),
     }
+}
+
+/// Round-to-nearest mean of u8 scores. Floor-division biased multi-point
+/// means down by up to 1 point per axis; combined across the breakdown
+/// that's a noticeable systematic understatement.
+fn mean_u8(xs: &[u8]) -> u8 {
+    debug_assert!(!xs.is_empty(), "mean over empty slice");
+    let n = xs.len() as u32;
+    let sum: u32 = xs.iter().map(|&v| u32::from(v)).sum();
+    ((sum + n / 2) / n) as u8
 }
 
 impl DayAggregate {
@@ -289,10 +298,11 @@ mod tests {
         );
         assert_eq!(agg.max, good.total);
         assert_eq!(agg.min, bad.total);
-        // Use the same floor-divided sum as `from_points`; halving each
-        // total before adding can lose a point to integer rounding when
-        // either total is odd.
-        assert_eq!(agg.mean, (good.total + bad.total) / 2);
+        // Round-to-nearest mean (no longer floor-div), so an odd sum lands
+        // on the higher integer.
+        let n = 2u32;
+        let sum = u32::from(good.total) + u32::from(bad.total);
+        assert_eq!(agg.mean, ((sum + n / 2) / n) as u8);
         assert_eq!(agg.worst().score.total, bad.total);
         assert_eq!(agg.best().score.total, good.total);
     }
