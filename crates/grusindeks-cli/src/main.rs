@@ -270,12 +270,8 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
             });
             println!("{}", serde_json::to_string_pretty(&v)?);
         } else {
-            let body = output::render_hourly(
-                &location.name,
-                location.radius_km,
-                &hourly,
-                cfg.language,
-            );
+            let body =
+                output::render_hourly(&location.name, location.radius_km, &hourly, cfg.language);
             print!("{body}");
         }
         return Ok(());
@@ -426,7 +422,11 @@ fn build_day_windows(
     daytime: DaytimeWindow,
 ) -> Result<Vec<DayWindow>> {
     let mut out = Vec::with_capacity(n as usize);
-    for offset in 0..i64::from(n) {
+    let max_offsets = if n < MAX_FORECAST_DAYS { n + 1 } else { n };
+    for offset in 0..i64::from(max_offsets) {
+        if out.len() >= n as usize {
+            break;
+        }
         let date = start_date + ChronoDuration::days(offset);
         let day_start = local_to_utc(date.and_time(daytime.start))?;
         let day_end = local_to_utc(date.and_time(daytime.end))?;
@@ -435,6 +435,14 @@ fn build_day_windows(
             continue;
         }
         let start = if day_start < now { now } else { day_start };
+        if !has_forecast_hour_in_window(start, day_end) {
+            // MET forecast buckets are whole-hour timestamps. If the
+            // clipped remainder of today is shorter than the next full
+            // bucket (e.g. now 21:30, window ends 22:00), scoring would
+            // only produce the "no data" placeholder 0. Hide that day
+            // instead — the ride window is effectively over.
+            continue;
+        }
         out.push(DayWindow {
             date,
             window: RideWindow {
@@ -444,6 +452,20 @@ fn build_day_windows(
         });
     }
     Ok(out)
+}
+
+fn has_forecast_hour_in_window(start: DateTime<Utc>, end: DateTime<Utc>) -> bool {
+    next_whole_hour_at_or_after(start) < end
+}
+
+fn next_whole_hour_at_or_after(t: DateTime<Utc>) -> DateTime<Utc> {
+    let ts = t.timestamp();
+    let exactly_on_hour = ts.rem_euclid(3600) == 0 && t.timestamp_subsec_nanos() == 0;
+    if exactly_on_hour {
+        return t;
+    }
+    let next_ts = (ts.div_euclid(3600) + 1) * 3600;
+    DateTime::from_timestamp(next_ts, 0).expect("rounded timestamp should be representable")
 }
 
 fn resolve_location(
@@ -622,6 +644,30 @@ mod build_day_windows_tests {
         );
         let tw = days.iter().find(|d| d.date == tomorrow).unwrap();
         assert_eq!(tw.window.start, dt(tomorrow, 10, 0));
+    }
+
+    #[test]
+    fn today_dropped_when_no_whole_forecast_hour_remains() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 27).unwrap();
+        let tomorrow = today.succ_opt().unwrap();
+        let now = dt(today, 21, 30);
+        let days = build_day_windows(today, 2, now, dw()).unwrap();
+        assert!(
+            !days.iter().any(|d| d.date == today),
+            "today should be hidden instead of rendered as no-data score 0"
+        );
+        let tw = days.iter().find(|d| d.date == tomorrow).unwrap();
+        assert_eq!(tw.window.start, dt(tomorrow, 10, 0));
+    }
+
+    #[test]
+    fn today_kept_when_next_whole_forecast_hour_fits() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 27).unwrap();
+        let now = dt(today, 20, 59);
+        let days = build_day_windows(today, 1, now, dw()).unwrap();
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].window.start, now);
+        assert_eq!(days[0].window.end, dt(today, 22, 0));
     }
 
     #[test]
