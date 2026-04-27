@@ -179,6 +179,11 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
     if single_day && cli.best_window.is_some() {
         bail!("--best-window gjelder bare multi-dags-prognosen — kan ikke kombineres med --window/--hours");
     }
+    if let Some(h) = cli.hours {
+        if h < 1 {
+            bail!("--hours må være minst 1");
+        }
+    }
     if let Some(h) = cli.best_window {
         if h < 1 {
             bail!("--best-window må være minst 1 time");
