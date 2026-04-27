@@ -32,6 +32,11 @@ pub enum ClientError {
     Network(#[from] reqwest::Error),
     #[error("could not parse response: {0}")]
     Decode(String),
+    /// Disk cache I/O failed (mkdir, write, encode). Distinct from
+    /// [`ClientError::Decode`] so a read-only-disk error doesn't get
+    /// reported as "could not parse response".
+    #[error("cache error: {0}")]
+    Cache(String),
 }
 
 /// A MET-TOS-compliant `User-Agent`. Validates at construction so
