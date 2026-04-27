@@ -539,3 +539,181 @@ async fn score_truncates_coordinates_in_query_string() {
         "the truncated center coords were never requested"
     );
 }
+
+// ---- Regression tests for fixes from the 2026-04 review ----
+
+/// B1: --hours 0 used to panic in RideWindow::from_hours with exit 101.
+/// Now: clean error from clap's range validator.
+#[test]
+fn score_hours_zero_is_rejected_cleanly() {
+    let dir = TempDir::new().unwrap();
+    let cfg = write_config(&dir, "user_agent_contact = \"dev@example.invalid\"\n");
+    Command::cargo_bin("grusindeks")
+        .unwrap()
+        .arg("--config")
+        .arg(&cfg)
+        .args(["--lat", "59.9139", "--lon", "10.7522", "--hours", "0"])
+        .assert()
+        .failure()
+        // clap's range error: "0 is not in 1..=24". Pin on the value
+        // and the flag name so future range adjustments don't break this.
+        .stderr(predicate::str::contains("--hours").and(predicate::str::contains("0")));
+}
+
+/// B3: an empty `timeseries: []` upstream response used to score 71/100
+/// "Bra" with phantom -0 °C means. Now: a Critical NoData penalty
+/// surfaces and the total drops.
+#[tokio::test]
+async fn score_against_empty_forecast_surfaces_no_data_not_phantom_score() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_m("/weatherapi/locationforecast/2.0/complete"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"{"properties":{"timeseries":[]}}"#),
+        )
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let cfg = write_config(&dir, "user_agent_contact = \"dev@example.invalid\"\n");
+
+    let out = Command::cargo_bin("grusindeks")
+        .unwrap()
+        .env("GRUSINDEKS_API_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
+        .arg("--config")
+        .arg(&cfg)
+        .arg("--json")
+        .args(["--lat", "59.9139", "--lon", "10.7522", "--hours", "3"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&out).expect("output must be JSON");
+    let mean = parsed["aggregate"]["mean"].as_u64().unwrap();
+    assert_eq!(mean, 0, "expected 0 from a no-data response, got {mean}");
+    let label = parsed["aggregate"]["points"][0]["score"]["label"]
+        .as_str()
+        .expect("label string");
+    assert_eq!(label, "Ingen data");
+    let penalties = parsed["aggregate"]["points"][0]["score"]["penalties"]
+        .as_array()
+        .expect("penalties array");
+    assert!(
+        penalties
+            .iter()
+            .any(|p| p["component"] == "no_data" && p["severity"] == "critical"),
+        "expected a Critical NoData penalty, got {penalties:?}"
+    );
+}
+
+/// B2: identical fixture, two runs, identical JSON. Locks down the
+/// post-fan-out sort by (lat, lon).
+#[tokio::test]
+async fn json_output_is_deterministic_across_runs() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_m("/weatherapi/locationforecast/2.0/complete"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(LOCATIONFORECAST_FIXTURE))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let cfg = write_config(&dir, "user_agent_contact = \"dev@example.invalid\"\n");
+
+    let run = || {
+        Command::cargo_bin("grusindeks")
+            .unwrap()
+            .env("GRUSINDEKS_API_BASE", format!("{}/", server.uri()))
+            .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
+            .arg("--config")
+            .arg(&cfg)
+            .arg("--json")
+            .args(["--lat", "59.9139", "--lon", "10.7522", "--hours", "3"])
+            .output()
+            .unwrap()
+            .stdout
+    };
+    let a = run();
+    let b = run();
+    let pa: serde_json::Value = serde_json::from_slice(&a).unwrap();
+    let pb: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    // Compare just the aggregate (point ordering, totals) — the top-level
+    // location is identical, but pinning aggregate is the meaningful bit.
+    assert_eq!(
+        pa["aggregate"], pb["aggregate"],
+        "non-deterministic aggregate output between identical runs"
+    );
+}
+
+/// `grusindeks config path` must agree with the platform-appropriate
+/// directory MetClientConfig writes to. README claimed
+/// `~/.config/grusindeks` on every OS — wrong on macOS/Windows.
+#[test]
+fn config_path_returns_a_grusindeks_directory() {
+    let out = Command::cargo_bin("grusindeks")
+        .unwrap()
+        .args(["config", "path"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    assert!(
+        s.trim().contains("grusindeks"),
+        "config path should mention 'grusindeks', got {s:?}"
+    );
+    assert!(
+        s.trim().ends_with("config.toml"),
+        "config path should end with config.toml, got {s:?}"
+    );
+}
+
+/// `--days 1` must route through the multi-day path and honour the
+/// configured daytime_window — used to fall through to single-day with
+/// a 3h-from-now window.
+#[tokio::test]
+async fn days_one_routes_through_multi_day_path() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_m("/weatherapi/locationforecast/2.0/complete"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(LOCATIONFORECAST_FIXTURE))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let cfg = write_config(&dir, "user_agent_contact = \"dev@example.invalid\"\n");
+
+    Command::cargo_bin("grusindeks")
+        .unwrap()
+        .env("GRUSINDEKS_API_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
+        .arg("--config")
+        .arg(&cfg)
+        .args(["--lat", "59.9139", "--lon", "10.7522", "--days", "1"])
+        .assert()
+        .success()
+        // Multi-day output prints the "·" header bullet; single-day
+        // output prints the "Grusindeks for ..." line. Pin on the
+        // multi-day shape to confirm the correct path was taken.
+        .stdout(predicate::str::contains("Grusindeks ·"));
+}
+
+/// --days beyond MET's published horizon must be rejected by clap, not
+/// silently rendered as duplicate "·" placeholder days.
+#[test]
+fn days_above_horizon_is_rejected() {
+    let dir = TempDir::new().unwrap();
+    let cfg = write_config(&dir, "user_agent_contact = \"dev@example.invalid\"\n");
+    Command::cargo_bin("grusindeks")
+        .unwrap()
+        .arg("--config")
+        .arg(&cfg)
+        .args(["--lat", "59.9139", "--lon", "10.7522", "--days", "30"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--days").and(predicate::str::contains("30")));
+}
