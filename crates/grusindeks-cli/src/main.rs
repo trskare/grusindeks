@@ -412,6 +412,24 @@ fn local_to_utc(naive: chrono::NaiveDateTime) -> Result<DateTime<Utc>> {
     }
 }
 
+fn build_client(
+    cfg: &Config,
+    api_base: Option<&Url>,
+    frost_base: Option<&Url>,
+) -> Result<MetClient> {
+    let ua = UserAgent::new(APP, VERSION, &cfg.user_agent_contact)
+        .map_err(|e| anyhow!("invalid User-Agent (check user_agent_contact): {e}"))?;
+    let mut mcfg = MetClientConfig::production(ua, cfg.frost.client_id.clone());
+    if let Some(u) = api_base {
+        mcfg.api_base = u.clone();
+    }
+    if let Some(u) = frost_base {
+        mcfg.frost_base = u.clone();
+    }
+    mcfg.timeout = StdDuration::from_secs(15);
+    Ok(MetClient::new(mcfg)?)
+}
+
 #[cfg(test)]
 mod build_day_windows_tests {
     use super::*;
@@ -482,22 +500,4 @@ mod build_day_windows_tests {
         assert_eq!(days[0].window.start, dt(today, 7, 0));
         assert_eq!(days[0].window.end, dt(today, 19, 0));
     }
-}
-
-fn build_client(
-    cfg: &Config,
-    api_base: Option<&Url>,
-    frost_base: Option<&Url>,
-) -> Result<MetClient> {
-    let ua = UserAgent::new(APP, VERSION, &cfg.user_agent_contact)
-        .map_err(|e| anyhow!("invalid User-Agent (check user_agent_contact): {e}"))?;
-    let mut mcfg = MetClientConfig::production(ua, cfg.frost.client_id.clone());
-    if let Some(u) = api_base {
-        mcfg.api_base = u.clone();
-    }
-    if let Some(u) = frost_base {
-        mcfg.frost_base = u.clone();
-    }
-    mcfg.timeout = StdDuration::from_secs(15);
-    Ok(MetClient::new(mcfg)?)
 }
