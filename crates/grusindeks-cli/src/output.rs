@@ -7,14 +7,14 @@
 
 use std::fmt::Write as _;
 
-use chrono::{DateTime, Local, NaiveDate, Utc};
+use chrono::{DateTime, Local, NaiveDate, Timelike, Utc};
 use grusindeks_core::daily::Confidence;
 use grusindeks_core::lang::Language;
 use grusindeks_core::score::Penalty;
 use grusindeks_core::types::RideWindow;
 use unicode_width::UnicodeWidthStr;
 
-use crate::aggregate::{AggregateScore, DayAggregate, MultiDayForecast};
+use crate::aggregate::{AggregateScore, DayAggregate, HourlyForecast, MultiDayForecast};
 use crate::theme;
 
 /// Bar width for the per-day row. We render 9 full cells max + a 10th
@@ -853,6 +853,126 @@ fn pad_right(coloured: &str, visible: &str, target_visible_width: usize) -> Stri
         let pad = " ".repeat(target_visible_width - visible_len);
         format!("{coloured}{pad}")
     }
+}
+
+/// Render the hourly forecast: one row per day, one column per local hour
+/// in the configured daytime window. Cells outside a day's clipped ride
+/// window (typically the past hours of "today") render as a dim `··`
+/// placeholder so the grid stays visually aligned.
+pub fn render_hourly(
+    label: &str,
+    radius_km: f64,
+    forecast: &HourlyForecast,
+    lang: Language,
+) -> String {
+    let mut out = String::new();
+    let n = forecast.days.len();
+    let day_word = match (lang, n) {
+        (Language::Norwegian, 1) => "dag",
+        (Language::Norwegian, _) => "dager",
+        (Language::Swedish, 1) => "dag",
+        (Language::Swedish, _) => "dagar",
+    };
+    let title_suffix = match lang {
+        Language::Norwegian => "time-for-time",
+        Language::Swedish => "timme-för-timme",
+    };
+    let title = format!(
+        "Grusindeks · {label} · {radius_km:.0} km · {n} {day_word} · {title_suffix}"
+    );
+    let _ = writeln!(out, "{}", theme::paint_accent(&title));
+    let _ = writeln!(out);
+
+    if forecast.header_hours.is_empty() || forecast.days.is_empty() {
+        let empty_msg = match lang {
+            Language::Norwegian => "Ingen timer i konfigurert dag-vindu.",
+            Language::Swedish => "Inga timmar i konfigurerat dag-fönster.",
+        };
+        let _ = writeln!(out, "  {}", theme::paint_dim(empty_msg));
+        return out;
+    }
+
+    // Header row — same indent and day-label width as the multi-day
+    // renderer, so the eye doesn't have to re-anchor when switching views.
+    let header_cells: String = forecast
+        .header_hours
+        .iter()
+        .map(|h| format!("{h:>3}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let _ = writeln!(
+        out,
+        "  {}  {}",
+        theme::paint_dim(&" ".repeat(11)),
+        theme::paint_dim(&header_cells),
+    );
+
+    let today_local: NaiveDate = Local::now().date_naive();
+    for day in &forecast.days {
+        write_hourly_day_row(&mut out, day, &forecast.header_hours, today_local, lang);
+    }
+
+    let _ = writeln!(out);
+    let scale_label = match lang {
+        Language::Norwegian => "Skala",
+        Language::Swedish => "Skala",
+    };
+    let _ = writeln!(
+        out,
+        "  {}   {}",
+        theme::paint_dim(scale_label),
+        bucket_legend(lang)
+    );
+    let placeholder_note = match lang {
+        Language::Norwegian => "··      utenfor ride-vinduet",
+        Language::Swedish => "··      utanför åkfönstret",
+    };
+    let _ = writeln!(out, "  {}", theme::paint_dim(placeholder_note));
+    out
+}
+
+/// One day's row in the hourly grid. Maps each header column (a local
+/// clock hour) to the day's matching `HourScore`, painting the score with
+/// its bucket colour. Hours outside the day's clipped ride window render
+/// as a dim `··` placeholder.
+fn write_hourly_day_row(
+    out: &mut String,
+    day: &crate::aggregate::HourlyDayAggregate,
+    header_hours: &[u8],
+    today_local: NaiveDate,
+    lang: Language,
+) {
+    let label = day_label(day.date, today_local, lang);
+    let label_p = theme::paint_fg(&label);
+    let mut cells: Vec<String> = Vec::with_capacity(header_hours.len());
+    for &col_h in header_hours {
+        // Match the column to a scored hour by *local* clock hour. UTC
+        // hours shift across a DST boundary; matching on local keeps the
+        // header columns honest.
+        let scored = day.hours.iter().find(|h| {
+            let local_hour = h.time.with_timezone(&Local).hour() as u8;
+            local_hour == col_h && h.time.with_timezone(&Local).date_naive() == day.date
+        });
+        let cell = match scored {
+            Some(h) => {
+                let dim = h.confidence == Confidence::Lav;
+                let body = format!("{:>3}", h.mean);
+                if dim {
+                    theme::paint_dim(&body)
+                } else {
+                    theme::paint_score_str(&body, h.mean)
+                }
+            }
+            None => theme::paint_dim(" ··"),
+        };
+        cells.push(cell);
+    }
+    let _ = writeln!(
+        out,
+        "  {}  {}",
+        pad_right(&label_p, &label, 11),
+        cells.join(" "),
+    );
 }
 
 #[cfg(test)]

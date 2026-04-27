@@ -5,7 +5,7 @@
 //! whether the worst patch (often the wettest forest road on the
 //! windward side) is what's dragging the score down.
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use grusindeks_core::daily::{reason_for, Confidence, DayScore, OptimalWindow};
 use grusindeks_core::geo::{bearing_deg, bearing_label, Point};
 use grusindeks_core::lang::Language;
@@ -280,6 +280,48 @@ fn lower_confidence(a: Confidence, b: Confidence) -> Confidence {
         (Middels, _) | (_, Middels) => Middels,
         _ => Hoy,
     }
+}
+
+/// One scored hour inside the hourly forecast view.
+///
+/// Holds aggregate stats across all sample points (mean / min / max) so
+/// the renderer can show per-hour spread without keeping every individual
+/// `PointScore`. The component-wise `breakdown` is the per-axis mean
+/// across points — same shape as `DayAggregate`'s breakdown — so the
+/// renderer can re-use the same axis layout if it ever needs to.
+#[derive(Debug, Clone, Serialize)]
+pub struct HourScore {
+    /// Start of the 1-hour bucket (UTC). The bucket spans [time, time+1h).
+    pub time: DateTime<Utc>,
+    pub mean: u8,
+    pub min: u8,
+    pub max: u8,
+    /// Per-axis mean across the sample points.
+    pub breakdown: ScoreBreakdown,
+    pub confidence: Confidence,
+}
+
+/// One day worth of hourly scores. `daytime_window` is the user's
+/// configured ride window for the day (already clipped to `now` for
+/// today); `hours` only contains the hours we actually had forecast data
+/// for, in chronological order.
+#[derive(Debug, Clone, Serialize)]
+pub struct HourlyDayAggregate {
+    pub date: NaiveDate,
+    pub daytime_window: RideWindow,
+    pub hours: Vec<HourScore>,
+}
+
+/// Multi-day hourly forecast. The renderer aligns columns to `header_hours`
+/// — the local-clock hour values present in the configured daytime window
+/// (e.g. 10..22 → \[10, 11, …, 21\]). Each day's row maps its `hours[]`
+/// onto those columns, leaving gaps for past hours on today.
+#[derive(Debug, Clone, Serialize)]
+pub struct HourlyForecast {
+    /// Local-clock hour values that span the configured daytime window.
+    /// 24h clock, sorted ascending.
+    pub header_hours: Vec<u8>,
+    pub days: Vec<HourlyDayAggregate>,
 }
 
 #[cfg(test)]

@@ -182,6 +182,103 @@ radius_km = 20.0
 }
 
 #[tokio::test]
+async fn score_with_hourly_emits_hour_grid_with_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_m("/weatherapi/locationforecast/2.0/complete"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(LOCATIONFORECAST_FIXTURE))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let cfg = write_config(
+        &dir,
+        r#"user_agent_contact = "dev@example.invalid"
+[places.oslo]
+lat = 59.9139
+lon = 10.7522
+radius_km = 20.0
+"#,
+    );
+
+    Command::cargo_bin("grusindeks")
+        .unwrap()
+        .env("GRUSINDEKS_API_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
+        .arg("--config")
+        .arg(&cfg)
+        .args(["--place", "oslo", "--days", "2", "--hourly"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("time-for-time"))
+        .stdout(predicate::str::contains("Skala"));
+}
+
+#[tokio::test]
+async fn score_hourly_rejects_combination_with_window() {
+    let dir = TempDir::new().unwrap();
+    let cfg = write_config(&dir, "user_agent_contact = \"dev@example.invalid\"\n");
+    Command::cargo_bin("grusindeks")
+        .unwrap()
+        .arg("--config")
+        .arg(&cfg)
+        .args([
+            "--lat",
+            "59.9139",
+            "--lon",
+            "10.7522",
+            "--hours",
+            "3",
+            "--hourly",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--hourly"));
+}
+
+#[tokio::test]
+async fn score_hourly_json_carries_hourly_field() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_m("/weatherapi/locationforecast/2.0/complete"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(LOCATIONFORECAST_FIXTURE))
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new().unwrap();
+    let cfg = write_config(
+        &dir,
+        r#"user_agent_contact = "dev@example.invalid"
+[places.oslo]
+lat = 59.9139
+lon = 10.7522
+radius_km = 20.0
+"#,
+    );
+
+    let out = Command::cargo_bin("grusindeks")
+        .unwrap()
+        .env("GRUSINDEKS_API_BASE", format!("{}/", server.uri()))
+        .env("GRUSINDEKS_FROST_BASE", format!("{}/", server.uri()))
+        .arg("--config")
+        .arg(&cfg)
+        .args(["--place", "oslo", "--days", "2", "--hourly", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body = String::from_utf8(out).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    let hourly = v.get("hourly").expect("hourly field");
+    assert!(hourly.get("days").and_then(|d| d.as_array()).is_some());
+    assert!(hourly
+        .get("header_hours")
+        .and_then(|h| h.as_array())
+        .is_some());
+}
+
+#[tokio::test]
 async fn score_with_best_window_surfaces_a_window_per_day() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

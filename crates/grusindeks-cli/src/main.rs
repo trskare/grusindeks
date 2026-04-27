@@ -20,7 +20,9 @@ use grusindeks_core::daily::BestWindowConfig;
 
 use crate::config::{Config, DaytimeWindow};
 use crate::progress::TerminalProgress;
-use crate::run::{run_forecast, run_score, DayWindow, ForecastInputs, ScoreInputs};
+use crate::run::{
+    run_forecast, run_hourly, run_score, DayWindow, ForecastInputs, HourlyInputs, ScoreInputs,
+};
 
 const APP: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -89,6 +91,11 @@ struct Cli {
     /// Uten verdi: 2 timer.
     #[arg(long = "best-window", num_args = 0..=1, default_missing_value = "2", value_name = "TIMER", value_parser = clap::value_parser!(i64).range(1..=MAX_HOURS))]
     best_window: Option<i64>,
+    /// Vis time-for-time-score for alle dagene i prognosen, begrenset til
+    /// dag-vinduet i config (default 10:00–22:00). Kan kombineres med
+    /// --days; ikke med --window/--hours/--best-window.
+    #[arg(long)]
+    hourly: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -168,6 +175,12 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
     // user is asking for. `--window` and `--hours` both imply single-day;
     // anything else falls into the new default (six-day forecast).
     let single_day = cli.window.is_some() || cli.hours.is_some();
+    if cli.hourly && single_day {
+        bail!("--hourly kan ikke brukes sammen med --window/--hours");
+    }
+    if cli.hourly && cli.best_window.is_some() {
+        bail!("--hourly kan ikke brukes sammen med --best-window");
+    }
     let days = match (single_day, cli.days) {
         (true, Some(_)) => bail!("--window/--hours kan ikke brukes sammen med --days"),
         (true, None) => 1,
@@ -220,6 +233,52 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
                  Ingen vindu vil bli foreslått. Juster `daytime_window` i config eller velg et kortere --best-window."
             );
         }
+    }
+
+    // Hourly mode reuses the multi-day data path but scores 1-h buckets
+    // inside each clipped daytime window. Stays separate from the regular
+    // multi-day path so the two views render independently.
+    if cli.hourly {
+        let day_windows = build_day_windows(
+            Local::now().date_naive(),
+            days,
+            Utc::now(),
+            cfg.daytime_window,
+        )?;
+        let header_hours = daytime_header_hours(cfg.daytime_window);
+        let progress = TerminalProgress::new();
+        let result = run_hourly(
+            &client,
+            HourlyInputs {
+                center: location.center,
+                radius_km: location.radius_km,
+                days: day_windows,
+                frost_source_id: frost_source_id.as_deref(),
+                history_hours: 168,
+                lang: cfg.language,
+                header_hours,
+                progress: &progress,
+            },
+        )
+        .await;
+        progress.finish();
+        let hourly = result?;
+        if cli.json {
+            let v = serde_json::json!({
+                "location": location,
+                "hourly": hourly,
+            });
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        } else {
+            let body = output::render_hourly(
+                &location.name,
+                location.radius_km,
+                &hourly,
+                cfg.language,
+            );
+            print!("{body}");
+        }
+        return Ok(());
     }
 
     // Route through the multi-day path whenever the user didn't pass
@@ -333,6 +392,33 @@ const MAX_HOURS: i64 = 24;
 /// configured daytime start when that's already in the past — anything
 /// before `now` is history. If today's daytime has fully ended by `now`,
 /// today is dropped from the forecast.
+/// Local-clock hour values that an hourly grid should label as columns,
+/// derived from the configured daytime window. A 10:00–22:00 window
+/// yields `[10, 11, …, 21]` — every hour bucket whose start is ≥ start
+/// and whose end (start + 1 h) is ≤ end. Minute offsets in the config
+/// (e.g. 09:30) are rounded *inward* so we never claim a column the
+/// 1-hour bucket couldn't actually fill.
+fn daytime_header_hours(daytime: DaytimeWindow) -> Vec<u8> {
+    use chrono::Timelike;
+    // First whole-hour bucket whose start is ≥ daytime.start.
+    let first = if daytime.start.minute() == 0 {
+        daytime.start.hour()
+    } else {
+        daytime.start.hour() + 1
+    };
+    // Last bucket end (= bucket_start + 1) must be ≤ daytime.end.
+    let last_end_hour = if daytime.end.minute() == 0 {
+        daytime.end.hour()
+    } else {
+        // 21:30 still allows a bucket [20, 21) but not [21, 22).
+        daytime.end.hour()
+    };
+    if last_end_hour == 0 || first >= last_end_hour {
+        return Vec::new();
+    }
+    (first..last_end_hour).map(|h| h as u8).collect()
+}
+
 fn build_day_windows(
     start_date: NaiveDate,
     n: u8,
@@ -549,5 +635,39 @@ mod build_day_windows_tests {
         let days = build_day_windows(today, 1, now, custom).unwrap();
         assert_eq!(days[0].window.start, dt(today, 7, 0));
         assert_eq!(days[0].window.end, dt(today, 19, 0));
+    }
+
+    #[test]
+    fn daytime_header_hours_default_window_yields_10_to_21() {
+        let hours = daytime_header_hours(DaytimeWindow::default());
+        assert_eq!(
+            hours,
+            (10u8..22u8).collect::<Vec<_>>(),
+            "10:00-22:00 should expose 12 hourly columns 10..21"
+        );
+    }
+
+    #[test]
+    fn daytime_header_hours_minute_offsets_are_clipped_inward() {
+        // 09:30-22:30: leading bucket [09:30, 10:30) is partial → first
+        // valid column is 10. Trailing bucket [22:00, 23:00) ends after
+        // 22:30 → last column is 21.
+        let dw = DaytimeWindow {
+            start: NaiveTime::from_hms_opt(9, 30, 0).unwrap(),
+            end: NaiveTime::from_hms_opt(22, 30, 0).unwrap(),
+        };
+        let hours = daytime_header_hours(dw);
+        assert_eq!(hours.first(), Some(&10));
+        assert_eq!(hours.last(), Some(&21));
+    }
+
+    #[test]
+    fn daytime_header_hours_returns_empty_when_no_full_bucket_fits() {
+        let dw = DaytimeWindow {
+            start: NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+            end: NaiveTime::from_hms_opt(10, 30, 0).unwrap(),
+        };
+        let hours = daytime_header_hours(dw);
+        assert!(hours.is_empty());
     }
 }
