@@ -318,6 +318,16 @@ pub fn find_best_window(
 /// Returns `None` when no axis has a strictly positive weighted delta — in
 /// practice that means a uniform day where every sub-window scores the
 /// same. The renderer treats `None` as "no reason to surface".
+///
+/// Public so the CLI's multi-point aggregation layer can re-derive the
+/// reason against the *displayed* (multi-point average) day breakdown.
+/// Within `find_best_window` we already use it, but against the
+/// single-point day; the aggregate layer overrides it so the on-screen
+/// numbers match the hint.
+pub fn reason_for(window: &ScoreBreakdown, day: &ScoreBreakdown) -> Option<BestWindowReason> {
+    pick_reason(window, day)
+}
+
 fn pick_reason(window: &ScoreBreakdown, day: &ScoreBreakdown) -> Option<BestWindowReason> {
     let weighted =
         |w: u8, d: u8, weight: u8| -> i32 { (i32::from(w) - i32::from(d)) * i32::from(weight) };

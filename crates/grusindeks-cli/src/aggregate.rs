@@ -6,9 +6,9 @@
 //! windward side) is what's dragging the score down.
 
 use chrono::NaiveDate;
-use grusindeks_core::daily::{Confidence, DayScore, OptimalWindow};
+use grusindeks_core::daily::{reason_for, Confidence, DayScore, OptimalWindow};
 use grusindeks_core::geo::{bearing_deg, bearing_label_no, Point};
-use grusindeks_core::score::Grusindeks;
+use grusindeks_core::score::{Grusindeks, ScoreBreakdown};
 use grusindeks_core::types::RideWindow;
 use serde::Serialize;
 
@@ -154,10 +154,24 @@ impl DayAggregate {
             .map(|p| p.day_score.confidence)
             .fold(Confidence::Hoy, lower_confidence);
 
+        // Source the optimal window from the center point, then realign
+        // its `improvement` and `reason` against the *aggregate* day —
+        // the same multi-point mean and breakdown the renderer shows on
+        // screen. Without this, a center point that happens to score
+        // identically to its window would yield `improvement = 0` and
+        // often a `None` reason, even though the user sees window 89
+        // sitting four points above day 85. The on-screen delta and the
+        // recorded delta must agree.
         let optimal_window = scored
             .iter()
             .find(|p| p.point == center)
-            .and_then(|p| p.day_score.optimal_window.clone());
+            .and_then(|p| p.day_score.optimal_window.clone())
+            .map(|mut ow| {
+                let day_breakdown = aggregate_breakdown(&scored);
+                ow.improvement = ow.score.total.saturating_sub(mean);
+                ow.reason = reason_for(&ow.score.breakdown, &day_breakdown);
+                ow
+            });
 
         DayAggregate {
             date,
@@ -169,6 +183,29 @@ impl DayAggregate {
             optimal_window,
             points: scored,
         }
+    }
+}
+
+/// Component-wise mean of every point's day-score breakdown. This is the
+/// breakdown the renderer's per-axis bars draw from, so re-deriving the
+/// optimal-window reason against it keeps the "why" hint consistent with
+/// the displayed numbers.
+fn aggregate_breakdown(points: &[DayPointScore]) -> ScoreBreakdown {
+    let n = points.len() as u32;
+    debug_assert!(n > 0, "DayAggregate requires at least one point");
+    let sum = |f: fn(&ScoreBreakdown) -> u8| -> u8 {
+        let s: u32 = points
+            .iter()
+            .map(|p| u32::from(f(&p.day_score.score.breakdown)))
+            .sum();
+        (s / n) as u8
+    };
+    ScoreBreakdown {
+        temperature: sum(|b| b.temperature),
+        wind: sum(|b| b.wind),
+        precipitation: sum(|b| b.precipitation),
+        precip_probability: sum(|b| b.precip_probability),
+        ground: sum(|b| b.ground),
     }
 }
 
@@ -368,6 +405,75 @@ mod tests {
         assert!(
             agg.optimal_window.is_some(),
             "expected the center point's luke to be surfaced"
+        );
+    }
+
+    #[test]
+    fn day_aggregate_realigns_window_improvement_against_displayed_mean() {
+        // Center forecasts a uniformly fine day (no per-point luke), but a
+        // worse-scoring outer point pulls the multi-point mean down. The
+        // window's `improvement` and `reason` must be re-derived against
+        // that lowered mean — otherwise the renderer shows "day 80 vs
+        // window 95" yet records "+0 poeng" / no reason.
+        use grusindeks_core::daily::{compute_day, BestWindowConfig};
+
+        let win = RideWindow::from_hours(t(6), 12);
+        let now = t(5);
+        // 2-hour window, always emit (matches `--best-window`).
+        let cfg = BestWindowConfig {
+            length_hours: 2,
+            min_improvement: 0,
+        };
+
+        // Center: uniformly perfect (window total == day total at center).
+        let center_hours: Vec<_> = (6..18).map(perfect).collect();
+        // Outer point: rainy/cold all day → drags the multi-point mean down.
+        let outer_hours: Vec<_> = (6..18).map(awful).collect();
+
+        let center = Point::new(59.9139, 10.7522);
+        let outer = Point::new(60.0, 10.7522);
+        let agg = DayAggregate::from_points(
+            chrono::NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
+            win,
+            center,
+            vec![
+                (
+                    center,
+                    compute_day(
+                        &center_hours,
+                        win,
+                        Some(SurfaceState::default()),
+                        now,
+                        Language::Norwegian,
+                        cfg,
+                    ),
+                ),
+                (
+                    outer,
+                    compute_day(
+                        &outer_hours,
+                        win,
+                        Some(SurfaceState::new(4.5)),
+                        now,
+                        Language::Norwegian,
+                        cfg,
+                    ),
+                ),
+            ],
+        );
+        let ow = agg.optimal_window.expect("center emits a window");
+        let displayed_delta = ow.score.total.saturating_sub(agg.mean);
+        assert_eq!(
+            ow.improvement, displayed_delta,
+            "improvement must equal window.total - aggregate.mean (displayed delta)"
+        );
+        assert!(
+            displayed_delta > 0,
+            "outer point drags the mean down, so the realigned improvement should be > 0"
+        );
+        assert!(
+            ow.reason.is_some(),
+            "axis where the center beats the bad outer point should drive the reason"
         );
     }
 

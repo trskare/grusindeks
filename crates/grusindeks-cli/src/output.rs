@@ -516,7 +516,14 @@ fn write_day_row(
     // whenever it's `Some` is correct. Surface it in default mode too:
     // knowing "today's mean is 70 but 06–09 is 95" is one of the
     // highest-value signals the renderer can show.
-    if let Some(ow) = &center.optimal_window {
+    //
+    // Read from `day.optimal_window` (aggregate-level) rather than
+    // `center.optimal_window` (per-point) so the displayed `improvement`
+    // and `reason` are aligned with the multi-point mean and breakdown
+    // the rest of the row shows. The center's per-point view is computed
+    // against its solo day total, which can disagree with the displayed
+    // mean by several points.
+    if let Some(ow) = &day.optimal_window {
         // "Luke" (NO) / "lucka" (SE) means an *opening* — it implies the
         // sub-window is meaningfully better than the day around it. When
         // the improvement is zero (which only happens when the user opted
