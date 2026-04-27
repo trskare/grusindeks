@@ -72,18 +72,22 @@ struct Cli {
     /// Window like "14:00-17:00" in local time today.
     #[arg(long)]
     window: Option<String>,
-    /// Window length in hours. Implies single-day mode.
-    #[arg(long)]
+    /// Window length in hours. Implies single-day mode. Must be 1–24
+    /// — anything longer would cross more than one local day and the
+    /// renderer's HH:MM endpoint format would silently swallow the
+    /// extra dates.
+    #[arg(long, value_parser = clap::value_parser!(i64).range(1..=MAX_HOURS))]
     hours: Option<i64>,
     /// Antall dager fremover i prognosen (default 6: i dag + 5).
     /// Tvinger fram dag-for-dag-sammendrag; --window og --hours kan
-    /// ikke kombineres med dette.
-    #[arg(long)]
+    /// ikke kombineres med dette. Maks 9 — det er den publiserte
+    /// horisonten på api.met.no/locationforecast.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=MAX_FORECAST_DAYS as i64))]
     days: Option<u8>,
     /// Vis det beste N-timers vinduet for hver dag i multi-dags-prognosen
     /// (uavhengig av hvor mye bedre det er enn dagsgjennomsnittet).
     /// Uten verdi: 2 timer.
-    #[arg(long = "best-window", num_args = 0..=1, default_missing_value = "2", value_name = "TIMER")]
+    #[arg(long = "best-window", num_args = 0..=1, default_missing_value = "2", value_name = "TIMER", value_parser = clap::value_parser!(i64).range(1..=MAX_HOURS))]
     best_window: Option<i64>,
 
     #[command(subcommand)]
@@ -170,24 +174,11 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
         (false, Some(d)) => d,
         (false, None) => DEFAULT_FORECAST_DAYS,
     };
-    if days == 0 {
-        bail!("--days må være minst 1");
-    }
     if days > 1 && cli.window.is_some() {
         bail!("--window kan ikke brukes sammen med --days > 1");
     }
     if single_day && cli.best_window.is_some() {
         bail!("--best-window gjelder bare multi-dags-prognosen — kan ikke kombineres med --window/--hours");
-    }
-    if let Some(h) = cli.hours {
-        if h < 1 {
-            bail!("--hours må være minst 1");
-        }
-    }
-    if let Some(h) = cli.best_window {
-        if h < 1 {
-            bail!("--best-window må være minst 1 time");
-        }
     }
     let best_window = match cli.best_window {
         Some(h) => BestWindowConfig {
@@ -214,6 +205,22 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
     let location = resolve_location(&cfg, cli.lat, cli.lon, cli.place.clone(), cli.radius_km)?;
     let frost_source_id = location_frost_source(&cfg, &location);
     let client = build_client(&cfg, cli.api_base.as_ref(), cli.frost_base.as_ref())?;
+
+    // Warn loudly when --best-window can never fit inside the configured
+    // daytime window. Without this the renderer just omits the line and
+    // the user is left wondering why nothing showed up.
+    if let Some(bw) = cli.best_window {
+        let daytime_minutes = cfg.daytime_window.duration_minutes();
+        let bw_minutes = bw * 60;
+        if bw_minutes > daytime_minutes {
+            let h = daytime_minutes / 60;
+            let m = daytime_minutes % 60;
+            eprintln!(
+                "warning: --best-window {bw}t er lengre enn dag-vinduet ({h}t {m:02}m). \
+                 Ingen vindu vil bli foreslått. Juster `daytime_window` i config eller velg et kortere --best-window."
+            );
+        }
+    }
 
     if days > 1 {
         let day_windows = build_day_windows(
@@ -300,6 +307,17 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
 /// Default horizon when the user runs `grusindeks` with no time arguments
 /// — today plus the next five days.
 const DEFAULT_FORECAST_DAYS: u8 = 6;
+
+/// Hard cap for `--days`. `api.met.no/locationforecast/2.0/complete`
+/// publishes a 9-day horizon; anything beyond would render as duplicate
+/// "·" placeholder days that look like real data.
+const MAX_FORECAST_DAYS: u8 = 9;
+
+/// Hard cap for `--hours` and `--best-window`. 24h is the longest single
+/// ride window we'll honour; longer windows cross multiple local days,
+/// at which point the multi-day path (`--days`) is the right tool and
+/// the renderer's HH:MM-only endpoint would mislead.
+const MAX_HOURS: i64 = 24;
 
 /// Build `n` consecutive day windows starting at `start_date` (local).
 ///

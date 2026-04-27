@@ -59,6 +59,18 @@ impl Default for DaytimeWindow {
     }
 }
 
+impl DaytimeWindow {
+    /// Length of the window in whole minutes. Always positive — the
+    /// `TryFrom<String>` constructor refuses windows where `end <= start`.
+    pub fn duration_minutes(&self) -> i64 {
+        let total = |t: NaiveTime| -> i64 {
+            use chrono::Timelike;
+            i64::from(t.hour()) * 60 + i64::from(t.minute())
+        };
+        total(self.end) - total(self.start)
+    }
+}
+
 impl TryFrom<String> for DaytimeWindow {
     type Error = String;
 

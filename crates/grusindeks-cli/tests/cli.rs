@@ -235,9 +235,7 @@ async fn score_best_window_rejects_zero_hours() {
         .args(["--lat", "59.9139", "--lon", "10.7522", "--best-window", "0"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "--best-window må være minst 1 time",
-        ));
+        .stderr(predicate::str::contains("--best-window").and(predicate::str::contains("0")));
 }
 
 #[tokio::test]
