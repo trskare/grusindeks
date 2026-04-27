@@ -57,14 +57,14 @@ impl Confidence {
 /// same on every axis).
 ///
 /// The temperature edge splits into two regimes so the label stays
-/// honest. "Mildest" implies the felt-temp plateau (12–22 °C) — using
+/// honest. "Mildest" implies the felt-temp plateau (16–22 °C) — using
 /// it when the window is 9 °C is misleading, even if 9 °C is the
 /// warmest stretch of the day. `MinstKald` covers that comparative
 /// case without overselling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BestWindowReason {
-    /// Window's felt-temperature is in the comfortable plateau (12–22 °C)
+    /// Window's felt-temperature is in the comfortable plateau (16–22 °C)
     /// *and* it beats the day mean. Renders "mildest" / "mildast".
     Mildest,
     /// Window beats the day mean on temperature, but the felt-temp is
@@ -363,7 +363,7 @@ fn pick_reason(window: &ScoreBreakdown, day: &ScoreBreakdown) -> Option<BestWind
         Some(BestWindowReason::Vind)
     } else {
         // Temperature wins — pick the right comparative. The score
-        // function plateaus at 100 between 12–22 °C felt-temp; anything
+        // function plateaus at 100 between 16–22 °C felt-temp; anything
         // less means the window itself is still cold (or, rarely, hot)
         // even though it's the day's warmest stretch. "Mildest" implies
         // the plateau, so reserve it for windows actually inside it.
@@ -611,7 +611,7 @@ mod tests {
     fn best_window_reason_is_minst_kald_when_window_below_plateau() {
         // Cold day with one slightly warmer 3h stretch. The window's
         // felt-temp axis is still under 100 (i.e. still outside the
-        // 12–22 °C plateau), so the reason should be MinstKald — not
+        // 16–22 °C plateau), so the reason should be MinstKald — not
         // Mildest, which would oversell a cold day.
         let mut hours: Vec<HourlyConditions> = (6..18)
             .map(|h| HourlyConditions {
@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn best_window_reason_is_mildest_when_window_lands_in_temp_plateau() {
         // Day starts warm but spikes hot in the middle (heat-index regime).
-        // The cool start sits in the 12–22 °C plateau — that's the window
+        // The cool start sits in the 16–22 °C plateau — that's the window
         // we want flagged as Mildest, not the hot spike.
         let mut hours: Vec<HourlyConditions> = (6..18)
             .map(|h| HourlyConditions {

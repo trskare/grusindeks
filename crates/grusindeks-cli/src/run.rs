@@ -5,17 +5,19 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
-use grusindeks_core::daily::{compute_day, BestWindowConfig};
+use grusindeks_core::daily::{compute_day, BestWindowConfig, Confidence};
 use grusindeks_core::drying::{drying_step, DryingParams, SurfaceState};
 use grusindeks_core::geo::{sample_around, Point};
 use grusindeks_core::lang::Language;
-use grusindeks_core::score::score;
+use grusindeks_core::score::{score, ScoreBreakdown};
 use grusindeks_core::types::{HourlyConditions, Resolution, RideWindow};
 use grusindeks_met::client::MetClient;
 use grusindeks_met::frost;
 use grusindeks_met::locationforecast;
 
-use crate::aggregate::{AggregateScore, DayAggregate, MultiDayForecast};
+use crate::aggregate::{
+    AggregateScore, DayAggregate, HourScore, HourlyDayAggregate, HourlyForecast, MultiDayForecast,
+};
 
 /// Callbacks the orchestration layer fires as it walks through the
 /// fetch/score pipeline. The CLI binds these to an `indicatif`-backed
@@ -75,7 +77,11 @@ pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<Ag
         .into_iter()
         .map(|(p, hours)| (p, score(&hours, inputs.window, surface, inputs.lang)))
         .collect();
-    Ok(AggregateScore::from_points(inputs.center, scored, inputs.lang))
+    Ok(AggregateScore::from_points(
+        inputs.center,
+        scored,
+        inputs.lang,
+    ))
 }
 
 /// One day worth of forecast lookup: a local date label plus the UTC
@@ -179,6 +185,193 @@ pub async fn run_forecast(
         ));
     }
     Ok(MultiDayForecast { days })
+}
+
+pub struct HourlyInputs<'a> {
+    pub center: Point,
+    pub radius_km: f64,
+    pub days: Vec<DayWindow>,
+    pub frost_source_id: Option<&'a str>,
+    pub history_hours: i64,
+    pub lang: Language,
+    /// Local-clock hour values that span the configured daytime window
+    /// (e.g. \[10..21\] for a 10:00-22:00 window). Drives the column header
+    /// in the rendered grid; the orchestration layer only forwards it.
+    pub header_hours: Vec<u8>,
+    pub progress: &'a dyn ProgressSink,
+}
+
+/// Hourly variant of [`run_forecast`]: for each requested day, score every
+/// 1-hour bucket inside the day's clipped ride window and aggregate across
+/// the sample disk. Surface state is projected forward hour-by-hour using
+/// the centre point's forecast as the regional trajectory — same shape as
+/// `run_forecast` so the two views stay consistent on bakke.
+pub async fn run_hourly(client: &MetClient, inputs: HourlyInputs<'_>) -> Result<HourlyForecast> {
+    let points = sample_around(inputs.center, inputs.radius_km);
+
+    let surface = fetch_ground_state(
+        client,
+        inputs.frost_source_id,
+        inputs.history_hours,
+        inputs.progress,
+    )
+    .await;
+
+    let now = Utc::now();
+    let per_point_hours = fetch_forecasts_parallel(client, &points, inputs.progress).await?;
+
+    let center_truncated = inputs.center.truncated();
+    let center_hours = per_point_hours
+        .iter()
+        .find(|(p, _)| *p == center_truncated)
+        .map(|(_, h)| h.as_slice())
+        .unwrap_or_else(|| {
+            per_point_hours
+                .first()
+                .map(|(_, h)| h.as_slice())
+                .unwrap_or(&[])
+        });
+
+    // Gather every hour-bucket start time we'll need to score, across all
+    // requested days. We dedupe via the natural chronological order: each
+    // day's hour starts are strictly later than the previous day's.
+    let mut bucket_starts: Vec<DateTime<Utc>> = Vec::new();
+    let mut per_day_starts: Vec<Vec<DateTime<Utc>>> = Vec::with_capacity(inputs.days.len());
+    for dw in &inputs.days {
+        let starts = hour_bucket_starts(dw.window, center_hours);
+        bucket_starts.extend_from_slice(&starts);
+        per_day_starts.push(starts);
+    }
+
+    let projected: Vec<Option<SurfaceState>> = match surface {
+        Some(initial) => project_states_for_days(
+            initial,
+            center_hours,
+            &bucket_starts,
+            &DryingParams::default(),
+        )
+        .into_iter()
+        .map(Some)
+        .collect(),
+        None => vec![None; bucket_starts.len()],
+    };
+
+    let mut surface_at: std::collections::HashMap<DateTime<Utc>, Option<SurfaceState>> =
+        std::collections::HashMap::with_capacity(bucket_starts.len());
+    for (t, s) in bucket_starts.iter().zip(projected.into_iter()) {
+        surface_at.insert(*t, s);
+    }
+
+    let mut days = Vec::with_capacity(inputs.days.len());
+    for (dw, hour_starts) in inputs.days.iter().zip(per_day_starts.into_iter()) {
+        let mut hours = Vec::with_capacity(hour_starts.len());
+        for start in hour_starts {
+            let hour_window = RideWindow {
+                start,
+                end: start + Duration::hours(1),
+            };
+            let surface_now = surface_at.get(&start).copied().unwrap_or(None);
+            let mut totals: Vec<u8> = Vec::with_capacity(per_point_hours.len());
+            let mut bd_temp: u32 = 0;
+            let mut bd_wind: u32 = 0;
+            let mut bd_precip: u32 = 0;
+            let mut bd_prob: u32 = 0;
+            let mut bd_ground: u32 = 0;
+            let mut six_hourly = false;
+            for (_, point_hours) in &per_point_hours {
+                if let Some(h) = point_hours.iter().find(|h| h.time == start) {
+                    if h.resolution == Resolution::SixHourly {
+                        six_hourly = true;
+                    }
+                }
+                let s = score(point_hours, hour_window, surface_now, inputs.lang);
+                totals.push(s.total);
+                bd_temp += u32::from(s.breakdown.temperature);
+                bd_wind += u32::from(s.breakdown.wind);
+                bd_precip += u32::from(s.breakdown.precipitation);
+                bd_prob += u32::from(s.breakdown.precip_probability);
+                bd_ground += u32::from(s.breakdown.ground);
+            }
+            if totals.is_empty() {
+                continue;
+            }
+            let n = totals.len() as u32;
+            let min = *totals.iter().min().unwrap();
+            let max = *totals.iter().max().unwrap();
+            let mean = mean_round(&totals);
+            let breakdown = ScoreBreakdown {
+                temperature: ((bd_temp + n / 2) / n) as u8,
+                wind: ((bd_wind + n / 2) / n) as u8,
+                precipitation: ((bd_precip + n / 2) / n) as u8,
+                precip_probability: ((bd_prob + n / 2) / n) as u8,
+                ground: ((bd_ground + n / 2) / n) as u8,
+            };
+            let confidence = hour_confidence(start, now, six_hourly);
+            hours.push(HourScore {
+                time: start,
+                mean,
+                min,
+                max,
+                breakdown,
+                confidence,
+            });
+        }
+        days.push(HourlyDayAggregate {
+            date: dw.date,
+            daytime_window: dw.window,
+            hours,
+        });
+    }
+    Ok(HourlyForecast {
+        header_hours: inputs.header_hours,
+        days,
+    })
+}
+
+/// Round-to-nearest mean for u8 score totals — same behaviour as
+/// `aggregate::mean_u8` but kept local to avoid widening that helper's
+/// visibility.
+fn mean_round(xs: &[u8]) -> u8 {
+    let n = xs.len() as u32;
+    let sum: u32 = xs.iter().map(|&v| u32::from(v)).sum();
+    ((sum + n / 2) / n) as u8
+}
+
+/// Confidence for a single hour bucket. Mirrors `daily::confidence_for`
+/// but at hour granularity: a 6-hourly resolution flag on the bucket is
+/// enough to drop confidence to `Lav`, since the score is then derived
+/// from a 6-h smear rather than the actual hour. Buckets more than 5
+/// days out drop to `Lav` regardless.
+fn hour_confidence(start: DateTime<Utc>, now: DateTime<Utc>, six_hourly: bool) -> Confidence {
+    let horizon = start - now;
+    if six_hourly || horizon > Duration::days(5) {
+        return Confidence::Lav;
+    }
+    if horizon < Duration::days(1) {
+        Confidence::Hoy
+    } else {
+        Confidence::Middels
+    }
+}
+
+/// Hour bucket starts that fall fully inside `window`. Anchored to the
+/// forecast's hour timestamps (typically HH:00 UTC) rather than to
+/// `window.start` directly, so a clipped today (window starts at e.g.
+/// 14:23) still produces well-aligned buckets at 15:00, 16:00, …, and
+/// the partial leading hour is dropped instead of being silently scored
+/// against half its data.
+fn hour_bucket_starts(
+    window: RideWindow,
+    forecast_hours: &[HourlyConditions],
+) -> Vec<DateTime<Utc>> {
+    forecast_hours
+        .iter()
+        .filter(|h| {
+            let bucket_end = h.time + Duration::hours(1);
+            h.time >= window.start && bucket_end <= window.end
+        })
+        .map(|h| h.time)
+        .collect()
 }
 
 /// Walk `hours` (chronological) forward from `initial`, snapshotting the

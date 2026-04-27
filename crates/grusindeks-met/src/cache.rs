@@ -72,8 +72,8 @@ impl Cache {
                 .await
                 .map_err(|e| ClientError::Cache(format!("mkdir: {e}")))?;
         }
-        let bytes = serde_json::to_vec(entry)
-            .map_err(|e| ClientError::Cache(format!("encode: {e}")))?;
+        let bytes =
+            serde_json::to_vec(entry).map_err(|e| ClientError::Cache(format!("encode: {e}")))?;
         fs::write(self.path_for(url), bytes)
             .await
             .map_err(|e| ClientError::Cache(format!("write: {e}")))?;

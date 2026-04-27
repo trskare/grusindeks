@@ -15,10 +15,22 @@ use crate::types::{HourlyConditions, RideWindow};
 /// Default thresholds and weights. Held in one place so they're easy to
 /// retune without hunting through the file.
 pub mod thresholds {
-    // ---- Temperature (°C) ----
-    pub const TEMP_OPTIMAL_LOW: f64 = 12.0;
+    // ---- Temperature (°C, on felt-T) ----
+    /// Bottom of the comfortable plateau — felt-T at or above this scores 100.
+    pub const TEMP_OPTIMAL_LOW: f64 = 16.0;
+    /// Top of the comfortable plateau.
     pub const TEMP_OPTIMAL_HIGH: f64 = 22.0;
+    /// Below this we're in the "needs layering" band — score breaks below
+    /// the no-penalty threshold (12 °C → 75 → just into Minor severity).
+    /// The break models the gear-changeover cliff: below ~12 °C a rider
+    /// goes from jersey to vest+armere, with the attendant sweat-on-climb /
+    /// chill-on-descent dynamics that don't show up on the thermometer.
+    pub const TEMP_LAYERED_LOW: f64 = 12.0;
+    /// Subscore at TEMP_LAYERED_LOW. 75 puts 12 °C just inside Minor.
+    pub const TEMP_LAYERED_SCORE: u8 = 75;
+    /// Cold floor — felt-T at or below this scores 0.
     pub const TEMP_ZERO_LOW: f64 = -5.0;
+    /// Hot ceiling — felt-T at or above this scores 0.
     pub const TEMP_ZERO_HIGH: f64 = 35.0;
 
     // ---- Wind (m/s) ----
@@ -596,8 +608,11 @@ pub fn label_for(total: u8, lang: Language) -> &'static str {
 
 // ---- Sub-scores ----
 
-/// 100 inside the optimal band; linear falloff to 0 at the cold/hot
-/// extremes.
+/// 100 inside the optimal plateau (16–22 °C). Cold side has two linear
+/// segments: a gentle ramp from 100 at 16 °C down to 75 at 12 °C
+/// (entering the "needs layering" band, just into Minor severity), then
+/// a continued ramp to 0 at -5 °C. Warm side is a single linear falloff
+/// to 0 at 35 °C.
 pub fn temp_subscore(t: f64) -> u8 {
     use thresholds::*;
     if t.is_nan() {
@@ -605,11 +620,18 @@ pub fn temp_subscore(t: f64) -> u8 {
     }
     if (TEMP_OPTIMAL_LOW..=TEMP_OPTIMAL_HIGH).contains(&t) {
         100
-    } else if t < TEMP_OPTIMAL_LOW {
-        // 0 at TEMP_ZERO_LOW, 100 at TEMP_OPTIMAL_LOW
-        lerp_clamped(t, TEMP_ZERO_LOW, TEMP_OPTIMAL_LOW, 0, 100)
-    } else {
+    } else if t > TEMP_OPTIMAL_HIGH {
         lerp_clamped(t, TEMP_OPTIMAL_HIGH, TEMP_ZERO_HIGH, 100, 0)
+    } else if t >= TEMP_LAYERED_LOW {
+        lerp_clamped(
+            t,
+            TEMP_LAYERED_LOW,
+            TEMP_OPTIMAL_LOW,
+            TEMP_LAYERED_SCORE,
+            100,
+        )
+    } else {
+        lerp_clamped(t, TEMP_ZERO_LOW, TEMP_LAYERED_LOW, 0, TEMP_LAYERED_SCORE)
     }
 }
 
@@ -770,14 +792,17 @@ mod tests {
     // ---- temp_subscore ----
 
     #[rstest]
-    #[case(12.0, 100)]
-    #[case(17.0, 100)]
-    #[case(22.0, 100)]
-    #[case(-5.0, 0)]
-    #[case(35.0, 0)]
     #[case(-10.0, 0)] // beyond cold
+    #[case(-5.0, 0)] // cold floor
+    #[case(0.0, 22)] // pins the lower cold-ramp segment
+    #[case(10.0, 66)] // mid-cold ramp
+    #[case(12.0, 75)] // layered breakpoint — just into Minor
+    #[case(14.0, 88)] // mid-shoulder ramp 12 → 16
+    #[case(16.0, 100)] // plateau bottom
+    #[case(17.0, 100)] // mid-plateau
+    #[case(22.0, 100)] // plateau top
+    #[case(35.0, 0)] // hot floor
     #[case(40.0, 0)] // beyond hot
-    #[case(3.5, 50)] // halfway between -5 and 12
     fn temperature_subscore(#[case] t_c: f64, #[case] expected: u8) {
         assert_eq!(temp_subscore(t_c), expected);
     }
@@ -996,10 +1021,7 @@ mod tests {
             Language::Norwegian,
         );
         assert_eq!(s.total, 0);
-        assert!(s
-            .penalties
-            .iter()
-            .any(|p| p.component == Component::NoData));
+        assert!(s.penalties.iter().any(|p| p.component == Component::NoData));
     }
 
     #[test]
@@ -1410,9 +1432,7 @@ mod tests {
         let drought = s
             .penalties
             .iter()
-            .find(|p| {
-                p.component == Component::Ground && p.message.to_lowercase().contains("tørt")
-            })
+            .find(|p| p.component == Component::Ground && p.message.to_lowercase().contains("tørt"))
             .expect("expected a tørke penalty after 96h drought");
         assert_eq!(drought.severity, Severity::Minor);
         assert!(
