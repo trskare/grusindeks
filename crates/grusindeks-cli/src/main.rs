@@ -16,7 +16,9 @@ use grusindeks_core::types::{Location, RideWindow};
 use grusindeks_met::client::{MetClient, MetClientConfig, UserAgent};
 use url::Url;
 
-use crate::config::Config;
+use grusindeks_core::daily::BestWindowConfig;
+
+use crate::config::{Config, DaytimeWindow};
 use crate::progress::TerminalProgress;
 use crate::run::{run_forecast, run_score, DayWindow, ForecastInputs, ScoreInputs};
 
@@ -26,9 +28,14 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// grusindeks — Grusindeks for sykling på grus.
 ///
 /// Kjør `grusindeks` uten argumenter for å se en seks-dagers oversikt fra og
-/// med i dag. Bruk `grusindeks score` for et enkelt tidsvindu, eller
-/// `grusindeks config init` for å sette opp.
-#[derive(Debug, Parser)]
+/// med i dag. Spesifiser `--window` / `--hours` for et enkelt tidsvindu, eller
+/// kjør `grusindeks config init` for å sette opp.
+///
+/// Defaulting:
+/// * No `--window` and no `--hours` set → multi-day (`--days` or 6).
+/// * `--window` set → single-day with that window.
+/// * `--hours` set (without `--window`) → single-day with `now..now+hours`.
+#[derive(Debug, Default, Parser)]
 #[command(name = "grusindeks", version, about, long_about = None)]
 struct Cli {
     /// Path to config file. Defaults to ~/.config/grusindeks/config.toml.
@@ -51,28 +58,6 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(Debug, Subcommand)]
-enum Command {
-    /// Compute the Grusindeks for a location and time window.
-    Score(ScoreArgs),
-    /// Manage the configuration file.
-    Config {
-        #[command(subcommand)]
-        action: ConfigAction,
-    },
-}
-
-/// Arguments for the score command. Defaulting rules:
-///
-/// * No `--window` and no `--hours` set → multi-day (`--days` or 6).
-/// * `--window` set → single-day with that window.
-/// * `--hours` set (without `--window`) → single-day with `now..now+hours`.
-#[derive(Debug, Default, clap::Args)]
-struct ScoreArgs {
     #[arg(long)]
     lat: Option<f64>,
     #[arg(long)]
@@ -87,14 +72,35 @@ struct ScoreArgs {
     /// Window like "14:00-17:00" in local time today.
     #[arg(long)]
     window: Option<String>,
-    /// Window length in hours. Implies single-day mode.
-    #[arg(long)]
+    /// Window length in hours. Implies single-day mode. Must be 1–24
+    /// — anything longer would cross more than one local day and the
+    /// renderer's HH:MM endpoint format would silently swallow the
+    /// extra dates.
+    #[arg(long, value_parser = clap::value_parser!(i64).range(1..=MAX_HOURS))]
     hours: Option<i64>,
     /// Antall dager fremover i prognosen (default 6: i dag + 5).
     /// Tvinger fram dag-for-dag-sammendrag; --window og --hours kan
-    /// ikke kombineres med dette.
-    #[arg(long)]
+    /// ikke kombineres med dette. Maks 9 — det er den publiserte
+    /// horisonten på api.met.no/locationforecast.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=MAX_FORECAST_DAYS as i64))]
     days: Option<u8>,
+    /// Vis det beste N-timers vinduet for hver dag i multi-dags-prognosen
+    /// (uavhengig av hvor mye bedre det er enn dagsgjennomsnittet).
+    /// Uten verdi: 2 timer.
+    #[arg(long = "best-window", num_args = 0..=1, default_missing_value = "2", value_name = "TIMER", value_parser = clap::value_parser!(i64).range(1..=MAX_HOURS))]
+    best_window: Option<i64>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Manage the configuration file.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -131,10 +137,10 @@ async fn main() -> Result<()> {
             println!("{}", p.display());
             Ok(())
         }
-        Some(Command::Score(args)) => cmd_score(&cli, args).await,
-        // No subcommand → run `score` with all defaults, which gives the
-        // six-day forecast for the configured `default_place`.
-        None => cmd_score(&cli, &ScoreArgs::default()).await,
+        // No subcommand → score the configured `default_place` (or whatever
+        // location the user passed via --lat/--lon/--place). Default with
+        // no time arguments is the six-day forecast.
+        None => cmd_score(&cli).await,
     }
 }
 
@@ -157,23 +163,33 @@ fn cmd_config_init(config_arg: Option<&std::path::Path>) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
+async fn cmd_score(cli: &Cli) -> Result<()> {
     // Resolve which mode (single-day window vs multi-day forecast) the
     // user is asking for. `--window` and `--hours` both imply single-day;
     // anything else falls into the new default (six-day forecast).
-    let single_day = args.window.is_some() || args.hours.is_some();
-    let days = match (single_day, args.days) {
+    let single_day = cli.window.is_some() || cli.hours.is_some();
+    let days = match (single_day, cli.days) {
         (true, Some(_)) => bail!("--window/--hours kan ikke brukes sammen med --days"),
         (true, None) => 1,
         (false, Some(d)) => d,
         (false, None) => DEFAULT_FORECAST_DAYS,
     };
-    if days == 0 {
-        bail!("--days må være minst 1");
-    }
-    if days > 1 && args.window.is_some() {
+    if days > 1 && cli.window.is_some() {
         bail!("--window kan ikke brukes sammen med --days > 1");
     }
+    if single_day && cli.best_window.is_some() {
+        bail!("--best-window gjelder bare multi-dags-prognosen — kan ikke kombineres med --window/--hours");
+    }
+    let best_window = match cli.best_window {
+        Some(h) => BestWindowConfig {
+            length_hours: h,
+            // Override the default improvement filter so every day surfaces
+            // its top-scoring sub-window, even on uniform days where the
+            // window only matches the day mean.
+            min_improvement: 0,
+        },
+        None => BestWindowConfig::default(),
+    };
 
     let cfg_path = match cli.config.clone() {
         Some(p) => p,
@@ -186,12 +202,38 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
         )
     })?;
 
-    let location = resolve_location(&cfg, args.lat, args.lon, args.place.clone(), args.radius_km)?;
+    let location = resolve_location(&cfg, cli.lat, cli.lon, cli.place.clone(), cli.radius_km)?;
     let frost_source_id = location_frost_source(&cfg, &location);
     let client = build_client(&cfg, cli.api_base.as_ref(), cli.frost_base.as_ref())?;
 
-    if days > 1 {
-        let day_windows = build_day_windows(Local::now().date_naive(), days, Utc::now())?;
+    // Warn loudly when --best-window can never fit inside the configured
+    // daytime window. Without this the renderer just omits the line and
+    // the user is left wondering why nothing showed up.
+    if let Some(bw) = cli.best_window {
+        let daytime_minutes = cfg.daytime_window.duration_minutes();
+        let bw_minutes = bw * 60;
+        if bw_minutes > daytime_minutes {
+            let h = daytime_minutes / 60;
+            let m = daytime_minutes % 60;
+            eprintln!(
+                "warning: --best-window {bw}t er lengre enn dag-vinduet ({h}t {m:02}m). \
+                 Ingen vindu vil bli foreslått. Juster `daytime_window` i config eller velg et kortere --best-window."
+            );
+        }
+    }
+
+    // Route through the multi-day path whenever the user didn't pass
+    // --window/--hours. `--days 1` is a legitimate "today only, full
+    // daytime window" request and falling through to single-day would
+    // silently ignore both the configured daytime_window and
+    // --best-window (single-day defaults to a 3h window starting at now).
+    if !single_day {
+        let day_windows = build_day_windows(
+            Local::now().date_naive(),
+            days,
+            Utc::now(),
+            cfg.daytime_window,
+        )?;
         let progress = TerminalProgress::new();
         let result = run_forecast(
             &client,
@@ -202,6 +244,7 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
                 frost_source_id: frost_source_id.as_deref(),
                 history_hours: 168,
                 lang: cfg.language,
+                best_window,
                 progress: &progress,
             },
         )
@@ -227,7 +270,7 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
         return Ok(());
     }
 
-    let win = resolve_window(args.window.as_deref(), args.hours.unwrap_or(3))?;
+    let win = resolve_window(cli.window.as_deref(), cli.hours.unwrap_or(3))?;
     let progress = TerminalProgress::new();
     let result = run_score(
         &client,
@@ -266,36 +309,46 @@ async fn cmd_score(cli: &Cli, args: &ScoreArgs) -> Result<()> {
     Ok(())
 }
 
-/// Default horizon when the user runs `grusindeks` (or `grusindeks score`) with
-/// no time arguments — today plus the next five days.
+/// Default horizon when the user runs `grusindeks` with no time arguments
+/// — today plus the next five days.
 const DEFAULT_FORECAST_DAYS: u8 = 6;
+
+/// Hard cap for `--days`. `api.met.no/locationforecast/2.0/complete`
+/// publishes a 9-day horizon; anything beyond would render as duplicate
+/// "·" placeholder days that look like real data.
+const MAX_FORECAST_DAYS: u8 = 9;
+
+/// Hard cap for `--hours` and `--best-window`. 24h is the longest single
+/// ride window we'll honour; longer windows cross multiple local days,
+/// at which point the multi-day path (`--days`) is the right tool and
+/// the renderer's HH:MM-only endpoint would mislead.
+const MAX_HOURS: i64 = 24;
 
 /// Build `n` consecutive day windows starting at `start_date` (local).
 ///
-/// Each future day spans the *whole* local calendar day (00:00–24:00).
-/// "Today" is clipped to start at the current moment instead of midnight
-/// — by the time the user runs grusindeks, anything before "now" is
-/// history and dragging the score with it just produces a fictional
-/// number. If the clipped today-window has zero hours left (running at
-/// midnight exactly), today is dropped from the forecast.
-fn build_day_windows(start_date: NaiveDate, n: u8, now: DateTime<Utc>) -> Result<Vec<DayWindow>> {
+/// Each day spans the configured `daytime` window in local time — the
+/// hours someone might actually ride. Including the cold dawn / late
+/// night would drag the daily mean toward unrepresentative values.
+/// "Today" is additionally clipped to start at `now` instead of the
+/// configured daytime start when that's already in the past — anything
+/// before `now` is history. If today's daytime has fully ended by `now`,
+/// today is dropped from the forecast.
+fn build_day_windows(
+    start_date: NaiveDate,
+    n: u8,
+    now: DateTime<Utc>,
+    daytime: DaytimeWindow,
+) -> Result<Vec<DayWindow>> {
     let mut out = Vec::with_capacity(n as usize);
     for offset in 0..i64::from(n) {
         let date = start_date + ChronoDuration::days(offset);
-        let day_start = local_to_utc(date.and_time(NaiveTime::MIN))?;
-        let day_end = local_to_utc((date + ChronoDuration::days(1)).and_time(NaiveTime::MIN))?;
-        // Clip "today" so the window starts at `now` rather than at
-        // local midnight that's already in the past.
-        let start = if day_start < now && now < day_end {
-            now
-        } else {
-            day_start
-        };
-        if start >= day_end {
-            // Today has fully ended (running exactly at the day's end):
-            // drop it.
+        let day_start = local_to_utc(date.and_time(daytime.start))?;
+        let day_end = local_to_utc(date.and_time(daytime.end))?;
+        if day_end <= now {
+            // Day's daytime has fully ended (today already past 22:00).
             continue;
         }
+        let start = if day_start < now { now } else { day_start };
         out.push(DayWindow {
             date,
             window: RideWindow {
@@ -376,9 +429,20 @@ fn resolve_window(window: Option<&str>, hours: i64) -> Result<RideWindow> {
 }
 
 fn local_to_utc(naive: chrono::NaiveDateTime) -> Result<DateTime<Utc>> {
-    match Local.from_local_datetime(&naive).single() {
-        Some(t) => Ok(t.with_timezone(&Utc)),
-        None => bail!("ambiguous local time {naive}"),
+    use chrono::LocalResult;
+    match Local.from_local_datetime(&naive) {
+        LocalResult::Single(t) => Ok(t.with_timezone(&Utc)),
+        // Spring-forward gap: the wall-clock time literally doesn't exist
+        // (e.g. 02:30 on the morning Norway moves to summer time). Saying
+        // "ambiguous" here is wrong — the clock skips this minute.
+        LocalResult::None => bail!(
+            "lokal tid {naive} finnes ikke (sommer-/vintertid-overgang); velg et tidspunkt før eller etter overgangen"
+        ),
+        // Fall-back overlap: 02:30 happens twice on the morning we wind
+        // clocks back. We pick neither — let the user pin the right one.
+        LocalResult::Ambiguous(_, _) => bail!(
+            "lokal tid {naive} er tvetydig (forekommer to ganger ved sommer-/vintertid-overgang)"
+        ),
     }
 }
 
@@ -390,6 +454,7 @@ fn build_client(
     let ua = UserAgent::new(APP, VERSION, &cfg.user_agent_contact)
         .map_err(|e| anyhow!("invalid User-Agent (check user_agent_contact): {e}"))?;
     let mut mcfg = MetClientConfig::production(ua, cfg.frost.client_id.clone());
+    let api_base_overridden = api_base.is_some();
     if let Some(u) = api_base {
         mcfg.api_base = u.clone();
     }
@@ -397,5 +462,92 @@ fn build_client(
         mcfg.frost_base = u.clone();
     }
     mcfg.timeout = StdDuration::from_secs(15);
+    // Cache only the anonymous api.met.no endpoints — Frost stays off the
+    // disk cache because of basic auth and per-request time-range
+    // semantics. Skip caching entirely when api_base is overridden
+    // (typically a wiremock from the integration suite); otherwise the
+    // tests would pollute the user's real cache directory and revalidation
+    // traffic would surprise the mocks. A failure to derive the cache
+    // dir is also non-fatal: drop back to the un-cached path with a
+    // warning so the CLI still works on environments where ProjectDirs
+    // can't resolve a home.
+    if !api_base_overridden {
+        match Config::default_cache_dir() {
+            Ok(dir) => mcfg.cache_dir = Some(dir),
+            Err(e) => tracing::warn!("disk cache disabled — could not resolve cache dir: {e}"),
+        }
+    }
     Ok(MetClient::new(mcfg)?)
+}
+
+#[cfg(test)]
+mod build_day_windows_tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    fn dt(date: NaiveDate, h: u32, m: u32) -> DateTime<Utc> {
+        local_to_utc(date.and_hms_opt(h, m, 0).unwrap()).unwrap()
+    }
+
+    fn dw() -> DaytimeWindow {
+        DaytimeWindow::default()
+    }
+
+    #[test]
+    fn future_day_uses_full_daytime_window() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 27).unwrap();
+        let now = dt(today, 9, 0);
+        let days = build_day_windows(today, 3, now, dw()).unwrap();
+        let tomorrow = today.succ_opt().unwrap();
+        let tomorrow_win = days.iter().find(|d| d.date == tomorrow).unwrap();
+        assert_eq!(tomorrow_win.window.start, dt(tomorrow, 10, 0));
+        assert_eq!(tomorrow_win.window.end, dt(tomorrow, 22, 0));
+    }
+
+    #[test]
+    fn today_before_daytime_starts_at_daytime_start() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 27).unwrap();
+        let now = dt(today, 6, 0);
+        let days = build_day_windows(today, 1, now, dw()).unwrap();
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].window.start, dt(today, 10, 0));
+        assert_eq!(days[0].window.end, dt(today, 22, 0));
+    }
+
+    #[test]
+    fn today_during_daytime_is_clipped_to_now() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 27).unwrap();
+        let now = dt(today, 14, 30);
+        let days = build_day_windows(today, 1, now, dw()).unwrap();
+        assert_eq!(days[0].window.start, now);
+        assert_eq!(days[0].window.end, dt(today, 22, 0));
+    }
+
+    #[test]
+    fn today_dropped_when_past_daytime_end() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 27).unwrap();
+        let tomorrow = today.succ_opt().unwrap();
+        let now = dt(today, 22, 30);
+        let days = build_day_windows(today, 2, now, dw()).unwrap();
+        // Today should be dropped, tomorrow should still appear in full.
+        assert!(
+            !days.iter().any(|d| d.date == today),
+            "today should be dropped"
+        );
+        let tw = days.iter().find(|d| d.date == tomorrow).unwrap();
+        assert_eq!(tw.window.start, dt(tomorrow, 10, 0));
+    }
+
+    #[test]
+    fn custom_daytime_window_is_honored() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 27).unwrap();
+        let now = dt(today, 5, 0);
+        let custom = DaytimeWindow {
+            start: NaiveTime::from_hms_opt(7, 0, 0).unwrap(),
+            end: NaiveTime::from_hms_opt(19, 0, 0).unwrap(),
+        };
+        let days = build_day_windows(today, 1, now, custom).unwrap();
+        assert_eq!(days[0].window.start, dt(today, 7, 0));
+        assert_eq!(days[0].window.end, dt(today, 19, 0));
+    }
 }

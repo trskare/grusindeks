@@ -190,7 +190,12 @@ pub fn render_human(
         }
     }
 
-    if agg.points.len() > 1 {
+    // Skip the worst/best punkt-rows entirely when every sample tied —
+    // showing "Verste 89 (SØ)" and "Beste 89 (NV)" with the same number
+    // suggests the bearings *matter* when in fact they're an artefact of
+    // tie-breaking on the first/last enumeration. Only render when there's
+    // a real spread.
+    if agg.points.len() > 1 && agg.min < agg.max {
         let _ = writeln!(out);
         let worst = agg.worst();
         let best = agg.best();
@@ -202,13 +207,13 @@ pub fn render_human(
             out,
             "{worst_word}  {} ({})",
             theme::paint_score(worst.score.total),
-            localize_bearing(worst.bearing_label, lang),
+            worst.bearing_label,
         );
         let _ = writeln!(
             out,
             "{best_word}  {} ({})",
             theme::paint_score(best.score.total),
-            localize_bearing(best.bearing_label, lang),
+            best.bearing_label,
         );
     }
     out
@@ -405,7 +410,7 @@ fn ground_chip(forecast: &MultiDayForecast) -> Option<String> {
         .penalties
         .iter()
         .find(|p| p.component == grusindeks_core::score::Component::Ground)?;
-    Some(penalty.message_no.clone())
+    Some(penalty.message.clone())
 }
 
 /// One-line bucket legend: `0 dårlig · 25 marginalt · 45 ok · 65 bra · 85 strålende`.
@@ -516,20 +521,48 @@ fn write_day_row(
     // whenever it's `Some` is correct. Surface it in default mode too:
     // knowing "today's mean is 70 but 06–09 is 95" is one of the
     // highest-value signals the renderer can show.
-    if let Some(ow) = &center.optimal_window {
-        let (luke_phrase, points_word) = match lang {
-            Language::Norwegian => ("Beste luke", "poeng"),
-            Language::Swedish => ("Bästa lucka", "poäng"),
+    //
+    // Read from `day.optimal_window` (aggregate-level) rather than
+    // `center.optimal_window` (per-point) so the displayed `improvement`
+    // and `reason` are aligned with the multi-point mean and breakdown
+    // the rest of the row shows. The center's per-point view is computed
+    // against its solo day total, which can disagree with the displayed
+    // mean by several points.
+    if let Some(ow) = &day.optimal_window {
+        // "Luke" (NO) / "lucka" (SE) means an *opening* — it implies the
+        // sub-window is meaningfully better than the day around it. When
+        // the improvement is zero (which only happens when the user opted
+        // in to `--best-window`, since the default config still filters
+        // sub-windows that don't clear the threshold), the word is
+        // misleading and the "+0 poeng" suffix is noise. Use "vindu" /
+        // "fönster" instead and drop the suffix.
+        let (phrase, points_word) = match (lang, ow.improvement) {
+            (Language::Norwegian, 0) => ("Beste vindu", "poeng"),
+            (Language::Norwegian, _) => ("Beste luke", "poeng"),
+            (Language::Swedish, 0) => ("Bästa fönster", "poäng"),
+            (Language::Swedish, _) => ("Bästa lucka", "poäng"),
         };
+        let suffix = if ow.improvement > 0 {
+            format!(", +{} {}", ow.improvement, points_word)
+        } else {
+            String::new()
+        };
+        // One-word "why this window" trailer. Only rendered when the score
+        // layer found a clear axis winner — uniform days return None and
+        // the line stays clean.
+        let reason_trailer = ow
+            .reason
+            .map(|r| format!(" — {}", theme::paint_dim(r.label(lang))))
+            .unwrap_or_default();
         let _ = writeln!(
             out,
-            "{BREAKDOWN_INDENT}★ {luke_phrase}: {}–{} → {} ({}, +{} {})",
+            "{BREAKDOWN_INDENT}★ {phrase}: {}–{} → {} ({}{}){}",
             local_hm(ow.window.start),
             local_hm(ow.window.end),
             theme::paint_score(ow.score.total),
             theme::paint_label(mean_label(ow.score.total, lang), ow.score.total),
-            ow.improvement,
-            points_word,
+            suffix,
+            reason_trailer,
         );
     }
 
@@ -656,7 +689,7 @@ fn format_penalty_line(p: &Penalty, lang: Language) -> String {
     format!(
         "{}: {}",
         theme::paint_component_label(p.component, lang),
-        theme::paint_severity(&p.message_no, p.severity),
+        theme::paint_severity(&p.message, p.severity),
     )
 }
 
@@ -797,7 +830,7 @@ fn center_penalties(agg: &AggregateScore) -> &[Penalty] {
     let center = agg
         .points
         .iter()
-        .find(|p| p.bearing_label == "senter")
+        .find(|p| p.is_center)
         .unwrap_or(&agg.points[0]);
     &center.score.penalties
 }
@@ -806,19 +839,6 @@ fn mean_label(total: u8, lang: Language) -> &'static str {
     grusindeks_core::score::label_for(total, lang)
 }
 
-/// Translate the Norwegian bearing/center label stored in the
-/// `PointScore` (NØ, SØ, …, "senter") to the localized form. The data
-/// pipeline produces Norwegian labels so we can keep `"senter"` as an
-/// internal sentinel for center detection; this helper bridges to the
-/// renderer's chosen language.
-fn localize_bearing<'a>(label_no: &'a str, lang: Language) -> std::borrow::Cow<'a, str> {
-    use std::borrow::Cow;
-    match (lang, label_no) {
-        (Language::Swedish, "senter") => Cow::Borrowed("centrum"),
-        (Language::Swedish, _) if label_no.contains('Ø') => Cow::Owned(label_no.replace('Ø', "Ö")),
-        _ => Cow::Borrowed(label_no),
-    }
-}
 
 /// Pad a *coloured* string to `target_visible_width`. We can't trust the
 /// formatter's `{:<N}` since ANSI escape codes inflate the length without
@@ -865,7 +885,7 @@ mod tests {
             Language::Norwegian,
         );
         let center = Point::new(59.9139, 10.7522);
-        let agg = AggregateScore::from_points(center, vec![(center, s)]);
+        let agg = AggregateScore::from_points(center, vec![(center, s)], Language::Norwegian);
         let out = render_human("Oslo", 20.0, win, &agg, false, Language::Norwegian);
         assert!(out.contains("Grusindeks for Oslo"));
         assert!(out.contains("Total:"));
@@ -893,12 +913,41 @@ mod tests {
             Language::Norwegian,
         );
         let center = Point::new(59.9139, 10.7522);
-        let agg = AggregateScore::from_points(center, vec![(center, s)]);
+        let agg = AggregateScore::from_points(center, vec![(center, s)], Language::Norwegian);
         let out = render_human("Oslo", 20.0, win, &agg, false, Language::Norwegian);
         // Component label + a number from the wind speed should be present.
         assert!(
             out.contains("Vind") && out.contains("9"),
             "expected wind penalty in {out}"
+        );
+    }
+
+    #[test]
+    fn aggregate_uses_swedish_compass_labels_when_language_is_swedish() {
+        // Multi-point aggregate in Swedish must produce NÖ/Ö/SÖ (not the
+        // Norwegian Ø) and "centrum" for the centre row, not "senter".
+        let win = RideWindow::from_hours(t(14), 3);
+        let s = score(
+            &(14..17).map(perfect).collect::<Vec<_>>(),
+            win,
+            Some(SurfaceState::default()),
+            Language::Swedish,
+        );
+        let center = Point::new(59.9139, 10.7522);
+        // East offset → bearing 90° → "Ö" in Swedish.
+        let east = Point::new(59.9139, 11.0);
+        let agg = AggregateScore::from_points(
+            center,
+            vec![(center, s.clone()), (east, s)],
+            Language::Swedish,
+        );
+        let center_pt = agg.points.iter().find(|p| p.is_center).unwrap();
+        assert_eq!(center_pt.bearing_label, "centrum");
+        let other = agg.points.iter().find(|p| !p.is_center).unwrap();
+        assert!(
+            !other.bearing_label.contains('Ø'),
+            "expected Swedish Ö, got {:?}",
+            other.bearing_label
         );
     }
 
@@ -955,8 +1004,10 @@ mod tests {
                     Some(SurfaceState::default()),
                     now,
                     Language::Norwegian,
+                    grusindeks_core::daily::BestWindowConfig::default(),
                 ),
             )],
+            Language::Norwegian,
         );
         let forecast = MultiDayForecast { days: vec![day] };
         let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
@@ -989,8 +1040,10 @@ mod tests {
                     Some(SurfaceState::default()),
                     now,
                     Language::Norwegian,
+                    grusindeks_core::daily::BestWindowConfig::default(),
                 ),
             )],
+            Language::Norwegian,
         );
         let forecast = MultiDayForecast { days: vec![day] };
         let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
@@ -1000,6 +1053,102 @@ mod tests {
         assert!(
             out.contains("★ Beste:") && out.contains("╭"),
             "expected best-day callout in {out}"
+        );
+    }
+
+    #[test]
+    fn multi_day_render_appends_one_word_reason_after_optimal_window() {
+        // Mixed day with a clear dry "luke": the trailing reason should
+        // surface as "tørrest" so the user gets a one-glance "why".
+        use crate::aggregate::DayAggregate;
+        use grusindeks_core::daily::compute_day;
+
+        fn awful(time_h: u32) -> HourlyConditions {
+            HourlyConditions {
+                probability_of_precip: Some(95.0),
+                ..HourlyConditions::minimal(t(time_h), 5.0, 11.0, 3.0)
+            }
+        }
+
+        let win = RideWindow::from_hours(t(6), 12);
+        let now = t(5);
+        let center = Point::new(59.9139, 10.7522);
+        let mut hours: Vec<_> = (6..9).map(perfect).collect();
+        hours.extend((9..15).map(awful));
+        hours.extend((15..18).map(perfect));
+        let day = DayAggregate::from_points(
+            NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
+            win,
+            center,
+            vec![(
+                center,
+                compute_day(
+                    &hours,
+                    win,
+                    Some(SurfaceState::default()),
+                    now,
+                    Language::Norwegian,
+                    grusindeks_core::daily::BestWindowConfig::default(),
+                ),
+            )],
+            Language::Norwegian,
+        );
+        let forecast = MultiDayForecast { days: vec![day] };
+        let out = render_multi_day("Oslo", 20.0, &forecast, true, Language::Norwegian);
+        assert!(
+            out.contains("tørrest"),
+            "expected 'tørrest' reason after Beste luke line: {out}"
+        );
+    }
+
+    #[test]
+    fn multi_day_render_uses_vindu_label_and_omits_zero_improvement_suffix() {
+        // Uniformly perfect day + `--best-window`-style config (min_improvement: 0)
+        // → optimal_window is Some with improvement == 0. The renderer must:
+        //   1. say "Beste vindu" instead of "Beste luke" (luke implies a
+        //      contrast against the rest of the day);
+        //   2. drop the "+0 poeng" suffix entirely (noise).
+        use crate::aggregate::DayAggregate;
+        use grusindeks_core::daily::{compute_day, BestWindowConfig};
+
+        let win = RideWindow::from_hours(t(6), 12);
+        let now = t(5);
+        let center = Point::new(59.9139, 10.7522);
+        let hours: Vec<_> = (6..18).map(perfect).collect();
+        let cfg = BestWindowConfig {
+            length_hours: 2,
+            min_improvement: 0,
+        };
+        let day = DayAggregate::from_points(
+            NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
+            win,
+            center,
+            vec![(
+                center,
+                compute_day(
+                    &hours,
+                    win,
+                    Some(SurfaceState::default()),
+                    now,
+                    Language::Norwegian,
+                    cfg,
+                ),
+            )],
+            Language::Norwegian,
+        );
+        let forecast = MultiDayForecast { days: vec![day] };
+        let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
+        assert!(
+            out.contains("Beste vindu"),
+            "expected 'Beste vindu' label when improvement is 0, got: {out}"
+        );
+        assert!(
+            !out.contains("Beste luke"),
+            "should not say 'Beste luke' when improvement is 0: {out}"
+        );
+        assert!(
+            !out.contains("+0 poeng"),
+            "should drop the '+0 poeng' suffix: {out}"
         );
     }
 
@@ -1034,8 +1183,10 @@ mod tests {
                     Some(SurfaceState::default()),
                     now,
                     Language::Norwegian,
+                    grusindeks_core::daily::BestWindowConfig::default(),
                 ),
             )],
+            Language::Norwegian,
         );
         let forecast = MultiDayForecast { days: vec![day] };
         // Verbose surfaces "Beste luke" under days with a usable
@@ -1072,8 +1223,10 @@ mod tests {
                     Some(SurfaceState::new(5.0)),
                     now,
                     Language::Norwegian,
+                    grusindeks_core::daily::BestWindowConfig::default(),
                 ),
             )],
+            Language::Norwegian,
         );
         let forecast = MultiDayForecast { days: vec![day] };
         let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
@@ -1122,7 +1275,7 @@ mod tests {
             Language::Norwegian,
         );
         let center = Point::new(59.9139, 10.7522);
-        let agg = AggregateScore::from_points(center, vec![(center, s)]);
+        let agg = AggregateScore::from_points(center, vec![(center, s)], Language::Norwegian);
         eprintln!(
             "\n--- DEFAULT ---\n{}",
             render_human("Oslo", 20.0, win, &agg, false, Language::Norwegian)
@@ -1195,8 +1348,10 @@ mod tests {
                         Some(SurfaceState::new(1.0)),
                         now,
                         Language::Norwegian,
+                        grusindeks_core::daily::BestWindowConfig::default(),
                     ),
                 )],
+                Language::Norwegian,
             );
             days.push(day);
         }
@@ -1238,8 +1393,10 @@ mod tests {
                     Some(SurfaceState::new(5.0)),
                     now,
                     Language::Norwegian,
+                    grusindeks_core::daily::BestWindowConfig::default(),
                 ),
             )],
+            Language::Norwegian,
         );
         let forecast = MultiDayForecast { days: vec![day] };
         let default_out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
@@ -1287,8 +1444,10 @@ mod tests {
                     Some(SurfaceState::default()),
                     now,
                     Language::Norwegian,
+                    grusindeks_core::daily::BestWindowConfig::default(),
                 ),
             )],
+            Language::Norwegian,
         );
         MultiDayForecast { days: vec![day] }
     }
@@ -1336,6 +1495,7 @@ mod tests {
                 point: center,
                 bearing_deg: 0.0,
                 bearing_label: "senter",
+                is_center: true,
                 day_score,
             }],
         }

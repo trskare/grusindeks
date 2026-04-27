@@ -61,23 +61,29 @@ grusindeks --version
 
 ```sh
 # Første gang:
-grusindeks config init
-$EDITOR ~/.config/grusindeks/config.toml   # sett user_agent_contact
+grusindeks config init                  # skriver en startmal
+$EDITOR "$(grusindeks config path)"     # åpner config.toml — sett user_agent_contact
 
 # Score for koordinater nå (3-timers vindu fra nå):
-grusindeks score --lat 59.9139 --lon 10.7522
+grusindeks --lat 59.9139 --lon 10.7522
 
 # Score for et lagret sted i et bestemt vindu i dag:
-grusindeks score --place oslo --window 14:00-17:00
+grusindeks --place oslo --window 14:00-17:00
 
 # Dag-for-dag oversikt for de neste 6 dagene (default — med konfidens,
 # beste-dag-tips og evt. beste «luke» innenfor hver dag):
-grusindeks score --place oslo
-grusindeks score --place oslo --days 5
+grusindeks --place oslo
+grusindeks --place oslo --days 5
+
+# Vis det beste 2-timers vinduet for hver dag (uavhengig av hvor mye
+# bedre det er enn dagsgjennomsnittet):
+grusindeks --place oslo --best-window
+# Egendefinert vindu-lengde:
+grusindeks --place oslo --best-window 4
 
 # Maskinlesbart for skripting / framtidig web-API:
-grusindeks score --place oslo --json
-grusindeks score --place oslo --days 5 --json
+grusindeks --place oslo --json
+grusindeks --place oslo --days 5 --json
 ```
 
 ### Dag-for-dag prognose
@@ -102,7 +108,15 @@ og rapporten består av:
   prognosen, ikke per dag), `Skala`-legenden over score-bucketene, og
   en `~`-fotnote når noen dag har lav konfidens.
 - **`★ Beste luke`** (kun `--verbose`) — et 3-timers sub-vindu som
-  scorer minst 10 poeng bedre enn dagen ellers.
+  scorer minst 10 poeng bedre enn dagen ellers. Linja avsluttes med en
+  ett-ords forklaring som peker på aksen der vinduet trekker mest fra
+  dagsgjennomsnittet: `tørrest`, `minst vind`, eller temperatur-grunner
+  som splittes i to regimer — `mildest` når vinduets felt-temp ligger i
+  12–22 °C-platået, og `minst kald` ellers.
+- **`--best-window [TIMER]`** — opt-in alternativ som viser dagens
+  beste sub-vindu uansett forbedring (default 2 timer). Når sub-vinduet
+  faktisk slår dagsgjennomsnittet brukes den vanlige `Beste luke`-merkingen
+  med `+N poeng`-suffiks; ellers vises det som `Beste vindu` uten suffiks.
 
 Konfidens faller med horisonten: `api.met.no` publiserer
 time-for-time-data for de første ~60 timene; deretter kun 6-timers
@@ -174,7 +188,16 @@ Grusindeks · Oslo · 20 km · 6 dagar
 
 ### Config
 
-`~/.config/grusindeks/config.toml`:
+Stien er plattform-avhengig (`directories::ProjectDirs`):
+
+| OS         | Sti                                                     |
+| ---------- | ------------------------------------------------------- |
+| Linux/BSD  | `~/.config/grusindeks/config.toml`                      |
+| macOS      | `~/Library/Application Support/grusindeks/config.toml`  |
+| Windows    | `%APPDATA%\grusindeks\config\config.toml`               |
+
+Skriv `grusindeks config path` for å se hvor din ligger — eller bruk
+`--config <PATH>` for å overstyre. Eksempel-innhold:
 
 ```toml
 user_agent_contact = "you@example.com"  # MÅ være satt — kreves av MET TOS
@@ -430,7 +453,7 @@ straffer den hardere enn før (15 poeng på bakke-aksen, opp fra 10) for
 cargo test --workspace          # ~290 tester, ingen nettverkskall
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
-cargo run -p grusindeks-cli -- score --lat 59.9139 --lon 10.7522 --verbose
+cargo run -p grusindeks-cli -- --lat 59.9139 --lon 10.7522 --verbose
 ```
 
 Workspace-layout:

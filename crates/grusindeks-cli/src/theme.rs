@@ -54,6 +54,7 @@ pub fn component_color(c: Component) -> Rgb {
         Component::PrecipProbability => BLUE,
         Component::Ground => PURPLE,
         Component::HardCap => RED,
+        Component::NoData => RED,
     }
 }
 
@@ -67,12 +68,14 @@ pub fn component_label(c: Component, lang: grusindeks_core::lang::Language) -> &
         (Language::Norwegian, Component::PrecipProbability) => "Sannsynlighet",
         (Language::Norwegian, Component::Ground) => "Bakke",
         (Language::Norwegian, Component::HardCap) => "Advarsel",
+        (Language::Norwegian, Component::NoData) => "Ingen data",
         (Language::Swedish, Component::Temperature) => "Temperatur",
         (Language::Swedish, Component::Wind) => "Vind",
         (Language::Swedish, Component::Precipitation) => "Nederbörd",
         (Language::Swedish, Component::PrecipProbability) => "Sannolikhet",
         (Language::Swedish, Component::Ground) => "Mark",
         (Language::Swedish, Component::HardCap) => "Varning",
+        (Language::Swedish, Component::NoData) => "Inga data",
     }
 }
 

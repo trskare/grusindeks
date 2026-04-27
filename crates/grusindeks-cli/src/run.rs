@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
-use grusindeks_core::daily::compute_day;
+use grusindeks_core::daily::{compute_day, BestWindowConfig};
 use grusindeks_core::drying::{drying_step, DryingParams, SurfaceState};
 use grusindeks_core::geo::{sample_around, Point};
 use grusindeks_core::lang::Language;
@@ -75,7 +75,7 @@ pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<Ag
         .into_iter()
         .map(|(p, hours)| (p, score(&hours, inputs.window, surface, inputs.lang)))
         .collect();
-    Ok(AggregateScore::from_points(inputs.center, scored))
+    Ok(AggregateScore::from_points(inputs.center, scored, inputs.lang))
 }
 
 /// One day worth of forecast lookup: a local date label plus the UTC
@@ -94,6 +94,12 @@ pub struct ForecastInputs<'a> {
     pub history_hours: i64,
     /// Language for human-readable labels and penalty messages.
     pub lang: Language,
+    /// How `compute_day` should look for the per-day "best sub-window".
+    /// Default: 3-hour windows, only surfaced when ≥10 points above the
+    /// day mean. The CLI's `--best-window` flag overrides this with a
+    /// user-chosen length and `min_improvement = 0` so every day shows
+    /// its top-scoring sub-window.
+    pub best_window: BestWindowConfig,
     pub progress: &'a dyn ProgressSink,
 }
 
@@ -117,11 +123,51 @@ pub async fn run_forecast(
     let now = Utc::now();
     let per_point_hours = fetch_forecasts_parallel(client, &points, inputs.progress).await?;
 
+    // Project ground state forward day by day. The same `Some(state)` was
+    // previously fed to every day's `compute_day`, which meant Friday's
+    // bakke pretended `now`'s soil moisture would still hold mid-week.
+    // We use the center point's forecast as the single regional
+    // trajectory — keeps "ground is shared across the sample disk"
+    // semantics and avoids per-bush divergence. `None` (Frost
+    // unavailable) propagates through unchanged.
+    let day_starts: Vec<DateTime<Utc>> = inputs.days.iter().map(|d| d.window.start).collect();
+    // sample_around() truncates every point to 4 decimals before fetching
+    // (TOS), but `inputs.center` may carry full precision from --lat/--lon.
+    // Compare on the truncated form so a center with 5+ decimals still
+    // matches its corresponding fetched point.
+    let center_truncated = inputs.center.truncated();
+    let center_hours = per_point_hours
+        .iter()
+        .find(|(p, _)| *p == center_truncated)
+        .map(|(_, h)| h.as_slice())
+        .unwrap_or_else(|| {
+            per_point_hours
+                .first()
+                .map(|(_, h)| h.as_slice())
+                .unwrap_or(&[])
+        });
+    let projected_per_day: Vec<Option<SurfaceState>> = match surface {
+        Some(initial) => {
+            project_states_for_days(initial, center_hours, &day_starts, &DryingParams::default())
+                .into_iter()
+                .map(Some)
+                .collect()
+        }
+        None => vec![None; inputs.days.len()],
+    };
+
     let mut days = Vec::with_capacity(inputs.days.len());
-    for dw in inputs.days {
+    for (dw, day_surface) in inputs.days.iter().zip(projected_per_day.iter()) {
         let mut day_points = Vec::with_capacity(per_point_hours.len());
         for (p, hours) in &per_point_hours {
-            let ds = compute_day(hours, dw.window, surface, now, inputs.lang);
+            let ds = compute_day(
+                hours,
+                dw.window,
+                *day_surface,
+                now,
+                inputs.lang,
+                inputs.best_window,
+            );
             day_points.push((*p, ds));
         }
         days.push(DayAggregate::from_points(
@@ -129,9 +175,40 @@ pub async fn run_forecast(
             dw.window,
             inputs.center,
             day_points,
+            inputs.lang,
         ));
     }
     Ok(MultiDayForecast { days })
+}
+
+/// Walk `hours` (chronological) forward from `initial`, snapshotting the
+/// drying state at every entry in `day_starts` (also chronological). The
+/// snapshot is the state *at the start of* the snapshot hour — the rain
+/// in the hour beginning exactly at `snapshot` has not been applied yet,
+/// since by convention `drying_step` advances by exactly one hour.
+///
+/// Forecast gaps (rare — locationforecast already spreads 6h buckets to
+/// hourly records) are tolerated by simply skipping. Adding synthetic
+/// dry filler the way `replay_into_state` does would over-credit drying
+/// across a missing block; better to under-credit and accept the small
+/// drift.
+fn project_states_for_days(
+    initial: SurfaceState,
+    hours: &[HourlyConditions],
+    day_starts: &[DateTime<Utc>],
+    params: &DryingParams,
+) -> Vec<SurfaceState> {
+    let mut out = Vec::with_capacity(day_starts.len());
+    let mut state = initial;
+    let mut idx = 0;
+    for &snapshot in day_starts {
+        while idx < hours.len() && hours[idx].time < snapshot {
+            state = drying_step(state, &hours[idx], params);
+            idx += 1;
+        }
+        out.push(state);
+    }
+    out
 }
 
 /// Fan out one `locationforecast` request per sample point in parallel.
@@ -153,11 +230,42 @@ async fn fetch_forecasts_parallel(
     }
     let mut out = Vec::with_capacity(points.len());
     while let Some(joined) = set.join_next().await {
-        let (p, hours) = joined??;
-        out.push((p, hours));
-        progress.forecast_point_done();
+        match joined {
+            Ok(Ok((p, hours))) => {
+                out.push((p, hours));
+                progress.forecast_point_done();
+            }
+            // First failure wins. Abort the remaining fan-out tasks so we
+            // don't sit through up to 15s of timeouts on requests we no
+            // longer care about, then surface the original error.
+            Ok(Err(e)) => {
+                set.abort_all();
+                progress.forecast_finished();
+                return Err(e);
+            }
+            Err(join_err) => {
+                set.abort_all();
+                progress.forecast_finished();
+                return Err(join_err.into());
+            }
+        }
     }
     progress.forecast_finished();
+    // JoinSet yields tasks in completion order — i.e. whichever HTTP
+    // request finished first. Sort by (lat, lon) so downstream aggregation
+    // picks the same "worst point" / "best point" on every run when the
+    // sample disk has score ties, and so the JSON `points[]` array is
+    // stable across invocations.
+    out.sort_by(|(a, _), (b, _)| {
+        a.lat
+            .partial_cmp(&b.lat)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.lon
+                    .partial_cmp(&b.lon)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
     Ok(out)
 }
 
@@ -425,5 +533,108 @@ mod tests {
             dry_state.accumulated_mm,
             damp_state.accumulated_mm,
         );
+    }
+
+    // ---- project_states_for_days ----
+
+    fn ts(h: i64) -> DateTime<Utc> {
+        chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 4, 27, 0, 0, 0).unwrap() + Duration::hours(h)
+    }
+
+    fn dry_hour(h: i64) -> HourlyConditions {
+        let mut hc = HourlyConditions::minimal(ts(h), 15.0, 3.0, 0.0);
+        hc.relative_humidity = Some(60.0);
+        hc.cloud_area_fraction = Some(50.0);
+        hc
+    }
+
+    fn rainy_hour(h: i64, mm: f64) -> HourlyConditions {
+        let mut hc = HourlyConditions::minimal(ts(h), 10.0, 2.0, mm);
+        hc.relative_humidity = Some(90.0);
+        hc.cloud_area_fraction = Some(95.0);
+        hc
+    }
+
+    #[test]
+    fn projection_returns_initial_state_for_today_when_first_snapshot_is_now() {
+        // Day 1 snapshot equals first forecast hour → no hours stepped,
+        // state == initial. Mirrors today's "i dag" window which is
+        // clipped to `now`.
+        let initial = SurfaceState {
+            accumulated_mm: 1.5,
+            hours_since_meaningful_rain: 12.0,
+        };
+        let hours: Vec<_> = (0..24).map(dry_hour).collect();
+        let states = project_states_for_days(initial, &hours, &[ts(0)], &DryingParams::default());
+        assert_eq!(states, vec![initial]);
+    }
+
+    #[test]
+    fn projection_dries_ground_over_consecutive_dry_days() {
+        let initial = SurfaceState {
+            accumulated_mm: 2.0,
+            hours_since_meaningful_rain: 0.0,
+        };
+        // 4 dry days (96 hours), snapshot at start of each day.
+        let hours: Vec<_> = (0..96).map(dry_hour).collect();
+        let day_starts = vec![ts(0), ts(24), ts(48), ts(72)];
+        let states =
+            project_states_for_days(initial, &hours, &day_starts, &DryingParams::default());
+        assert_eq!(states.len(), 4);
+        // accumulated_mm strictly decreases day over day with no rain.
+        for w in states.windows(2) {
+            assert!(
+                w[1].accumulated_mm <= w[0].accumulated_mm,
+                "ground should not gain water without rain: {w:?}"
+            );
+        }
+        // Drought counter strictly climbs.
+        assert!(states[3].hours_since_meaningful_rain > states[0].hours_since_meaningful_rain);
+    }
+
+    #[test]
+    fn projection_wets_ground_after_forecast_rain() {
+        let initial = SurfaceState::default();
+        // Day 0 dry, day 1 has heavy rain hours 24..30, day 2 dry again.
+        let mut hours: Vec<HourlyConditions> = (0..24).map(dry_hour).collect();
+        hours.extend((24..30).map(|h| rainy_hour(h, 2.0)));
+        hours.extend((30..72).map(dry_hour));
+        let day_starts = vec![ts(0), ts(24), ts(48)];
+        let states =
+            project_states_for_days(initial, &hours, &day_starts, &DryingParams::default());
+        assert_eq!(states[0].accumulated_mm, 0.0, "today: no rain yet");
+        assert_eq!(
+            states[1].accumulated_mm, 0.0,
+            "tomorrow morning: rain hasn't fallen yet (snapshot at start)"
+        );
+        assert!(
+            states[2].accumulated_mm > 0.0,
+            "day after tomorrow: rain has fallen, ground is wet — got {:?}",
+            states[2]
+        );
+    }
+
+    #[test]
+    fn projection_handles_snapshot_before_first_hour() {
+        // Snapshot earlier than any forecast hour → no stepping, state
+        // stays at initial. Defensive against forecast that starts after
+        // the requested day window.
+        let initial = SurfaceState {
+            accumulated_mm: 0.5,
+            hours_since_meaningful_rain: 30.0,
+        };
+        let hours: Vec<_> = (10..20).map(dry_hour).collect();
+        let states = project_states_for_days(initial, &hours, &[ts(0)], &DryingParams::default());
+        assert_eq!(states, vec![initial]);
+    }
+
+    #[test]
+    fn projection_returns_one_state_per_day_start() {
+        let initial = SurfaceState::default();
+        let hours: Vec<_> = (0..96).map(dry_hour).collect();
+        let day_starts = vec![ts(0), ts(24), ts(48), ts(72)];
+        let states =
+            project_states_for_days(initial, &hours, &day_starts, &DryingParams::default());
+        assert_eq!(states.len(), day_starts.len());
     }
 }

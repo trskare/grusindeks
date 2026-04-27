@@ -70,13 +70,13 @@ impl Cache {
         if !self.dir.exists() {
             fs::create_dir_all(&self.dir)
                 .await
-                .map_err(|e| ClientError::Decode(format!("cache mkdir: {e}")))?;
+                .map_err(|e| ClientError::Cache(format!("mkdir: {e}")))?;
         }
         let bytes = serde_json::to_vec(entry)
-            .map_err(|e| ClientError::Decode(format!("cache encode: {e}")))?;
+            .map_err(|e| ClientError::Cache(format!("encode: {e}")))?;
         fs::write(self.path_for(url), bytes)
             .await
-            .map_err(|e| ClientError::Decode(format!("cache write: {e}")))?;
+            .map_err(|e| ClientError::Cache(format!("write: {e}")))?;
         Ok(())
     }
 
@@ -111,7 +111,16 @@ impl Cache {
 
         // 304: keep the body, refresh Expires from the new headers.
         if resp.status().as_u16() == 304 {
-            let mut entry = cached.expect("304 implies a cached entry existed");
+            // We only ever emit If-Modified-Since when we already had a
+            // cached entry, so a server that respects RFC 7232 cannot
+            // reach this branch without one. A misbehaving upstream that
+            // returns 304 unprompted shouldn't crash the client — surface
+            // it as a Decode error and let the caller retry.
+            let mut entry = cached.ok_or_else(|| {
+                ClientError::Decode(
+                    "upstream returned 304 Not Modified without a prior cached entry".into(),
+                )
+            })?;
             entry.expires = parse_expires(resp.headers().get("expires"));
             // Last-Modified usually unchanged on 304, but refresh if echoed.
             if let Some(lm) = resp.headers().get("last-modified") {

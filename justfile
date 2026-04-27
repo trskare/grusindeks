@@ -24,9 +24,6 @@ build:
 run *args:
     cargo run --quiet -p grusindeks-cli -- {{args}}
 
-score *args:
-    cargo run --quiet -p grusindeks-cli -- score {{args}}
-
 install:
     cargo install --path crates/grusindeks-cli --locked
 
