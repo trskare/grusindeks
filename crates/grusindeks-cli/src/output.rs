@@ -190,7 +190,12 @@ pub fn render_human(
         }
     }
 
-    if agg.points.len() > 1 {
+    // Skip the worst/best punkt-rows entirely when every sample tied —
+    // showing "Verste 89 (SØ)" and "Beste 89 (NV)" with the same number
+    // suggests the bearings *matter* when in fact they're an artefact of
+    // tie-breaking on the first/last enumeration. Only render when there's
+    // a real spread.
+    if agg.points.len() > 1 && agg.min < agg.max {
         let _ = writeln!(out);
         let worst = agg.worst();
         let best = agg.best();
