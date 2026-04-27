@@ -222,7 +222,12 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
         }
     }
 
-    if days > 1 {
+    // Route through the multi-day path whenever the user didn't pass
+    // --window/--hours. `--days 1` is a legitimate "today only, full
+    // daytime window" request and falling through to single-day would
+    // silently ignore both the configured daytime_window and
+    // --best-window (single-day defaults to a 3h window starting at now).
+    if !single_day {
         let day_windows = build_day_windows(
             Local::now().date_naive(),
             days,
