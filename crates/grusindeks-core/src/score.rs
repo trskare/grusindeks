@@ -110,7 +110,9 @@ pub struct ScoreBreakdown {
 
 /// Which axis a penalty came from. `HardCap` is reserved for the
 /// global "stop the score from being misleadingly high" rule when the
-/// forecast contains heavy rain or storm-force wind.
+/// forecast contains heavy rain or storm-force wind. `NoData` fires when
+/// the requested ride window contained zero usable forecast hours, so
+/// the score is a placeholder rather than a measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Component {
@@ -120,6 +122,7 @@ pub enum Component {
     PrecipProbability,
     Ground,
     HardCap,
+    NoData,
 }
 
 /// How much a penalty hurt the score. Ordered so `Critical > Major > Minor`,
@@ -195,11 +198,48 @@ pub fn score(
         })
         .collect();
 
-    // Mean of the relevant signals over the window. Empty input: fall back
-    // to a single neutral hour so the score is well-defined.
-    let n = in_window.len().max(1) as f64;
-    let mean_temp = in_window.iter().map(|h| h.temperature_c).sum::<f64>() / n.max(1.0);
-    let mean_wind = in_window.iter().map(|h| h.wind_speed_ms).sum::<f64>() / n.max(1.0);
+    // No usable forecast data inside the window — short-circuit to a
+    // clearly-degraded score with a critical "ingen data" penalty. The
+    // previous behaviour silently divided 0/1 across every signal and
+    // produced things like "snitt -0 °C, føles som -5 °C" backed by a
+    // 71/100 "Bra" label, which masked upstream parser regressions.
+    if in_window.is_empty() {
+        let message_no = match lang {
+            Language::Norwegian => {
+                "Ingen prognosedata for valgt vindu — score er ikke beregnet".to_string()
+            }
+            Language::Swedish => {
+                "Inga prognosdata för valt fönster — poäng inte beräknad".to_string()
+            }
+        };
+        let label = match lang {
+            Language::Norwegian => "Ingen data",
+            Language::Swedish => "Inga data",
+        };
+        return Grusindeks {
+            total: 0,
+            breakdown: ScoreBreakdown {
+                temperature: 0,
+                wind: 0,
+                precipitation: 0,
+                precip_probability: 0,
+                ground: 0,
+            },
+            label,
+            hard_capped: false,
+            penalties: vec![Penalty {
+                component: Component::NoData,
+                severity: Severity::Critical,
+                message_no,
+            }],
+        };
+    }
+
+    // Mean of the relevant signals over the window. n is guaranteed > 0
+    // by the short-circuit above.
+    let n = in_window.len() as f64;
+    let mean_temp = in_window.iter().map(|h| h.temperature_c).sum::<f64>() / n;
+    let mean_wind = in_window.iter().map(|h| h.wind_speed_ms).sum::<f64>() / n;
     let max_gust = in_window
         .iter()
         .filter_map(|h| h.wind_gust_ms)
@@ -212,7 +252,7 @@ pub fn score(
             .fold((0.0_f64, 0_usize), |(s, c), v| (s + v, c + 1));
         (count > 0).then(|| sum / count as f64)
     };
-    let mean_precip = in_window.iter().map(|h| h.precipitation_mm).sum::<f64>() / n.max(1.0);
+    let mean_precip = in_window.iter().map(|h| h.precipitation_mm).sum::<f64>() / n;
     let max_precip = in_window
         .iter()
         .map(|h| h.precipitation_mm)
@@ -912,6 +952,51 @@ mod tests {
             "swedish drought should use 'dygn': {:?}",
             drought.message_no,
         );
+    }
+
+    #[test]
+    fn empty_window_returns_no_data_penalty_not_phantom_score() {
+        // Window with no overlapping forecast hours used to produce a
+        // ~71/100 "Bra" with snitt 0 °C and a -5 °C felt-T. Now: 0/100,
+        // a Critical NoData penalty, and no fabricated per-axis chatter.
+        let win = RideWindow::from_hours(t(14), 3);
+        let s = score(&[], win, Some(SurfaceState::default()), Language::Norwegian);
+        assert_eq!(s.total, 0);
+        assert_eq!(s.label, "Ingen data");
+        assert_eq!(s.breakdown.temperature, 0);
+        assert_eq!(s.breakdown.wind, 0);
+        assert_eq!(s.breakdown.precipitation, 0);
+        assert_eq!(s.breakdown.ground, 0);
+        assert!(!s.hard_capped);
+        let no_data = s
+            .penalties
+            .iter()
+            .find(|p| p.component == Component::NoData)
+            .expect("expected a NoData penalty");
+        assert_eq!(no_data.severity, Severity::Critical);
+        // No per-axis penalties were synthesised from the zero means.
+        assert_eq!(s.penalties.len(), 1);
+
+        let s_se = score(&[], win, Some(SurfaceState::default()), Language::Swedish);
+        assert_eq!(s_se.label, "Inga data");
+    }
+
+    #[test]
+    fn empty_window_no_data_signals_when_hours_exist_outside_window() {
+        // Hours exist but none fall inside the requested window.
+        let hours = (10..13).map(nice_hour).collect::<Vec<_>>();
+        let win = RideWindow::from_hours(t(20), 3);
+        let s = score(
+            &hours,
+            win,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert_eq!(s.total, 0);
+        assert!(s
+            .penalties
+            .iter()
+            .any(|p| p.component == Component::NoData));
     }
 
     #[test]
