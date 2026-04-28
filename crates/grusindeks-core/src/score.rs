@@ -180,8 +180,47 @@ pub struct Penalty {
     pub message: String,
 }
 
+/// Raw aggregates over the scored window. Surfaced so the renderer (and
+/// JSON consumers) can show the underlying numbers without re-folding the
+/// hourly slice. Min/max temperature carry `f64::NAN` when the window
+/// contained no usable forecast hours — see the `NoData` short-circuit
+/// path in [`score`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WindowStats {
+    pub mean_temp_c: f64,
+    pub min_temp_c: f64,
+    pub max_temp_c: f64,
+    pub total_precip_mm: f64,
+    pub max_hourly_precip_mm: f64,
+    pub max_wind_ms: f64,
+    pub max_gust_ms: Option<f64>,
+    pub mean_humidity_pct: Option<f64>,
+}
+
+impl WindowStats {
+    /// Stats placeholder for the empty-window path. NaN min/max lets
+    /// renderers detect "no data" without an extra flag.
+    pub fn empty() -> Self {
+        Self {
+            mean_temp_c: f64::NAN,
+            min_temp_c: f64::NAN,
+            max_temp_c: f64::NAN,
+            total_precip_mm: 0.0,
+            max_hourly_precip_mm: 0.0,
+            max_wind_ms: 0.0,
+            max_gust_ms: None,
+            mean_humidity_pct: None,
+        }
+    }
+
+    /// `true` when the placeholder produced by `empty()` is in effect.
+    pub fn is_empty(&self) -> bool {
+        self.min_temp_c.is_nan() || self.max_temp_c.is_nan()
+    }
+}
+
 /// The Grusindeks for one location and ride window.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Grusindeks {
     pub total: u8,
     pub breakdown: ScoreBreakdown,
@@ -193,6 +232,10 @@ pub struct Grusindeks {
     /// the most important ones.
     #[serde(default)]
     pub penalties: Vec<Penalty>,
+    /// Raw aggregates over the scored window. Always present; NaN min/max
+    /// indicates the empty-window path.
+    #[serde(default = "WindowStats::empty")]
+    pub stats: WindowStats,
 }
 
 /// Sub-score used for the ground axis when no historic surface
@@ -267,6 +310,7 @@ pub fn score(
                 severity: Severity::Critical,
                 message,
             }],
+            stats: WindowStats::empty(),
         };
     }
 
@@ -274,6 +318,14 @@ pub fn score(
     // by the short-circuit above.
     let n = in_window.len() as f64;
     let mean_temp = in_window.iter().map(|h| h.temperature_c).sum::<f64>() / n;
+    let min_temp = in_window
+        .iter()
+        .map(|h| h.temperature_c)
+        .fold(f64::INFINITY, f64::min);
+    let max_temp = in_window
+        .iter()
+        .map(|h| h.temperature_c)
+        .fold(f64::NEG_INFINITY, f64::max);
     let mean_wind = in_window.iter().map(|h| h.wind_speed_ms).sum::<f64>() / n;
     let max_gust = in_window
         .iter()
@@ -287,7 +339,8 @@ pub fn score(
             .fold((0.0_f64, 0_usize), |(s, c), v| (s + v, c + 1));
         (count > 0).then(|| sum / count as f64)
     };
-    let mean_precip = in_window.iter().map(|h| h.precipitation_mm).sum::<f64>() / n;
+    let total_precip = in_window.iter().map(|h| h.precipitation_mm).sum::<f64>();
+    let mean_precip = total_precip / n;
     let max_precip = in_window
         .iter()
         .map(|h| h.precipitation_mm)
@@ -416,12 +469,28 @@ pub fn score(
     // Worst penalty first so the renderer can take the head.
     penalties.sort_by(|a, b| b.severity.cmp(&a.severity));
 
+    let stats = WindowStats {
+        mean_temp_c: mean_temp,
+        min_temp_c: min_temp,
+        max_temp_c: max_temp,
+        total_precip_mm: total_precip,
+        max_hourly_precip_mm: if max_precip.is_finite() {
+            max_precip.max(0.0)
+        } else {
+            0.0
+        },
+        max_wind_ms: if max_wind.is_finite() { max_wind } else { 0.0 },
+        max_gust_ms: max_gust_opt,
+        mean_humidity_pct: mean_humidity_opt,
+    };
+
     Grusindeks {
         total,
         breakdown,
         label: label_for(total, lang),
         hard_capped,
         penalties,
+        stats,
     }
 }
 
@@ -616,9 +685,18 @@ fn drought_penalty(
         return None;
     }
     let days = (surface.hours_since_meaningful_rain / 24.0).round() as u32;
+    // `+` flags that the counter saturated against the Frost lookback —
+    // we know it's been at least `days` days, but it could be many more.
+    // Without the marker the chip would silently undercount on long
+    // dry spells (8 d, 28 d both render as "7 døgn uten regn").
+    let cap = if surface.drought_at_lookback_cap {
+        "+"
+    } else {
+        ""
+    };
     let message = match lang {
-        Language::Norwegian => format!("tørt og løst dekke ({days} døgn uten regn)"),
-        Language::Swedish => format!("torrt och löst underlag ({days} dygn utan regn)"),
+        Language::Norwegian => format!("tørt og løst dekke ({days}{cap} døgn uten regn)"),
+        Language::Swedish => format!("torrt och löst underlag ({days}{cap} dygn utan regn)"),
     };
     Some(Penalty {
         component: Component::Ground,
@@ -1148,6 +1226,7 @@ mod tests {
         let surface = SurfaceState {
             accumulated_mm: 0.0,
             hours_since_meaningful_rain: 96.0, // 4 days
+            drought_at_lookback_cap: false,
         };
         let s = score(
             &hours,
@@ -1607,6 +1686,7 @@ mod tests {
         let surface = SurfaceState {
             accumulated_mm: 0.0,
             hours_since_meaningful_rain: 96.0, // 4 days
+            drought_at_lookback_cap: false,
         };
         let s = score(
             &hours,
@@ -1628,6 +1708,52 @@ mod tests {
     }
 
     #[test]
+    fn drought_message_appends_plus_when_counter_at_lookback_cap() {
+        // Bakke chip caps at the Frost lookback (default 7 days). When the
+        // replay layer reports the counter saturated, the message must
+        // honestly flag the value as a lower bound — otherwise an actual
+        // 30-day dry spell silently renders as plain "7 døgn uten regn".
+        let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
+        let surface = SurfaceState {
+            accumulated_mm: 0.0,
+            hours_since_meaningful_rain: 168.0,
+            drought_at_lookback_cap: true,
+        };
+        let s_no = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            Some(surface),
+            Language::Norwegian,
+        );
+        let drought = s_no
+            .penalties
+            .iter()
+            .find(|p| p.message.contains("døgn uten regn"))
+            .expect("drought penalty");
+        assert!(
+            drought.message.contains("7+ døgn"),
+            "expected `7+ døgn` in {:?}",
+            drought.message
+        );
+        let s_sv = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            Some(surface),
+            Language::Swedish,
+        );
+        let drought_sv = s_sv
+            .penalties
+            .iter()
+            .find(|p| p.message.contains("dygn utan regn"))
+            .expect("drought penalty");
+        assert!(
+            drought_sv.message.contains("7+ dygn"),
+            "expected `7+ dygn` in {:?}",
+            drought_sv.message
+        );
+    }
+
+    #[test]
     fn score_wet_message_does_not_fire_during_drought() {
         // Parched surface (0 mm + 7 dry days) lowers the ground subscore
         // via apply_drought_penalty into the Minor band. The drought
@@ -1637,6 +1763,7 @@ mod tests {
         let surface = SurfaceState {
             accumulated_mm: 0.0,
             hours_since_meaningful_rain: 168.0,
+            drought_at_lookback_cap: false,
         };
         let s = score(
             &hours,
@@ -1659,6 +1786,7 @@ mod tests {
         let surface = SurfaceState {
             accumulated_mm: 5.0,
             hours_since_meaningful_rain: 200.0,
+            drought_at_lookback_cap: false,
         };
         let s = score(
             &hours,
@@ -1685,6 +1813,7 @@ mod tests {
             Some(SurfaceState {
                 accumulated_mm: thresholds::GROUND_OPTIMAL_MM,
                 hours_since_meaningful_rain: 0.0,
+                drought_at_lookback_cap: false,
             }),
             Language::Norwegian,
         );
@@ -1694,6 +1823,7 @@ mod tests {
             Some(SurfaceState {
                 accumulated_mm: 0.0,
                 hours_since_meaningful_rain: 240.0,
+                drought_at_lookback_cap: false,
             }),
             Language::Norwegian,
         );
@@ -1822,6 +1952,73 @@ mod tests {
         );
         // Same expected total as `perfect_conditions_yield_high_score`.
         assert_eq!(s.total, 97);
+    }
+
+    // ---- WindowStats population ----
+
+    #[test]
+    fn score_populates_window_stats_min_max_temp() {
+        let hours: Vec<HourlyConditions> = [8.0_f64, 12.0, 18.0]
+            .into_iter()
+            .enumerate()
+            .map(|(i, t_c)| HourlyConditions::minimal(t(14 + i as u32), t_c, 2.0, 0.0))
+            .collect();
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert_eq!(s.stats.min_temp_c, 8.0);
+        assert_eq!(s.stats.max_temp_c, 18.0);
+        assert!((s.stats.mean_temp_c - 12.666666_f64).abs() < 1e-3);
+    }
+
+    #[test]
+    fn score_total_precip_sums_window() {
+        let mm = [0.0_f64, 0.5, 1.5];
+        let hours: Vec<HourlyConditions> = mm
+            .iter()
+            .enumerate()
+            .map(|(i, p)| HourlyConditions::minimal(t(14 + i as u32), 17.0, 2.0, *p))
+            .collect();
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert!((s.stats.total_precip_mm - 2.0).abs() < 1e-9);
+        assert_eq!(s.stats.max_hourly_precip_mm, 1.5);
+    }
+
+    #[test]
+    fn score_empty_window_stats_are_nan() {
+        let hours: Vec<HourlyConditions> = vec![];
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert!(s.stats.is_empty());
+        assert!(s.stats.min_temp_c.is_nan());
+        assert!(s.stats.max_temp_c.is_nan());
+    }
+
+    #[test]
+    fn score_max_gust_is_none_when_absent() {
+        // Gusts are an Option in HourlyConditions; when no hour reports one,
+        // WindowStats must propagate None rather than silently emit -inf.
+        let hours: Vec<HourlyConditions> = (14..17).map(nice_hour).collect();
+        let s = score(
+            &hours,
+            RideWindow::from_hours(t(14), 3),
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert!(s.stats.max_gust_ms.is_none());
+        assert_eq!(s.stats.max_wind_ms, 2.0);
     }
 
     // ---- Felt-T (apparent temperature) integration ----

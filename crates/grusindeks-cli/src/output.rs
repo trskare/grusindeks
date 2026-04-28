@@ -7,15 +7,35 @@
 
 use std::fmt::Write as _;
 
-use chrono::{DateTime, Local, NaiveDate, Timelike, Utc};
+use chrono::{DateTime, Datelike, Local, NaiveDate, Timelike, Utc};
 use grusindeks_core::daily::Confidence;
 use grusindeks_core::lang::Language;
-use grusindeks_core::score::Penalty;
+use grusindeks_core::score::{Penalty, WindowStats};
 use grusindeks_core::types::RideWindow;
 use unicode_width::UnicodeWidthStr;
 
-use crate::aggregate::{AggregateScore, DayAggregate, HourlyForecast, MultiDayForecast};
+use crate::aggregate::{
+    AggregateScore, DayAggregate, HourlyForecast, MultiDayForecast, RainHistory,
+};
 use crate::theme;
+
+/// Per-render toggles for the optional footer chips. Defaults to "show
+/// both" so call sites that don't yet pass flags get the historic
+/// behaviour. The CLI layer narrows these from config + flag overrides.
+#[derive(Debug, Clone, Copy)]
+pub struct ChipFlags {
+    pub rain_history: bool,
+    pub window_stats: bool,
+}
+
+impl Default for ChipFlags {
+    fn default() -> Self {
+        Self {
+            rain_history: true,
+            window_stats: true,
+        }
+    }
+}
 
 /// Bar width for the per-day row. We render 9 full cells max + a 10th
 /// half-block sub-cell so values like 95 and 100 are visually distinct
@@ -135,6 +155,7 @@ pub fn render_human(
     window: RideWindow,
     agg: &AggregateScore,
     verbose: bool,
+    flags: ChipFlags,
     lang: Language,
 ) -> String {
     let mut out = String::new();
@@ -216,7 +237,50 @@ pub fn render_human(
             best.bearing_label,
         );
     }
+    write_aggregate_chips(&mut out, agg, flags, lang);
     out
+}
+
+/// Footer chips for the single-window report. Same look-and-feel as the
+/// multi-day footer, sourced from the centre point's `WindowStats` and
+/// the report's `RainHistory`.
+fn write_aggregate_chips(out: &mut String, agg: &AggregateScore, flags: ChipFlags, lang: Language) {
+    let mut wrote_any = false;
+    if flags.rain_history {
+        if let Some(msg) = agg
+            .rain_history
+            .as_ref()
+            .and_then(|h| rain_history_chip_content(h, lang))
+        {
+            if !wrote_any {
+                let _ = writeln!(out);
+                wrote_any = true;
+            }
+            let _ = writeln!(
+                out,
+                "  {}   {msg}",
+                theme::paint_dim(rain_history_chip_label(lang)),
+            );
+        }
+    }
+    if flags.window_stats {
+        let center_stats = agg
+            .points
+            .iter()
+            .find(|p| p.is_center)
+            .or_else(|| agg.points.first())
+            .map(|p| &p.score.stats);
+        if let Some(msg) = center_stats.and_then(|s| window_stats_chip_content(s, lang)) {
+            if !wrote_any {
+                let _ = writeln!(out);
+            }
+            let _ = writeln!(
+                out,
+                "  {}   {msg}",
+                theme::paint_dim(window_stats_chip_label(lang)),
+            );
+        }
+    }
 }
 
 /// Render the multi-day forecast.
@@ -238,6 +302,7 @@ pub fn render_multi_day(
     radius_km: f64,
     forecast: &MultiDayForecast,
     verbose: bool,
+    flags: ChipFlags,
     lang: Language,
 ) -> String {
     let mut out = String::new();
@@ -273,11 +338,11 @@ pub fn render_multi_day(
         if day.confidence == Confidence::Lav {
             any_low_confidence = true;
         }
-        write_day_row(&mut out, day, today_local, verbose, lang);
+        write_day_row(&mut out, day, today_local, verbose, flags, lang);
     }
 
     let _ = writeln!(out);
-    write_footer(&mut out, forecast, verbose, any_low_confidence, lang);
+    write_footer(&mut out, forecast, verbose, any_low_confidence, flags, lang);
     out
 }
 
@@ -364,6 +429,7 @@ fn write_footer(
     forecast: &MultiDayForecast,
     _verbose: bool,
     any_low_confidence: bool,
+    flags: ChipFlags,
     lang: Language,
 ) {
     if let Some(msg) = ground_chip(forecast) {
@@ -373,6 +439,25 @@ fn write_footer(
         };
         let _ = writeln!(out, "  {}   {msg}", theme::paint_dim(label));
     }
+
+    if flags.rain_history {
+        if let Some(msg) = forecast
+            .rain_history
+            .as_ref()
+            .and_then(|h| rain_history_chip_content(h, lang))
+        {
+            let _ = writeln!(
+                out,
+                "  {}   {msg}",
+                theme::paint_dim(rain_history_chip_label(lang))
+            );
+        }
+    }
+    // `Tall` (window_stats) used to live here as a single forecast-wide
+    // footer chip. It now renders per day under each day's breakdown row
+    // — see `write_day_breakdown` — so the user sees today's tall
+    // alongside today's bars, and tomorrow's alongside tomorrow's. The
+    // ChipFlags toggle still controls visibility, just at the day level.
 
     let scale_label = match lang {
         Language::Norwegian => "Skala",
@@ -392,6 +477,144 @@ fn write_footer(
         };
         let _ = writeln!(out, "  {}", theme::paint_dim(note));
     }
+}
+
+fn rain_history_chip_label(lang: Language) -> &'static str {
+    match lang {
+        Language::Norwegian => "Regn 7d",
+        Language::Swedish => "Regn 7d",
+    }
+}
+
+fn window_stats_chip_label(lang: Language) -> &'static str {
+    match lang {
+        Language::Norwegian => "Tall",
+        Language::Swedish => "Tal",
+    }
+}
+
+/// Compose the "Regn 7d" chip body. Returns `None` when the period had
+/// no regndøgn — the Bakke chip's `(N døgn uten regn)` parenthetical
+/// already conveys "tørt" with the same number, so a dry-week Regn 7d
+/// row is pure redundancy. Rendering it as "tørt siste 7 døgn" right
+/// under "tørt og løst dekke (7 døgn uten regn)" gave the user nothing
+/// they didn't already see.
+fn rain_history_chip_content(history: &RainHistory, lang: Language) -> Option<String> {
+    if history.rain_days == 0 {
+        return None;
+    }
+    let lookback_days = (history.lookback_hours / 24).max(1);
+    let date = history.wettest_day;
+    let date_str = format!("{}. {}", date.day(), month(date.month(), lang));
+    let total = history.total_mm;
+    let wettest = history.wettest_day_mm;
+    let days = history.rain_days;
+    Some(match lang {
+        Language::Norwegian => format!(
+            "{total:.1} mm siste {lookback_days} døgn · våtest {date_str} ({wettest:.1} mm) · {days} regndøgn",
+        ),
+        Language::Swedish => {
+            let dag_word = if days == 1 { "regndag" } else { "regndagar" };
+            format!(
+                "{total:.1} mm senaste {lookback_days} dygn · blötast {date_str} ({wettest:.1} mm) · {days} {dag_word}",
+            )
+        }
+    })
+}
+
+/// Compact, colour-coded one-liner for the "Tall" per-day stats row:
+/// `12–14 °C · 0.4 mm · 5 m/s (kast 8)`. Each number is painted by
+/// mapping the raw value through the relevant axis sub-score so harsh
+/// values render red and benign ones render green — the same palette
+/// the breakdown bars use, applied to bare numbers.
+///
+/// The temperature segment uses `apparent_temp` on the day's mean so the
+/// colour reflects the *felt* axis (wind chill / heat index), matching
+/// the Temperatur sub-score the breakdown bar already shows.
+fn format_tall_line(stats: &WindowStats, lang: Language) -> String {
+    use grusindeks_core::felt_temp::apparent_temp;
+    use grusindeks_core::score::{precip_subscore, temp_subscore, wind_subscore};
+
+    // Temperature: colour by the *felt* sub-score over the window's mean
+    // conditions, since that's what the breakdown bar reflects. We don't
+    // have a per-min/per-max felt-T, so the range itself is plain text and
+    // only the colour signals comfort.
+    let lo = stats.min_temp_c.round() as i32;
+    let hi = stats.max_temp_c.round() as i32;
+    let temp_text = if lo == hi {
+        format!("{lo} °C")
+    } else {
+        format!("{lo}–{hi} °C")
+    };
+    let felt = apparent_temp(
+        stats.mean_temp_c,
+        stats.max_wind_ms,
+        stats.mean_humidity_pct,
+    );
+    let temp_score = temp_subscore(felt);
+    let temp_seg = theme::paint_score_str(&temp_text, temp_score);
+
+    // Precipitation: colour by the precip sub-score evaluated on the
+    // peak-hour rate (matches the hard-cap behaviour better than total mm
+    // — a 5 mm/h hour matters even if the rest of the day was dry).
+    let precip_total = stats.total_precip_mm.max(0.0);
+    let precip_text = match lang {
+        Language::Norwegian => format!("{precip_total:.1} mm"),
+        Language::Swedish => format!("{precip_total:.1} mm"),
+    };
+    let precip_score = precip_subscore(stats.max_hourly_precip_mm.max(0.0));
+    let precip_seg = theme::paint_score_str(&precip_text, precip_score);
+
+    // Wind: colour by the wind sub-score on max + gust (worst case in the
+    // window). The (kast N) parenthetical inherits the same colour so the
+    // pair reads as one unit.
+    let wind_r = stats.max_wind_ms.max(0.0).round() as i32;
+    let wind_score = wind_subscore(stats.max_wind_ms.max(0.0), stats.max_gust_ms);
+    let wind_text = match (stats.max_gust_ms, lang) {
+        (Some(g), Language::Norwegian) if g.is_finite() => {
+            format!("{wind_r} m/s (kast {})", g.round() as i32)
+        }
+        (Some(g), Language::Swedish) if g.is_finite() => {
+            format!("{wind_r} m/s (by {})", g.round() as i32)
+        }
+        (_, _) => format!("{wind_r} m/s"),
+    };
+    let wind_seg = theme::paint_score_str(&wind_text, wind_score);
+
+    let sep = theme::paint_dim("·");
+    format!("{temp_seg} {sep} {precip_seg} {sep} {wind_seg}")
+}
+
+/// Compose the "Tall" chip body for one window's WindowStats. Returns
+/// `None` for the empty-window placeholder (NaN min/max), where there's
+/// no meaningful number to print and the existing "Ingen data" penalty
+/// already covers the user.
+fn window_stats_chip_content(stats: &WindowStats, lang: Language) -> Option<String> {
+    if stats.is_empty() {
+        return None;
+    }
+    let lo = stats.min_temp_c.round() as i32;
+    let hi = stats.max_temp_c.round() as i32;
+    let temp_seg = if lo == hi {
+        format!("{lo} °C")
+    } else {
+        format!("{lo}–{hi} °C")
+    };
+    let precip_seg = match lang {
+        Language::Norwegian => format!("nedbør {:.1} mm", stats.total_precip_mm.max(0.0)),
+        Language::Swedish => format!("nederbörd {:.1} mm", stats.total_precip_mm.max(0.0)),
+    };
+    let wind_r = stats.max_wind_ms.max(0.0).round() as i32;
+    let wind_seg = match (stats.max_gust_ms, lang) {
+        (Some(g), Language::Norwegian) if g.is_finite() => {
+            format!("vind {wind_r} m/s (kast {})", g.round() as i32)
+        }
+        (Some(g), Language::Swedish) if g.is_finite() => {
+            format!("vind {wind_r} m/s (by {})", g.round() as i32)
+        }
+        (_, _) => format!("vind {wind_r} m/s"),
+    };
+    Some(format!("{temp_seg} · {precip_seg} · {wind_seg}"))
 }
 
 /// Ground-state chip text. The score layer emits a `tørt og løst dekke
@@ -460,6 +683,7 @@ fn write_day_row(
     day: &DayAggregate,
     today_local: NaiveDate,
     verbose: bool,
+    flags: ChipFlags,
     lang: Language,
 ) {
     let center = day.center();
@@ -511,8 +735,28 @@ fn write_day_row(
     //   * default mode: today only — that's the day the user acts on
     //   * --verbose: every day. The tree's last row closes with `└─`
     //     unless penalty rows follow (verbose only).
+    let want_tall =
+        flags.window_stats && (is_today || verbose) && !day.center().score.stats.is_empty();
     if is_today || verbose {
-        write_day_breakdown(out, day, dim, verbose && penalty_take > 0, lang);
+        // The breakdown tree closes with `└─` unless something else
+        // follows it — penalty rows in verbose, or the Tall stats line
+        // when window_stats is enabled.
+        let breakdown_continues = (verbose && penalty_take > 0) || want_tall;
+        write_day_breakdown(out, day, dim, breakdown_continues, lang);
+    }
+    if want_tall {
+        let stats = &day.center().score.stats;
+        let tail_branch = if verbose && penalty_take > 0 {
+            "├─"
+        } else {
+            "└─"
+        };
+        let _ = writeln!(
+            out,
+            "{BREAKDOWN_INDENT}{tail_branch} {} {}",
+            theme::paint_dim(&format!("{:<9}", window_stats_chip_label(lang))),
+            format_tall_line(stats, lang),
+        );
     }
 
     // "Beste luke" — a sub-day window that scores significantly higher
@@ -914,6 +1158,7 @@ pub fn render_hourly(
     radius_km: f64,
     forecast: &HourlyForecast,
     verbose: bool,
+    flags: ChipFlags,
     lang: Language,
 ) -> String {
     let mut out = String::new();
@@ -967,11 +1212,25 @@ pub fn render_hourly(
             &forecast.header_hours,
             today_local,
             verbose,
+            flags,
             lang,
         );
     }
 
     let _ = writeln!(out);
+    if flags.rain_history {
+        if let Some(msg) = forecast
+            .rain_history
+            .as_ref()
+            .and_then(|h| rain_history_chip_content(h, lang))
+        {
+            let _ = writeln!(
+                out,
+                "  {}   {msg}",
+                theme::paint_dim(rain_history_chip_label(lang)),
+            );
+        }
+    }
     let scale_label = match lang {
         Language::Norwegian => "Skala",
         Language::Swedish => "Skala",
@@ -1001,6 +1260,7 @@ fn write_hourly_day_row(
     header_hours: &[u8],
     today_local: NaiveDate,
     verbose: bool,
+    flags: ChipFlags,
     lang: Language,
 ) {
     let label = day_label(day.date, today_local, lang);
@@ -1017,7 +1277,23 @@ fn write_hourly_day_row(
     );
 
     if verbose {
-        write_hourly_day_breakdown(out, day, header_hours, lang);
+        // Reserve `└─` for the actual last row in the per-day tree. When
+        // a Tall stats line follows the breakdown, the last sub-axis row
+        // becomes `├─` so the tree visually continues into the Tall row.
+        let want_tall = flags.window_stats && day.stats.is_some();
+        write_hourly_day_breakdown(out, day, header_hours, want_tall, lang);
+        if let Some(stats) = day.stats.as_ref() {
+            if flags.window_stats {
+                let label_padded = format!("{:<9}", window_stats_chip_label(lang));
+                let _ = writeln!(
+                    out,
+                    "{HOURLY_BREAKDOWN_INDENT}{} {} {}",
+                    theme::paint_dim("└─"),
+                    theme::paint_dim(&label_padded),
+                    format_tall_line(stats, lang),
+                );
+            }
+        }
     }
 }
 
@@ -1060,6 +1336,7 @@ fn write_hourly_day_breakdown(
     out: &mut String,
     day: &crate::aggregate::HourlyDayAggregate,
     header_hours: &[u8],
+    tail_continues: bool,
     lang: Language,
 ) {
     let (temp_label, wind_label, precip_label, ground_label) = match lang {
@@ -1097,7 +1374,11 @@ fn write_hourly_day_breakdown(
     ];
     let last_idx = pickers.len() - 1;
     for (i, (axis_label, picker)) in pickers.iter().enumerate() {
-        let branch = if i == last_idx { "└─" } else { "├─" };
+        let branch = if i == last_idx && !tail_continues {
+            "└─"
+        } else {
+            "├─"
+        };
         let mut cells: Vec<String> = Vec::with_capacity(header_hours.len());
         for &col_h in header_hours {
             cells.push(hourly_cell(day, col_h, picker.as_ref()));
@@ -1147,7 +1428,15 @@ mod tests {
         );
         let center = Point::new(59.9139, 10.7522);
         let agg = AggregateScore::from_points(center, vec![(center, s)], Language::Norwegian);
-        let out = render_human("Oslo", 20.0, win, &agg, false, Language::Norwegian);
+        let out = render_human(
+            "Oslo",
+            20.0,
+            win,
+            &agg,
+            false,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
         assert!(out.contains("Grusindeks for Oslo"));
         assert!(out.contains("Total:"));
         assert!(out.contains("Temperatur"));
@@ -1175,7 +1464,15 @@ mod tests {
         );
         let center = Point::new(59.9139, 10.7522);
         let agg = AggregateScore::from_points(center, vec![(center, s)], Language::Norwegian);
-        let out = render_human("Oslo", 20.0, win, &agg, false, Language::Norwegian);
+        let out = render_human(
+            "Oslo",
+            20.0,
+            win,
+            &agg,
+            false,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
         // Component label + a number from the wind speed should be present.
         assert!(
             out.contains("Vind") && out.contains("9"),
@@ -1270,8 +1567,18 @@ mod tests {
             )],
             Language::Norwegian,
         );
-        let forecast = MultiDayForecast { days: vec![day] };
-        let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
+        let forecast = MultiDayForecast {
+            days: vec![day],
+            rain_history: None,
+        };
+        let out = render_multi_day(
+            "Oslo",
+            20.0,
+            &forecast,
+            false,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
         assert!(out.contains("Grusindeks · Oslo"), "got {out}");
         assert!(out.contains("dag"), "got {out}");
         // Bucket legend lives once in the footer, replacing the per-row
@@ -1306,8 +1613,18 @@ mod tests {
             )],
             Language::Norwegian,
         );
-        let forecast = MultiDayForecast { days: vec![day] };
-        let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
+        let forecast = MultiDayForecast {
+            days: vec![day],
+            rain_history: None,
+        };
+        let out = render_multi_day(
+            "Oslo",
+            20.0,
+            &forecast,
+            false,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
         // The "best day" callout uses the short prefix "Beste:" inside a
         // round-cornered box, plus the "★" star in front. Either pin
         // suffices to confirm the headline rendered.
@@ -1354,8 +1671,18 @@ mod tests {
             )],
             Language::Norwegian,
         );
-        let forecast = MultiDayForecast { days: vec![day] };
-        let out = render_multi_day("Oslo", 20.0, &forecast, true, Language::Norwegian);
+        let forecast = MultiDayForecast {
+            days: vec![day],
+            rain_history: None,
+        };
+        let out = render_multi_day(
+            "Oslo",
+            20.0,
+            &forecast,
+            true,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
         assert!(
             out.contains("tørrest"),
             "expected 'tørrest' reason after Beste luke line: {out}"
@@ -1397,8 +1724,18 @@ mod tests {
             )],
             Language::Norwegian,
         );
-        let forecast = MultiDayForecast { days: vec![day] };
-        let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
+        let forecast = MultiDayForecast {
+            days: vec![day],
+            rain_history: None,
+        };
+        let out = render_multi_day(
+            "Oslo",
+            20.0,
+            &forecast,
+            false,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
         assert!(
             out.contains("Beste vindu"),
             "expected 'Beste vindu' label when improvement is 0, got: {out}"
@@ -1449,11 +1786,21 @@ mod tests {
             )],
             Language::Norwegian,
         );
-        let forecast = MultiDayForecast { days: vec![day] };
+        let forecast = MultiDayForecast {
+            days: vec![day],
+            rain_history: None,
+        };
         // Verbose surfaces "Beste luke" under days with a usable
         // optimal window. Default mode keeps the per-day rows lean and
         // the luke callout lives only in --verbose now.
-        let out = render_multi_day("Oslo", 20.0, &forecast, true, Language::Norwegian);
+        let out = render_multi_day(
+            "Oslo",
+            20.0,
+            &forecast,
+            true,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
         assert!(
             out.contains("Beste luke") || out.contains("luke"),
             "expected luke callout in verbose output: {out}"
@@ -1489,8 +1836,18 @@ mod tests {
             )],
             Language::Norwegian,
         );
-        let forecast = MultiDayForecast { days: vec![day] };
-        let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
+        let forecast = MultiDayForecast {
+            days: vec![day],
+            rain_history: None,
+        };
+        let out = render_multi_day(
+            "Oslo",
+            20.0,
+            &forecast,
+            false,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
         assert!(
             out.to_lowercase().contains("bakke"),
             "expected Bakke chip in footer: {out}"
@@ -1509,7 +1866,14 @@ mod tests {
             0,
             "default mode should not show per-day penalty rows: {out}"
         );
-        let verbose = render_multi_day("Oslo", 20.0, &forecast, true, Language::Norwegian);
+        let verbose = render_multi_day(
+            "Oslo",
+            20.0,
+            &forecast,
+            true,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
         assert!(
             count_penalty_rows(&verbose) > 0,
             "verbose should surface per-day penalty rows: {verbose}"
@@ -1539,11 +1903,27 @@ mod tests {
         let agg = AggregateScore::from_points(center, vec![(center, s)], Language::Norwegian);
         eprintln!(
             "\n--- DEFAULT ---\n{}",
-            render_human("Oslo", 20.0, win, &agg, false, Language::Norwegian)
+            render_human(
+                "Oslo",
+                20.0,
+                win,
+                &agg,
+                false,
+                ChipFlags::default(),
+                Language::Norwegian
+            )
         );
         eprintln!(
             "--- VERBOSE ---\n{}",
-            render_human("Oslo", 20.0, win, &agg, true, Language::Norwegian)
+            render_human(
+                "Oslo",
+                20.0,
+                win,
+                &agg,
+                true,
+                ChipFlags::default(),
+                Language::Norwegian
+            )
         );
     }
 
@@ -1616,14 +1996,31 @@ mod tests {
             );
             days.push(day);
         }
-        let forecast = MultiDayForecast { days };
+        let forecast = MultiDayForecast {
+            days,
+            rain_history: None,
+        };
         eprintln!(
             "\n--- DEFAULT ---\n{}",
-            render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian)
+            render_multi_day(
+                "Oslo",
+                20.0,
+                &forecast,
+                false,
+                ChipFlags::default(),
+                Language::Norwegian
+            )
         );
         eprintln!(
             "--- VERBOSE ---\n{}",
-            render_multi_day("Oslo", 20.0, &forecast, true, Language::Norwegian)
+            render_multi_day(
+                "Oslo",
+                20.0,
+                &forecast,
+                true,
+                ChipFlags::default(),
+                Language::Norwegian
+            )
         );
     }
 
@@ -1659,9 +2056,26 @@ mod tests {
             )],
             Language::Norwegian,
         );
-        let forecast = MultiDayForecast { days: vec![day] };
-        let default_out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
-        let verbose_out = render_multi_day("Oslo", 20.0, &forecast, true, Language::Norwegian);
+        let forecast = MultiDayForecast {
+            days: vec![day],
+            rain_history: None,
+        };
+        let default_out = render_multi_day(
+            "Oslo",
+            20.0,
+            &forecast,
+            false,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
+        let verbose_out = render_multi_day(
+            "Oslo",
+            20.0,
+            &forecast,
+            true,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
         // Penalty rows are tree-prefixed (`├─`/`└─`) AND contain `: ` between
         // the component label and its message. Breakdown rows share the
         // tree prefix but never carry a colon, which is what lets us count
@@ -1710,7 +2124,10 @@ mod tests {
             )],
             Language::Norwegian,
         );
-        MultiDayForecast { days: vec![day] }
+        MultiDayForecast {
+            days: vec![day],
+            rain_history: None,
+        }
     }
 
     fn day_with(date: NaiveDate, mean: u8, confidence: Confidence) -> DayAggregate {
@@ -1806,7 +2223,14 @@ mod tests {
         // with --verbose.
         let today = Local::now().date_naive();
         let forecast = one_day_forecast(today);
-        let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
+        let out = render_multi_day(
+            "Oslo",
+            20.0,
+            &forecast,
+            false,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
         assert!(
             out.contains("Temp "),
             "expected today's breakdown in default output:\n{out}"
@@ -1818,7 +2242,14 @@ mod tests {
         let today = Local::now().date_naive();
         let future = today + chrono::Duration::days(2);
         let forecast = one_day_forecast(future);
-        let out = render_multi_day("Oslo", 20.0, &forecast, false, Language::Norwegian);
+        let out = render_multi_day(
+            "Oslo",
+            20.0,
+            &forecast,
+            false,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
         assert!(
             !out.contains("Temp "),
             "future day should not show breakdown by default:\n{out}"
@@ -1839,6 +2270,7 @@ mod tests {
             20.0,
             &forecast,
             false,
+            ChipFlags::default(),
             Language::Norwegian,
         ));
         let verbose_chips = count(&render_multi_day(
@@ -1846,12 +2278,242 @@ mod tests {
             20.0,
             &forecast,
             true,
+            ChipFlags::default(),
             Language::Norwegian,
         ));
         // Default: today only → 1 "Temp " hit. Verbose: today + tomorrow → 2.
         assert!(
             verbose_chips > default_chips,
             "verbose should add breakdown rows: default={default_chips}, verbose={verbose_chips}"
+        );
+    }
+
+    // ---- Footer chip helpers ----
+
+    fn at_local(date: NaiveDate, h: u32) -> DateTime<Utc> {
+        Utc.from_utc_datetime(&date.and_hms_opt(h, 0, 0).unwrap())
+    }
+
+    fn forecast_with_history(date: NaiveDate, rain: Option<RainHistory>) -> MultiDayForecast {
+        let mut f = one_day_forecast(date);
+        f.rain_history = rain;
+        f
+    }
+
+    #[test]
+    fn rain_history_chip_returns_none_when_dry() {
+        // Dry weeks: Bakke chip already says "(N døgn uten regn)" with the
+        // same number, so a parallel "tørt siste N døgn" Regn 7d row was
+        // pure redundancy. Skip it entirely instead.
+        let h = RainHistory {
+            total_mm: 0.0,
+            wettest_day_mm: 0.0,
+            wettest_day: NaiveDate::from_ymd_opt(2026, 4, 21).unwrap(),
+            rain_days: 0,
+            lookback_hours: 168,
+        };
+        assert!(rain_history_chip_content(&h, Language::Norwegian).is_none());
+        assert!(rain_history_chip_content(&h, Language::Swedish).is_none());
+    }
+
+    #[test]
+    fn rain_history_chip_full_form_norwegian_and_swedish() {
+        let h = RainHistory {
+            total_mm: 14.2,
+            wettest_day_mm: 8.4,
+            wettest_day: NaiveDate::from_ymd_opt(2026, 4, 18).unwrap(),
+            rain_days: 3,
+            lookback_hours: 168,
+        };
+        let no = rain_history_chip_content(&h, Language::Norwegian).expect("Some");
+        assert!(no.contains("14.2 mm siste 7 døgn"), "got {no}");
+        assert!(no.contains("våtest 18. apr"), "got {no}");
+        assert!(no.contains("(8.4 mm)"), "got {no}");
+        assert!(no.contains("3 regndøgn"), "got {no}");
+        let sv = rain_history_chip_content(&h, Language::Swedish).expect("Some");
+        assert!(sv.contains("14.2 mm senaste 7 dygn"), "got {sv}");
+        assert!(sv.contains("blötast 18. apr"), "got {sv}");
+        assert!(sv.contains("3 regndagar"), "got {sv}");
+    }
+
+    #[test]
+    fn window_stats_chip_renders_temp_range() {
+        let stats = WindowStats {
+            mean_temp_c: 15.0,
+            min_temp_c: 12.0,
+            max_temp_c: 18.0,
+            total_precip_mm: 0.4,
+            max_hourly_precip_mm: 0.2,
+            max_wind_ms: 7.0,
+            max_gust_ms: Some(11.0),
+            mean_humidity_pct: None,
+        };
+        let s = window_stats_chip_content(&stats, Language::Norwegian).expect("Some");
+        assert!(s.contains("12–18 °C"), "got {s}");
+        assert!(s.contains("nedbør 0.4 mm"), "got {s}");
+        assert!(s.contains("vind 7 m/s (kast 11)"), "got {s}");
+    }
+
+    #[test]
+    fn window_stats_chip_omits_gust_when_none() {
+        let stats = WindowStats {
+            mean_temp_c: 15.0,
+            min_temp_c: 15.0,
+            max_temp_c: 15.0,
+            total_precip_mm: 0.0,
+            max_hourly_precip_mm: 0.0,
+            max_wind_ms: 5.0,
+            max_gust_ms: None,
+            mean_humidity_pct: None,
+        };
+        let s = window_stats_chip_content(&stats, Language::Norwegian).expect("Some");
+        assert!(!s.contains("kast"), "expected no gust mention: {s}");
+        // Single-hour-style window: equal min/max collapses to a single number.
+        assert!(s.contains("15 °C"), "got {s}");
+        assert!(!s.contains("15–15"), "should not render n–n: {s}");
+    }
+
+    #[test]
+    fn window_stats_chip_returns_none_for_empty_stats() {
+        let stats = WindowStats::empty();
+        assert!(window_stats_chip_content(&stats, Language::Norwegian).is_none());
+    }
+
+    #[test]
+    fn footer_renders_both_chips_when_data_available() {
+        let date = NaiveDate::from_ymd_opt(2026, 4, 26).unwrap();
+        let history = RainHistory {
+            total_mm: 14.2,
+            wettest_day_mm: 8.4,
+            wettest_day: NaiveDate::from_ymd_opt(2026, 4, 18).unwrap(),
+            rain_days: 3,
+            lookback_hours: 168,
+        };
+        let forecast = forecast_with_history(date, Some(history));
+        // verbose=true so the breakdown (and the Tall row inside it) renders
+        // regardless of how `today_local` resolves at test time. The chip
+        // logic itself is what we're asserting, not the today-detection.
+        let out = render_multi_day(
+            "Oslo",
+            20.0,
+            &forecast,
+            true,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
+        assert!(out.contains("Regn 7d"), "missing rain history chip: {out}");
+        assert!(out.contains("Tall"), "missing window stats row: {out}");
+    }
+
+    #[test]
+    fn footer_omits_rain_chip_when_history_is_none() {
+        let date = NaiveDate::from_ymd_opt(2026, 4, 26).unwrap();
+        let forecast = forecast_with_history(date, None);
+        let out = render_multi_day(
+            "Oslo",
+            20.0,
+            &forecast,
+            false,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
+        assert!(
+            !out.contains("Regn 7d"),
+            "should not render rain chip without history: {out}"
+        );
+    }
+
+    #[test]
+    fn flag_no_rain_history_hides_chip_even_with_data() {
+        let date = NaiveDate::from_ymd_opt(2026, 4, 26).unwrap();
+        let history = RainHistory {
+            total_mm: 14.2,
+            wettest_day_mm: 8.4,
+            wettest_day: NaiveDate::from_ymd_opt(2026, 4, 18).unwrap(),
+            rain_days: 3,
+            lookback_hours: 168,
+        };
+        let forecast = forecast_with_history(date, Some(history));
+        let flags = ChipFlags {
+            rain_history: false,
+            window_stats: true,
+        };
+        // verbose=true so the per-day Tall row renders independently of
+        // `today_local` resolution at test time.
+        let out = render_multi_day("Oslo", 20.0, &forecast, true, flags, Language::Norwegian);
+        assert!(
+            !out.contains("Regn 7d"),
+            "flag should hide rain chip: {out}"
+        );
+        assert!(
+            out.contains("Tall"),
+            "window stats row should still render: {out}"
+        );
+    }
+
+    #[test]
+    fn flag_no_window_stats_hides_chip() {
+        let date = NaiveDate::from_ymd_opt(2026, 4, 26).unwrap();
+        let forecast = forecast_with_history(date, None);
+        let flags = ChipFlags {
+            rain_history: true,
+            window_stats: false,
+        };
+        let out = render_multi_day("Oslo", 20.0, &forecast, false, flags, Language::Norwegian);
+        assert!(!out.contains("Tall"), "flag should hide stats chip: {out}");
+    }
+
+    #[test]
+    fn footer_renders_swedish_labels() {
+        let date = NaiveDate::from_ymd_opt(2026, 4, 26).unwrap();
+        let history = RainHistory {
+            total_mm: 14.2,
+            wettest_day_mm: 8.4,
+            wettest_day: NaiveDate::from_ymd_opt(2026, 4, 18).unwrap(),
+            rain_days: 3,
+            lookback_hours: 168,
+        };
+        let mut forecast = forecast_with_history(date, Some(history));
+        // Localise the forecast by rebuilding the day with Swedish.
+        let win = RideWindow::from_hours(at_local(date, 6), 12);
+        let now = at_local(date, 5);
+        let center = Point::new(59.9139, 10.7522);
+        let hours: Vec<HourlyConditions> = (6..18)
+            .map(|h| HourlyConditions::minimal(at_local(date, h), 17.0, 2.0, 0.0))
+            .collect();
+        let day = crate::aggregate::DayAggregate::from_points(
+            date,
+            win,
+            center,
+            vec![(
+                center,
+                grusindeks_core::daily::compute_day(
+                    &hours,
+                    win,
+                    Some(SurfaceState::default()),
+                    now,
+                    Language::Swedish,
+                    grusindeks_core::daily::BestWindowConfig::default(),
+                ),
+            )],
+            Language::Swedish,
+        );
+        forecast.days = vec![day];
+        // verbose=true so per-day Tall renders for the assertion below
+        // regardless of today_local resolution at test time.
+        let out = render_multi_day(
+            "Oslo",
+            20.0,
+            &forecast,
+            true,
+            ChipFlags::default(),
+            Language::Swedish,
+        );
+        assert!(out.contains("Tal"), "missing Swedish stats label: {out}");
+        assert!(out.contains("Regn 7d"), "missing Swedish rain label: {out}");
+        assert!(
+            out.contains("regndagar"),
+            "expected Swedish day word: {out}"
         );
     }
 
@@ -1925,10 +2587,12 @@ mod tests {
                 verbose_window.len() as i64,
             ),
             hours,
+            stats: None,
         };
         crate::aggregate::HourlyForecast {
             header_hours: verbose_window.to_vec(),
             days: vec![day],
+            rain_history: None,
         }
     }
 
@@ -1953,7 +2617,14 @@ mod tests {
     #[test]
     fn hourly_render_uses_block_glyphs_not_score_digits() {
         let forecast = hourly_fixture(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
-        let out = render_hourly("Oslo", 20.0, &forecast, false, Language::Norwegian);
+        let out = render_hourly(
+            "Oslo",
+            20.0,
+            &forecast,
+            false,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
         // Wide score range across the day → all four glyph variants should
         // surface somewhere in the output (header + cells + legend).
         assert!(out.contains("░░"), "expected ░░ glyph in {out}");
@@ -1965,7 +2636,14 @@ mod tests {
     #[test]
     fn hourly_render_default_omits_breakdown_rows() {
         let forecast = hourly_fixture(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
-        let out = render_hourly("Oslo", 20.0, &forecast, false, Language::Norwegian);
+        let out = render_hourly(
+            "Oslo",
+            20.0,
+            &forecast,
+            false,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
         // Tree-branch glyphs only appear in the verbose breakdown — their
         // absence proves the default view stayed lean.
         assert!(!out.contains("├─"), "default should not draw tree: {out}");
@@ -1980,7 +2658,14 @@ mod tests {
     #[test]
     fn hourly_render_verbose_emits_four_breakdown_rows_per_day() {
         let forecast = hourly_fixture(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
-        let out = render_hourly("Oslo", 20.0, &forecast, true, Language::Norwegian);
+        let out = render_hourly(
+            "Oslo",
+            20.0,
+            &forecast,
+            true,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
         // Three intermediate branches and one closing branch per day.
         assert_eq!(
             out.matches("├─").count(),
@@ -2002,7 +2687,14 @@ mod tests {
     #[test]
     fn hourly_render_verbose_breakdown_aligns_under_day_cells() {
         let forecast = hourly_fixture(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
-        let out = render_hourly("Oslo", 20.0, &forecast, true, Language::Norwegian);
+        let out = render_hourly(
+            "Oslo",
+            20.0,
+            &forecast,
+            true,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
         // A breakdown row's first cell must occupy the same *visible*
         // column as the day row's first cell. Colour helpers are no-ops
         // off-TTY, but `├─` is a 3-byte UTF-8 sequence whose visible
@@ -2034,12 +2726,103 @@ mod tests {
     }
 
     #[test]
+    fn hourly_verbose_renders_per_day_tall_when_stats_present() {
+        let mut forecast = hourly_fixture(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
+        forecast.days[0].stats = Some(WindowStats {
+            mean_temp_c: 14.0,
+            min_temp_c: 12.0,
+            max_temp_c: 18.0,
+            total_precip_mm: 0.0,
+            max_hourly_precip_mm: 0.0,
+            max_wind_ms: 4.0,
+            max_gust_ms: Some(7.0),
+            mean_humidity_pct: None,
+        });
+        let out = render_hourly(
+            "Oslo",
+            20.0,
+            &forecast,
+            true,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
+        assert!(
+            out.contains("Tall"),
+            "expected Tall row in hourly verbose: {out}"
+        );
+        assert!(
+            out.contains("12–18 °C"),
+            "expected temp range in Tall: {out}"
+        );
+        assert!(out.contains("(kast 7)"), "expected gust segment: {out}");
+    }
+
+    #[test]
+    fn hourly_default_omits_per_day_tall_even_with_stats() {
+        let mut forecast = hourly_fixture(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
+        forecast.days[0].stats = Some(WindowStats {
+            mean_temp_c: 14.0,
+            min_temp_c: 12.0,
+            max_temp_c: 18.0,
+            total_precip_mm: 0.0,
+            max_hourly_precip_mm: 0.0,
+            max_wind_ms: 4.0,
+            max_gust_ms: None,
+            mean_humidity_pct: None,
+        });
+        let out = render_hourly(
+            "Oslo",
+            20.0,
+            &forecast,
+            false,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
+        assert!(
+            !out.contains("Tall"),
+            "default hourly should not show Tall row: {out}"
+        );
+    }
+
+    #[test]
+    fn hourly_verbose_no_window_stats_flag_hides_tall() {
+        let mut forecast = hourly_fixture(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
+        forecast.days[0].stats = Some(WindowStats {
+            mean_temp_c: 14.0,
+            min_temp_c: 12.0,
+            max_temp_c: 18.0,
+            total_precip_mm: 0.0,
+            max_hourly_precip_mm: 0.0,
+            max_wind_ms: 4.0,
+            max_gust_ms: None,
+            mean_humidity_pct: None,
+        });
+        let flags = ChipFlags {
+            rain_history: true,
+            window_stats: false,
+        };
+        let out = render_hourly("Oslo", 20.0, &forecast, true, flags, Language::Norwegian);
+        assert!(
+            !out.contains("Tall"),
+            "flag should suppress Tall in hourly verbose: {out}"
+        );
+    }
+
+    #[test]
     fn hourly_render_handles_empty_forecast() {
         let forecast = crate::aggregate::HourlyForecast {
             header_hours: vec![],
             days: vec![],
+            rain_history: None,
         };
-        let out = render_hourly("Oslo", 20.0, &forecast, false, Language::Norwegian);
+        let out = render_hourly(
+            "Oslo",
+            20.0,
+            &forecast,
+            false,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
         assert!(
             out.contains("Ingen timer"),
             "expected empty-window message: {out}"

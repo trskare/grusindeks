@@ -97,6 +97,16 @@ struct Cli {
     #[arg(long)]
     hourly: bool,
 
+    /// Skjul "Regn 7d"-footer-chipen for denne kjøringen.
+    /// Overstyrer `show_rain_history = true` i config.
+    #[arg(long = "no-rain-history")]
+    no_rain_history: bool,
+
+    /// Skjul "Tall"-footer-chipen for denne kjøringen.
+    /// Overstyrer `show_window_stats = true` i config.
+    #[arg(long = "no-window-stats")]
+    no_window_stats: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -219,6 +229,14 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
     let frost_source_id = location_frost_source(&cfg, &location);
     let client = build_client(&cfg, cli.api_base.as_ref(), cli.frost_base.as_ref())?;
 
+    // CLI --no-* flags trump the config booleans. The flag is *opt-out*
+    // (presence = hide), so the effective state is "config says yes AND
+    // user did not opt out".
+    let chip_flags = output::ChipFlags {
+        rain_history: cfg.show_rain_history && !cli.no_rain_history,
+        window_stats: cfg.show_window_stats && !cli.no_window_stats,
+    };
+
     // Warn loudly when --best-window can never fit inside the configured
     // daytime window. Without this the renderer just omits the line and
     // the user is left wondering why nothing showed up.
@@ -275,6 +293,7 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
                 location.radius_km,
                 &hourly,
                 cli.verbose,
+                chip_flags,
                 cfg.language,
             );
             print!("{body}");
@@ -323,6 +342,7 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
                 location.radius_km,
                 &forecast,
                 cli.verbose,
+                chip_flags,
                 cfg.language,
             );
             print!("{body}");
@@ -362,6 +382,7 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
             win,
             &agg,
             cli.verbose,
+            chip_flags,
             cfg.language,
         );
         print!("{body}");
