@@ -35,6 +35,32 @@ pub struct AggregateScore {
     pub mean: u8,
     pub max: u8,
     pub points: Vec<PointScore>,
+    /// Roll-up of the past `lookback_hours` Frost observations. `None` when
+    /// Frost was unavailable or the response contained no usable data.
+    #[serde(default)]
+    pub rain_history: Option<RainHistory>,
+}
+
+/// Aggregate stats over the past N hours of Frost observations. Surfaced
+/// to the renderer as the "Regn 7d" footer chip and to JSON consumers as
+/// a top-level `rain_history` field. `None` (the wrapping `Option`) means
+/// Frost wasn't configured or the call failed; `Some(RainHistory { total_mm: 0.0, .. })`
+/// means we *did* look but the period was bone-dry.
+#[derive(Debug, Clone, Serialize)]
+pub struct RainHistory {
+    /// Cumulative precipitation in mm across the lookback window.
+    pub total_mm: f64,
+    /// The single highest daily total (mm) inside the window.
+    pub wettest_day_mm: f64,
+    /// Local date for `wettest_day_mm`. Computed in the system local tz so
+    /// a Saturday evening downpour doesn't show as Sunday on Monday morning.
+    pub wettest_day: NaiveDate,
+    /// Number of distinct local days that received at least
+    /// `MEANINGFUL_RAIN_MM` of precipitation.
+    pub rain_days: u32,
+    /// How many hours of past observations the aggregates were computed
+    /// over. Useful for the "siste 7 døgn" / "senaste 7 dygn" label.
+    pub lookback_hours: i64,
 }
 
 impl AggregateScore {
@@ -75,6 +101,7 @@ impl AggregateScore {
             mean,
             max,
             points: scored,
+            rain_history: None,
         }
     }
 
@@ -270,6 +297,10 @@ impl DayAggregate {
 #[derive(Debug, Clone, Serialize)]
 pub struct MultiDayForecast {
     pub days: Vec<DayAggregate>,
+    /// Roll-up of the past Frost observations. `None` when Frost is
+    /// unavailable. See [`RainHistory`].
+    #[serde(default)]
+    pub rain_history: Option<RainHistory>,
 }
 
 fn lower_confidence(a: Confidence, b: Confidence) -> Confidence {
@@ -309,6 +340,12 @@ pub struct HourlyDayAggregate {
     pub date: NaiveDate,
     pub daytime_window: RideWindow,
     pub hours: Vec<HourScore>,
+    /// Centre-point window stats for the full daytime window (temp range,
+    /// total precip, max wind/gust). Populated by `run_hourly` and rendered
+    /// as the per-day "Tall" line under the heatmap in `--verbose`. `None`
+    /// when no forecast data covered the day's window.
+    #[serde(default)]
+    pub stats: Option<grusindeks_core::score::WindowStats>,
 }
 
 /// Multi-day hourly forecast. The renderer aligns columns to `header_hours`
@@ -321,6 +358,10 @@ pub struct HourlyForecast {
     /// 24h clock, sorted ascending.
     pub header_hours: Vec<u8>,
     pub days: Vec<HourlyDayAggregate>,
+    /// Roll-up of the past Frost observations. `None` when Frost is
+    /// unavailable. See [`RainHistory`].
+    #[serde(default)]
+    pub rain_history: Option<RainHistory>,
 }
 
 #[cfg(test)]

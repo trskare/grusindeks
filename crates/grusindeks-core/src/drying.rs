@@ -89,6 +89,16 @@ pub struct SurfaceState {
     /// Hours elapsed since the last hour that received at least
     /// `MEANINGFUL_RAIN_MM`. Drizzle does not reset this.
     pub hours_since_meaningful_rain: f64,
+    /// `true` when the drought counter saturated against the replay
+    /// lookback ceiling — i.e. `replay_into_state` walked all the
+    /// observations it had without ever seeing the surface get wet.
+    /// In that case `hours_since_meaningful_rain` is a *lower bound*
+    /// on the true time since rain, not the actual value (the real
+    /// drought could be 30 days while we only fed 7 days of Frost
+    /// data). Renderers append a `+` to the day-count to flag this
+    /// honestly. Defaults to `false`; populated by `replay_into_state`.
+    #[serde(default)]
+    pub drought_at_lookback_cap: bool,
 }
 
 impl SurfaceState {
@@ -105,6 +115,7 @@ impl SurfaceState {
         Self {
             accumulated_mm,
             hours_since_meaningful_rain: 0.0,
+            drought_at_lookback_cap: false,
         }
     }
 
@@ -201,6 +212,11 @@ pub fn drying_step(state: SurfaceState, h: &HourlyConditions, p: &DryingParams) 
     SurfaceState {
         accumulated_mm: after_drying,
         hours_since_meaningful_rain,
+        // The cap flag describes the *replay* result, not a per-hour
+        // property — so per-step updates carry it forward unchanged.
+        // `replay_into_state` is responsible for setting it based on
+        // whether the full walk ever saw a reset.
+        drought_at_lookback_cap: state.drought_at_lookback_cap,
     }
 }
 
@@ -375,6 +391,7 @@ mod tests {
         let s = SurfaceState {
             accumulated_mm: 0.0,
             hours_since_meaningful_rain: 50.0,
+            drought_at_lookback_cap: false,
         };
         // 0.5 mm shower → after-drying state clears SURFACE_WETTED_MM
         // under the rainy fixture (humid, no sun → drying ≈ 0).
@@ -388,6 +405,7 @@ mod tests {
         let s = SurfaceState {
             accumulated_mm: 0.0,
             hours_since_meaningful_rain: 50.0,
+            drought_at_lookback_cap: false,
         };
         // 0.1 mm in one hour stays well below the wetted threshold.
         let s2 = drying_step(s, &rainy_hour(0, 0.1), &p);
@@ -402,6 +420,7 @@ mod tests {
         let mut s = SurfaceState {
             accumulated_mm: 0.0,
             hours_since_meaningful_rain: 50.0,
+            drought_at_lookback_cap: false,
         };
         for h in 0..4 {
             s = drying_step(s, &rainy_hour(h, 0.2), &p);

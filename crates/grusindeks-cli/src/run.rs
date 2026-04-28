@@ -4,9 +4,9 @@
 //! integration tests can call it directly with a test client.
 
 use anyhow::Result;
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
 use grusindeks_core::daily::{compute_day, BestWindowConfig, Confidence};
-use grusindeks_core::drying::{drying_step, DryingParams, SurfaceState};
+use grusindeks_core::drying::{drying_step, DryingParams, SurfaceState, SURFACE_WETTED_MM};
 use grusindeks_core::geo::{sample_around, Point};
 use grusindeks_core::lang::Language;
 use grusindeks_core::score::{score, ScoreBreakdown};
@@ -17,6 +17,7 @@ use grusindeks_met::locationforecast;
 
 use crate::aggregate::{
     AggregateScore, DayAggregate, HourScore, HourlyDayAggregate, HourlyForecast, MultiDayForecast,
+    RainHistory,
 };
 
 /// Callbacks the orchestration layer fires as it walks through the
@@ -64,7 +65,7 @@ pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<Ag
     // can render as "ukjent" instead of silently masquerading as
     // "akkurat regnet" (which is what `SurfaceState::default()` would
     // imply).
-    let surface = fetch_ground_state(
+    let (surface, rain_history) = fetch_ground_state(
         client,
         inputs.frost_source_id,
         inputs.history_hours,
@@ -77,11 +78,9 @@ pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<Ag
         .into_iter()
         .map(|(p, hours)| (p, score(&hours, inputs.window, surface, inputs.lang)))
         .collect();
-    Ok(AggregateScore::from_points(
-        inputs.center,
-        scored,
-        inputs.lang,
-    ))
+    let mut out = AggregateScore::from_points(inputs.center, scored, inputs.lang);
+    out.rain_history = rain_history;
+    Ok(out)
 }
 
 /// One day worth of forecast lookup: a local date label plus the UTC
@@ -118,7 +117,7 @@ pub async fn run_forecast(
 ) -> Result<MultiDayForecast> {
     let points = sample_around(inputs.center, inputs.radius_km);
 
-    let surface = fetch_ground_state(
+    let (surface, rain_history) = fetch_ground_state(
         client,
         inputs.frost_source_id,
         inputs.history_hours,
@@ -184,7 +183,7 @@ pub async fn run_forecast(
             inputs.lang,
         ));
     }
-    Ok(MultiDayForecast { days })
+    Ok(MultiDayForecast { days, rain_history })
 }
 
 pub struct HourlyInputs<'a> {
@@ -209,7 +208,7 @@ pub struct HourlyInputs<'a> {
 pub async fn run_hourly(client: &MetClient, inputs: HourlyInputs<'_>) -> Result<HourlyForecast> {
     let points = sample_around(inputs.center, inputs.radius_km);
 
-    let surface = fetch_ground_state(
+    let (surface, rain_history) = fetch_ground_state(
         client,
         inputs.frost_source_id,
         inputs.history_hours,
@@ -316,15 +315,32 @@ pub async fn run_hourly(client: &MetClient, inputs: HourlyInputs<'_>) -> Result<
                 confidence,
             });
         }
+        // Centre-point WindowStats over the *full* daytime window — the
+        // hourly grid's per-bucket scoring above doesn't surface temp/precip
+        // ranges, so we run one extra `score()` call against the centre's
+        // full-day window to populate them. Cheap (one fold per day) and
+        // keeps the per-day Tall row consistent with the multi-day view.
+        let stats = if hours.is_empty() {
+            None
+        } else {
+            // Surface state at the day's start is the most representative
+            // snapshot for the day; per-hour drift is small and we'd need
+            // to pick *some* anchor anyway.
+            let day_surface = surface_at.get(&dw.window.start).copied().unwrap_or(None);
+            let s = score(center_hours, dw.window, day_surface, inputs.lang);
+            (!s.stats.is_empty()).then_some(s.stats)
+        };
         days.push(HourlyDayAggregate {
             date: dw.date,
             daytime_window: dw.window,
             hours,
+            stats,
         });
     }
     Ok(HourlyForecast {
         header_hours: inputs.header_hours,
         days,
+        rain_history,
     })
 }
 
@@ -467,22 +483,123 @@ async fn fetch_ground_state(
     frost_source_id: Option<&str>,
     history_hours: i64,
     progress: &dyn ProgressSink,
-) -> Option<SurfaceState> {
-    let src = frost_source_id?;
-    client.config().frost_client_id.as_ref()?;
+) -> (Option<SurfaceState>, Option<RainHistory>) {
+    let Some(src) = frost_source_id else {
+        return (None, None);
+    };
+    if client.config().frost_client_id.is_none() {
+        return (None, None);
+    }
     progress.ground_started();
     let to: DateTime<Utc> = Utc::now();
     let from = to - Duration::hours(history_hours);
     let result = frost::fetch_hourly_observations(client, src, from, to).await;
     let outcome = match &result {
-        Ok(history) => Some(replay_into_state(history, &DryingParams::default())),
+        Ok(history) => {
+            let surface = replay_into_state(history, &DryingParams::default());
+            let rain = compute_rain_history(history, history_hours);
+            (Some(surface), rain)
+        }
         Err(e) => {
             tracing::warn!("frost lookup failed, ground state will be reported as unknown: {e}",);
-            None
+            (None, None)
         }
     };
-    progress.ground_finished(outcome.is_some());
+    progress.ground_finished(outcome.0.is_some());
     outcome
+}
+
+/// Roll a list of Frost observations into a [`RainHistory`] aggregate.
+///
+/// Days are bucketed by **system local date** (`chrono::Local`) so a
+/// Saturday-evening downpour shows up under Saturday in Monday-morning
+/// reports rather than as an UTC-Sunday surprise.
+///
+/// `rain_days` counts distinct local dates where **the drying model's
+/// post-tørking accumulator actually crossed [`SURFACE_WETTED_MM`]**.
+/// This is the *same* condition the Bakke chip's drought counter uses
+/// to reset, so Regn 7d and Bakke can never disagree: if Bakke says
+/// "7 døgn uten regn", Regn 7d sees zero regndøgn over the matching
+/// window. A naive raw-precipitation threshold (≥0.3 mm in any hour)
+/// would still mis-count a 0.3 mm hour that got eaten by drying on a
+/// hot windy day, leaving the user with "7 døgn uten regn" alongside
+/// "1 regndøgn" — exactly what triggered this fix.
+///
+/// `total_mm` and `wettest_day` are restricted to the regndøgn-set, so
+/// every number on the chip describes rain that actually mattered. Sub-
+/// threshold drizzle that came and went without wetting the surface is
+/// excluded from the totals (it would otherwise show up as "0.4 mm siste
+/// 7 d" with zero regndøgn — confusing).
+///
+/// Returns `None` only when the call produced no usable observations at
+/// all. A non-empty-but-no-rain period yields `Some` with `total_mm = 0.0`
+/// and `rain_days = 0`; the renderer collapses that to a "tørt siste 7
+/// døgn" chip rather than hiding the row entirely (the user *did* check,
+/// and a dry week is the answer).
+pub fn compute_rain_history(
+    history: &[frost::HourlyObservation],
+    lookback_hours: i64,
+) -> Option<RainHistory> {
+    if history.is_empty() {
+        return None;
+    }
+    let params = DryingParams::default();
+
+    // Walk the drying model and collect every local date where the
+    // post-drying accumulator reached SURFACE_WETTED_MM at least once.
+    // Same gap-fill semantics as `replay_into_state` (the source of truth
+    // for the Bakke chip's drought counter), so the two views stay in
+    // lock-step by construction.
+    let mut wet_days = std::collections::BTreeSet::<NaiveDate>::new();
+    replay_for_each(history, &params, |hc, state| {
+        if state.accumulated_mm >= SURFACE_WETTED_MM {
+            wet_days.insert(hc.time.with_timezone(&Local).date_naive());
+        }
+    });
+
+    // Daily totals across raw observations, then restricted to the wet-day
+    // set so the chip's `total_mm` matches `rain_days`. A 0.3 mm drizzle
+    // day that never wet the surface contributes to neither.
+    let mut per_day_total: std::collections::BTreeMap<NaiveDate, f64> =
+        std::collections::BTreeMap::new();
+    for h in history {
+        let mm = h.precip_mm.unwrap_or(0.0);
+        if !mm.is_finite() || mm <= 0.0 {
+            continue;
+        }
+        let local_date = h.time.with_timezone(&Local).date_naive();
+        *per_day_total.entry(local_date).or_insert(0.0) += mm;
+    }
+    let wet_day_totals: std::collections::BTreeMap<NaiveDate, f64> = per_day_total
+        .into_iter()
+        .filter(|(d, _)| wet_days.contains(d))
+        .collect();
+
+    let total_mm: f64 = wet_day_totals.values().sum();
+    let (wettest_day, wettest_day_mm) = wet_day_totals
+        .iter()
+        .max_by(|a, b| {
+            a.1.partial_cmp(b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(b.0))
+        })
+        .map(|(d, mm)| (*d, *mm))
+        .unwrap_or_else(|| {
+            // No regndøgn at all — anchor the "wettest day" to the
+            // most recent observation's date so the field is always a
+            // valid date even though `wettest_day_mm == 0.0`. Renderers
+            // collapse the dry case before reading this field anyway.
+            let last = history.last().expect("checked non-empty above");
+            (last.time.with_timezone(&Local).date_naive(), 0.0)
+        });
+    let rain_days = wet_days.len() as u32;
+    Some(RainHistory {
+        total_mm,
+        wettest_day_mm,
+        wettest_day,
+        rain_days,
+        lookback_hours,
+    })
 }
 
 /// Replay a list of Frost observations through the drying model. Uses
@@ -500,6 +617,37 @@ async fn fetch_ground_state(
 /// elapsed time instead of treating the gap as if no time passed at all.
 /// Filler hours use neutral conditions and zero precipitation.
 fn replay_into_state(history: &[frost::HourlyObservation], p: &DryingParams) -> SurfaceState {
+    let mut final_state = SurfaceState::default();
+    let mut step_count: u32 = 0;
+    replay_for_each(history, p, |_, state| {
+        final_state = *state;
+        step_count += 1;
+    });
+    // Counter saturated against lookback ⇒ no reset ever happened, so
+    // the displayed day-count is a lower bound rather than the truth.
+    // The renderer surfaces this with a `+` suffix (e.g. "7+ døgn").
+    if step_count > 0 && final_state.hours_since_meaningful_rain as u32 >= step_count {
+        final_state.drought_at_lookback_cap = true;
+    }
+    final_state
+}
+
+/// Walk Frost observations through the drying model, invoking `on_step`
+/// after each step (gap-fill hours included). The callback receives the
+/// synthesised `HourlyConditions` for that step plus the post-step
+/// `SurfaceState`, which is enough to detect "this hour the surface was
+/// wet" (`state.accumulated_mm >= SURFACE_WETTED_MM`) without needing to
+/// re-derive the drying maths in two places.
+///
+/// This is the shared spine for both the surface-state replay
+/// ([`replay_into_state`]) and the rain-history aggregator
+/// ([`compute_rain_history`]). Keeping them on one walk guarantees the
+/// Bakke drought counter and the Regn 7d regndøgn-counter agree on what
+/// counts as "the surface got wet".
+fn replay_for_each<F>(history: &[frost::HourlyObservation], p: &DryingParams, mut on_step: F)
+where
+    F: FnMut(&HourlyConditions, &SurfaceState),
+{
     let mut state = SurfaceState::default();
     let mut prev_time: Option<DateTime<Utc>> = None;
     for h in history {
@@ -526,6 +674,7 @@ fn replay_into_state(history: &[frost::HourlyObservation], p: &DryingParams) -> 
                         resolution: Resolution::Hourly,
                     };
                     state = drying_step(state, &filler, p);
+                    on_step(&filler, &state);
                 }
             }
         }
@@ -543,9 +692,9 @@ fn replay_into_state(history: &[frost::HourlyObservation], p: &DryingParams) -> 
             resolution: Resolution::Hourly,
         };
         state = drying_step(state, &synth, p);
+        on_step(&synth, &state);
         prev_time = Some(h.time);
     }
-    state
 }
 
 #[cfg(test)]
@@ -728,6 +877,189 @@ mod tests {
         );
     }
 
+    // ---- compute_rain_history ----
+
+    #[test]
+    fn rain_history_none_for_empty_history() {
+        assert!(compute_rain_history(&[], 168).is_none());
+    }
+
+    #[test]
+    fn rain_history_dry_period_is_some_with_zeroes() {
+        // We *did* check Frost; the answer is "no rain". Renderer collapses
+        // the chip to "tørt siste N døgn" but the data layer must report
+        // truthfully rather than masquerade as Frost-was-down.
+        let now = Utc::now();
+        let history: Vec<frost::HourlyObservation> = (0..168)
+            .map(|i| frost::HourlyObservation {
+                time: now - Duration::hours(168 - i),
+                precip_mm: Some(0.0),
+                temp_c: None,
+                wind_ms: None,
+                humidity_pct: None,
+            })
+            .collect();
+        let h = compute_rain_history(&history, 168).expect("Some for non-empty input");
+        assert_eq!(h.total_mm, 0.0);
+        assert_eq!(h.rain_days, 0);
+        assert_eq!(h.lookback_hours, 168);
+    }
+
+    #[test]
+    fn rain_history_aggregates_days_in_local_tz() {
+        // Two distinct local-day rain events, each large enough to reset
+        // the drying counter (>1 mm/h dwarfs the per-hour drying rate).
+        let base = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 4, 18, 9, 0, 0).unwrap();
+        let mut history = Vec::new();
+        for i in 0..3 {
+            history.push(frost::HourlyObservation {
+                time: base + Duration::hours(i),
+                precip_mm: Some(1.5),
+                temp_c: None,
+                wind_ms: None,
+                humidity_pct: None,
+            });
+        }
+        history.push(frost::HourlyObservation {
+            time: base + Duration::hours(28),
+            precip_mm: Some(5.4),
+            temp_c: None,
+            wind_ms: None,
+            humidity_pct: None,
+        });
+        let h = compute_rain_history(&history, 168).expect("Some");
+        assert_eq!(h.rain_days, 2);
+        // Total is restricted to wet-day rows: 3 × 1.5 + 5.4 = 9.9.
+        assert!((h.total_mm - 9.9).abs() < 1e-6, "got {}", h.total_mm);
+        assert!(
+            (h.wettest_day_mm - 5.4).abs() < 1e-6,
+            "wettest day should be the 5.4 mm downpour, got {}",
+            h.wettest_day_mm,
+        );
+    }
+
+    #[test]
+    fn rain_history_subthreshold_drizzle_is_not_a_rain_day() {
+        // 0.1 mm × 5 hours = 0.5 mm cumulative — well over the daily-sum
+        // threshold, but no single hour reaches 0.3 mm and drying eats the
+        // accumulator below it every step. The drying counter never resets,
+        // so neither does the regndøgn count: Regn 7d and Bakke stay in
+        // lock-step on what "regnet" means.
+        let base = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 4, 24, 6, 0, 0).unwrap();
+        let history: Vec<frost::HourlyObservation> = (0..5)
+            .map(|i| frost::HourlyObservation {
+                time: base + Duration::hours(i),
+                precip_mm: Some(0.1),
+                temp_c: None,
+                wind_ms: None,
+                humidity_pct: None,
+            })
+            .collect();
+        let h = compute_rain_history(&history, 168).expect("Some");
+        assert_eq!(
+            h.rain_days, 0,
+            "5 × 0.1 mm should not count as a regndøgn — surface never wetted",
+        );
+        // Sub-threshold drizzle is excluded from total_mm too — otherwise
+        // the chip says "0.5 mm siste 7 d, 0 regndøgn", which raises the
+        // exact "where did that mm go?" question that makes the chip
+        // disagree with Bakke on the user's screen.
+        assert_eq!(
+            h.total_mm, 0.0,
+            "sub-threshold drizzle must not show up in total_mm either",
+        );
+    }
+
+    #[test]
+    fn rain_history_single_strong_hour_counts_as_rain_day() {
+        // 1.0 mm in one hour easily clears the drying rate, so the
+        // accumulator reaches >= SURFACE_WETTED_MM and the drought counter
+        // resets — that's a regndøgn.
+        let now = Utc::now();
+        let history = vec![frost::HourlyObservation {
+            time: now - Duration::hours(2),
+            precip_mm: Some(1.0),
+            temp_c: None,
+            wind_ms: None,
+            humidity_pct: None,
+        }];
+        let h = compute_rain_history(&history, 168).expect("Some");
+        assert_eq!(h.rain_days, 1);
+        assert!((h.total_mm - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rain_history_threshold_hour_eaten_by_drying_does_not_count() {
+        // Exactly 0.3 mm in one hour, no carry-over. The drying step
+        // applies a non-zero drying rate (warm, dry-ish defaults) so
+        // `after_drying < 0.3` even though `precip_mm == SURFACE_WETTED_MM`.
+        // This is precisely the case the user flagged: "0.4 mm siste 7 d,
+        // våtest day 0.3 mm, 1 regndøgn" alongside a Bakke "7 døgn uten
+        // regn". With the drying-replay-based rule, this collapses to
+        // zero regndøgn, in step with Bakke.
+        let now = Utc::now();
+        let history = vec![frost::HourlyObservation {
+            time: now - Duration::hours(2),
+            // Warm + dry-ish so drying eats the 0.3 mm. The defaults in
+            // replay_for_each set 70% RH / 70% cloud when fields are None,
+            // so we set temp/wind explicitly to push drying up.
+            precip_mm: Some(0.3),
+            temp_c: Some(20.0),
+            wind_ms: Some(5.0),
+            humidity_pct: Some(40.0),
+        }];
+        let h = compute_rain_history(&history, 168).expect("Some");
+        assert_eq!(
+            h.rain_days, 0,
+            "0.3 mm eaten by drying must not count as a regndøgn (matches Bakke)",
+        );
+        assert_eq!(h.total_mm, 0.0);
+    }
+
+    #[test]
+    fn replay_marks_drought_at_lookback_cap_when_no_rain_in_history() {
+        // 168 hours of dry observations — the counter ends at ≥168 with
+        // no reset, so the chip's day-count is a lower bound. Flag it.
+        let now = Utc::now();
+        let history: Vec<frost::HourlyObservation> = (0..168)
+            .map(|i| frost::HourlyObservation {
+                time: now - Duration::hours(168 - i),
+                precip_mm: Some(0.0),
+                temp_c: None,
+                wind_ms: None,
+                humidity_pct: None,
+            })
+            .collect();
+        let state = replay_into_state(&history, &DryingParams::default());
+        assert!(
+            state.drought_at_lookback_cap,
+            "all-dry history should set the cap flag",
+        );
+    }
+
+    #[test]
+    fn replay_does_not_mark_cap_when_history_contains_rain() {
+        // A reset somewhere in the lookback ⇒ the day-count is exact, not
+        // a lower bound. No `+` should be appended in that case.
+        let now = Utc::now();
+        let mut history: Vec<frost::HourlyObservation> = (0..168)
+            .map(|i| frost::HourlyObservation {
+                time: now - Duration::hours(168 - i),
+                precip_mm: Some(0.0),
+                temp_c: None,
+                wind_ms: None,
+                humidity_pct: None,
+            })
+            .collect();
+        // One real rain hour 96h ago.
+        history[72].precip_mm = Some(2.0);
+        let state = replay_into_state(&history, &DryingParams::default());
+        assert!(
+            !state.drought_at_lookback_cap,
+            "history with a reset should not set the cap flag",
+        );
+    }
+
     // ---- project_states_for_days ----
 
     fn ts(h: i64) -> DateTime<Utc> {
@@ -756,6 +1088,7 @@ mod tests {
         let initial = SurfaceState {
             accumulated_mm: 1.5,
             hours_since_meaningful_rain: 12.0,
+            drought_at_lookback_cap: false,
         };
         let hours: Vec<_> = (0..24).map(dry_hour).collect();
         let states = project_states_for_days(initial, &hours, &[ts(0)], &DryingParams::default());
@@ -767,6 +1100,7 @@ mod tests {
         let initial = SurfaceState {
             accumulated_mm: 2.0,
             hours_since_meaningful_rain: 0.0,
+            drought_at_lookback_cap: false,
         };
         // 4 dry days (96 hours), snapshot at start of each day.
         let hours: Vec<_> = (0..96).map(dry_hour).collect();
@@ -815,6 +1149,7 @@ mod tests {
         let initial = SurfaceState {
             accumulated_mm: 0.5,
             hours_since_meaningful_rain: 30.0,
+            drought_at_lookback_cap: false,
         };
         let hours: Vec<_> = (10..20).map(dry_hour).collect();
         let states = project_states_for_days(initial, &hours, &[ts(0)], &DryingParams::default());

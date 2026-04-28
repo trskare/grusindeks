@@ -36,9 +36,25 @@ pub struct Config {
     #[serde(default)]
     pub frost: FrostConfig,
 
+    /// Vis "Regn 7d"-footer-chip når Frost-historikk er tilgjengelig.
+    /// Default `true` — sett til `false` for å skjule chipen i utskriften
+    /// uten å skru av selve Frost-oppslaget (drying-modellen bruker
+    /// dataene videre).
+    #[serde(default = "default_true")]
+    pub show_rain_history: bool,
+
+    /// Vis "Tall"-footer-chip med rå-tall (temp-spenn, total nedbør,
+    /// maks vind/kast) for det viste vinduet/dagen. Default `true`.
+    #[serde(default = "default_true")]
+    pub show_window_stats: bool,
+
     /// Named ride locations.
     #[serde(default)]
     pub places: std::collections::BTreeMap<String, PlaceConfig>,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 /// Local-time window used to clip each day in the multi-day forecast.
@@ -182,6 +198,10 @@ default_place = "oslo"
 # day. Default 10:00-22:00. Narrow it if you only ride mornings, widen
 # it if you also want pre-dawn rides factored in.
 # daytime_window = "10:00-22:00"
+
+# Optional: extra footer chips. Both default to true.
+# show_rain_history = true   # "Regn 7d" — total mm, wettest day, rain days
+# show_window_stats = true   # "Tall" — temp range, total precip, max wind/gust
 
 [frost]
 # Register a free client_id at https://frost.met.no/auth/requestCredentials.html

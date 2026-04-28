@@ -104,9 +104,19 @@ og rapporten består av:
 - **Sub-score-breakdown** under dagens rad (i dag som default,
   `--verbose` for alle dager) som tre-grener (`├─ Temp`, `├─ Vind`,
   `├─ Nedbør`, `└─ Bakke`).
+- **Per-dag `Tall`-rad** under sub-score-treet (i dag som default, alle
+  dager i `--verbose`) med kompakte rå-tall: temp-spenn, total nedbør,
+  maks vind og evt. kraftigste kast. Hvert tall er fargekodet etter sin
+  egen sub-score (rødt = ubehagelig, grønt = behagelig), så øyet leser
+  alvorlighetsgraden på tallet alene.
 - **Footer-chips** — `Bakke`-tilstand når kjent (én gang for hele
-  prognosen, ikke per dag), `Skala`-legenden over score-bucketene, og
-  en `~`-fotnote når noen dag har lav konfidens.
+  prognosen, ikke per dag), `Regn 7d` med totalt mm / våteste døgn /
+  antall regndøgn fra Frost-historikken (kollapser til `tørt siste
+  N døgn` når ingen dag hadde meningsfull regn — samme terskel som
+  Bakke-drought-telleren), `Skala`-legenden over score-bucketene, og en
+  `~`-fotnote når noen dag har lav konfidens. `Regn 7d` og `Tall` kan
+  skrus av per kjøring (`--no-rain-history` / `--no-window-stats`) eller
+  permanent i config (`show_rain_history` / `show_window_stats`).
 - **`★ Beste luke`** (kun `--verbose`) — et 3-timers sub-vindu som
   scorer minst 10 poeng bedre enn dagen ellers. Linja avsluttes med en
   ett-ords forklaring som peker på aksen der vinduet trekker mest fra
@@ -139,15 +149,17 @@ Grusindeks · Oslo · 20 km · 6 dager
       ├─ Temp      █████▒▒▒▒▒  56
       ├─ Vind      ███████▉▒▒  88
       ├─ Nedbør    ██▍▒▒▒▒▒▒▒  27
-      └─ Bakke     ███████▉▒▒  87
+      ├─ Bakke     ███████▉▒▒  87
+      └─ Tall      11–14 °C · 1.4 mm · 6 m/s (kast 9)
   i morgen     ☀   ████████▌▒  95
   on 29. apr   ☁   ██████▏▒▒▒  68
   to 30. apr   ☀   ████████▌▒  95
   fr 1. mai    🌧   █████▍▒▒▒▒  60   ~
 
-  Bakke   tørt og løst dekke (4 døgn uten regn)
-  Skala   0 dårlig · 25 marginalt · 45 ok · 65 bra · 85 strålende
-  ~       lav konfidens (>60 t — 6-t oppløsning fra MET)
+  Bakke     tørt og løst dekke (4 døgn uten regn)
+  Regn 7d   3.2 mm siste 7 døgn · våtest 22. apr (2.4 mm) · 1 regndøgn
+  Skala     0 dårlig · 25 marginalt · 45 ok · 65 bra · 85 strålende
+  ~         lav konfidens (>60 t — 6-t oppløsning fra MET)
 ```
 
 Bar-tegnene bruker halv-blokks-glyfer (`▏▎▍▌▋▊▉█`) for at hver
@@ -179,11 +191,13 @@ Grusindeks · Oslo · 20 km · 6 dagar
       ├─ Temp      █████▒▒▒▒▒  56
       ├─ Vind      ███████▉▒▒  88
       ├─ Nederbörd ██▍▒▒▒▒▒▒▒  27
-      └─ Mark      ███████▉▒▒  87
+      ├─ Mark      ███████▉▒▒  87
+      └─ Tal       11–14 °C · 1.4 mm · 6 m/s (by 9)
 
-  Mark    torrt och löst underlag (4 dygn utan regn)
-  Skala   0 dåligt · 25 marginellt · 45 ok · 65 bra · 85 strålande
-  ~       låg tillförlitlighet (>60 h — 6-h upplösning från MET)
+  Mark      torrt och löst underlag (4 dygn utan regn)
+  Regn 7d   3.2 mm senaste 7 dygn · blötast 22. apr (2.4 mm) · 1 regndag
+  Skala     0 dåligt · 25 marginellt · 45 ok · 65 bra · 85 strålande
+  ~         låg tillförlitlighet (>60 h — 6-h upplösning från MET)
 ```
 
 ### Config
@@ -205,6 +219,11 @@ default_place = "oslo"
 
 # Valgfritt: språk i utskrift. "norwegian" (default) eller "swedish".
 # language = "swedish"
+
+# Valgfritt: skru av footer-chips. Begge defaulter til true.
+# show_rain_history = false   # skjuler "Regn 7d"-linja
+# show_window_stats = false   # skjuler "Tall"-linja
+# (Kan også overstyres per kjøring: --no-rain-history / --no-window-stats)
 
 [frost]
 # Registrer en gratis client_id på
