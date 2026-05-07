@@ -814,15 +814,23 @@ fn write_day_row(
         return;
     }
 
-    // Verbose-only: full penalty list under each day.
+    // Verbose-only: full penalty list under each day, then any positive
+    // context lines ("Sol bidrar med +2.8 °C ...") under the same tree.
+    let highlight_take = center.score.highlights.len();
+    let total_rows = penalty_take + highlight_take;
     for (i, penalty) in center.score.penalties.iter().take(penalty_take).enumerate() {
-        let is_last = i + 1 == penalty_take;
+        let is_last = i + 1 == total_rows;
         let branch = if is_last { "└─" } else { "├─" };
         let _ = writeln!(
             out,
             "{BREAKDOWN_INDENT}{branch} {}",
             format_penalty_line(penalty, lang)
         );
+    }
+    for (i, highlight) in center.score.highlights.iter().enumerate() {
+        let is_last = penalty_take + i + 1 == total_rows;
+        let branch = if is_last { "└─" } else { "├─" };
+        let _ = writeln!(out, "{BREAKDOWN_INDENT}{branch} ☀ {highlight}");
     }
 }
 

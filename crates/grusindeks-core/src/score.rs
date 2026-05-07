@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::drying::SurfaceState;
-use crate::felt_temp::apparent_temp;
+use crate::felt_temp::{apparent_temp_with_sun, solar_warming_c, SOLAR_NEGLIGIBLE_C};
 use crate::lang::Language;
 use crate::types::{HourlyConditions, RideWindow};
 
@@ -232,6 +232,12 @@ pub struct Grusindeks {
     /// the most important ones.
     #[serde(default)]
     pub penalties: Vec<Penalty>,
+    /// Positive context lines that shouldn't show up as penalties — e.g.
+    /// "Sol bidrar med +2.8 °C i følt temperatur" on a sunny cold day.
+    /// Already localized in the language passed to [`score`]; renderers
+    /// can surface them verbatim. Empty when nothing notable to flag.
+    #[serde(default)]
+    pub highlights: Vec<String>,
     /// Raw aggregates over the scored window. Always present; NaN min/max
     /// indicates the empty-window path.
     #[serde(default = "WindowStats::empty")]
@@ -310,6 +316,7 @@ pub fn score(
                 severity: Severity::Critical,
                 message,
             }],
+            highlights: Vec::new(),
             stats: WindowStats::empty(),
         };
     }
@@ -335,6 +342,26 @@ pub fn score(
         let (sum, count) = in_window
             .iter()
             .filter_map(|h| h.relative_humidity)
+            .filter(|x| x.is_finite())
+            .fold((0.0_f64, 0_usize), |(s, c), v| (s + v, c + 1));
+        (count > 0).then(|| sum / count as f64)
+    };
+    // Cloud cover and UV are both `Option<f64>` per hour: average only
+    // the present-and-finite values. Either may be missing in long-range
+    // forecasts; `solar_warming_c` handles each None case independently
+    // (cloud-only fallback, otherwise zero) so we don't paper over gaps.
+    let mean_cloud_opt = {
+        let (sum, count) = in_window
+            .iter()
+            .filter_map(|h| h.cloud_area_fraction)
+            .filter(|x| x.is_finite())
+            .fold((0.0_f64, 0_usize), |(s, c), v| (s + v, c + 1));
+        (count > 0).then(|| sum / count as f64)
+    };
+    let mean_uv_opt = {
+        let (sum, count) = in_window
+            .iter()
+            .filter_map(|h| h.uv_index_clear_sky)
             .filter(|x| x.is_finite())
             .fold((0.0_f64, 0_usize), |(s, c), v| (s + v, c + 1));
         (count > 0).then(|| sum / count as f64)
@@ -381,7 +408,9 @@ pub fn score(
     };
     let effective_precip = 0.5 * mean_precip + 0.5 * max_precip_clamped;
 
-    let felt_temp = apparent_temp(mean_temp, mean_wind, mean_humidity_opt);
+    let solar_warming = solar_warming_c(mean_cloud_opt, mean_uv_opt, mean_wind);
+    let felt_temp =
+        apparent_temp_with_sun(mean_temp, mean_wind, mean_humidity_opt, mean_cloud_opt, mean_uv_opt);
     let breakdown = ScoreBreakdown {
         temperature: temp_subscore(felt_temp),
         wind: wind_subscore(mean_wind, max_gust_opt),
@@ -469,6 +498,11 @@ pub fn score(
     // Worst penalty first so the renderer can take the head.
     penalties.sort_by(|a, b| b.severity.cmp(&a.severity));
 
+    let mut highlights = Vec::new();
+    if let Some(msg) = sun_highlight(solar_warming, mean_temp, lang) {
+        highlights.push(msg);
+    }
+
     let stats = WindowStats {
         mean_temp_c: mean_temp,
         min_temp_c: min_temp,
@@ -490,8 +524,36 @@ pub fn score(
         label: label_for(total, lang),
         hard_capped,
         penalties,
+        highlights,
         stats,
     }
+}
+
+/// Builds the "sun is helping" highlight line, or `None` when the
+/// solar contribution to felt-T is negligible (`< SOLAR_NEGLIGIBLE_C`).
+/// Above 1.0 °C of warming on a cold day (air < 15 °C) we lead with the
+/// stronger phrasing — the rider feels real radiative warmth there, not
+/// just a rounding-error °C — otherwise we report the bare contribution.
+fn sun_highlight(solar_warming: f64, mean_temp: f64, lang: Language) -> Option<String> {
+    if !solar_warming.is_finite() || solar_warming < SOLAR_NEGLIGIBLE_C {
+        return None;
+    }
+    let cold_and_strong = mean_temp.is_finite() && mean_temp < 15.0 && solar_warming >= 1.0;
+    let msg = match (lang, cold_and_strong) {
+        (Language::Norwegian, true) => format!(
+            "klart vær: solen hjelper å holde varmen (+{solar_warming:.1} °C i følt temperatur)"
+        ),
+        (Language::Norwegian, false) => {
+            format!("sol bidrar med +{solar_warming:.1} °C i følt temperatur")
+        }
+        (Language::Swedish, true) => format!(
+            "klar himmel: solen hjälper att hålla värmen (+{solar_warming:.1} °C i upplevd temperatur)"
+        ),
+        (Language::Swedish, false) => {
+            format!("sol bidrar med +{solar_warming:.1} °C i upplevd temperatur")
+        }
+    };
+    Some(msg)
 }
 
 /// Severity bucketing for sub-score deficits. `Critical` is reserved for
@@ -2126,5 +2188,151 @@ mod tests {
             Language::Norwegian,
         );
         assert_eq!(s.breakdown.temperature, 100);
+    }
+
+    // ---- solar warming integration ----
+
+    fn make_hours(
+        temp_c: f64,
+        wind_ms: f64,
+        cloud_pct: Option<f64>,
+        uv: Option<f64>,
+    ) -> Vec<HourlyConditions> {
+        (14..17)
+            .map(|h| HourlyConditions {
+                cloud_area_fraction: cloud_pct,
+                uv_index_clear_sky: uv,
+                relative_humidity: Some(60.0),
+                ..HourlyConditions::minimal(t(h), temp_c, wind_ms, 0.0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cold_sunny_day_scores_higher_than_overcast() {
+        // 8 °C base — chilly. Sun should push felt-T toward the 16-22 °C
+        // optimum and lift the temperature sub-score noticeably.
+        let win = RideWindow::from_hours(t(14), 3);
+        let sunny = score(
+            &make_hours(8.0, 2.0, Some(0.0), Some(crate::felt_temp::UV_NORDIC_PEAK)),
+            win,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        let overcast = score(
+            &make_hours(8.0, 2.0, Some(100.0), Some(crate::felt_temp::UV_NORDIC_PEAK)),
+            win,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert!(
+            sunny.breakdown.temperature > overcast.breakdown.temperature,
+            "sunny temp {} should beat overcast {}",
+            sunny.breakdown.temperature,
+            overcast.breakdown.temperature,
+        );
+        assert!(sunny.total >= overcast.total);
+    }
+
+    #[test]
+    fn hot_sunny_day_scores_lower_than_overcast() {
+        // 28 °C base — already past the 22 °C plateau. Sun pushes felt-T
+        // further into the heat-stress band, dropping the temp sub-score.
+        // This is the asymmetry that the temperature curve produces "for
+        // free" once we feed it a sun-aware felt-T.
+        let win = RideWindow::from_hours(t(14), 3);
+        let sunny = score(
+            &make_hours(28.0, 2.0, Some(0.0), Some(crate::felt_temp::UV_NORDIC_PEAK)),
+            win,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        let overcast = score(
+            &make_hours(28.0, 2.0, Some(100.0), Some(crate::felt_temp::UV_NORDIC_PEAK)),
+            win,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert!(
+            sunny.breakdown.temperature < overcast.breakdown.temperature,
+            "sunny temp {} should be lower than overcast {} on a hot day",
+            sunny.breakdown.temperature,
+            overcast.breakdown.temperature,
+        );
+    }
+
+    #[test]
+    fn cold_sunny_day_emits_warmth_highlight_norwegian() {
+        let s = score(
+            &make_hours(8.0, 2.0, Some(0.0), Some(crate::felt_temp::UV_NORDIC_PEAK)),
+            RideWindow::from_hours(t(14), 3),
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert!(
+            s.highlights.iter().any(|h| h.contains("solen hjelper")
+                || h.contains("sol bidrar")),
+            "expected sun highlight, got {:?}",
+            s.highlights,
+        );
+    }
+
+    #[test]
+    fn cold_sunny_day_emits_warmth_highlight_swedish() {
+        let s = score(
+            &make_hours(8.0, 2.0, Some(0.0), Some(crate::felt_temp::UV_NORDIC_PEAK)),
+            RideWindow::from_hours(t(14), 3),
+            Some(SurfaceState::default()),
+            Language::Swedish,
+        );
+        assert!(
+            s.highlights.iter().any(|h| h.contains("solen hjälper")
+                || h.contains("sol bidrar")),
+            "expected Swedish sun highlight, got {:?}",
+            s.highlights,
+        );
+    }
+
+    #[test]
+    fn overcast_day_has_no_sun_highlight() {
+        let s = score(
+            &make_hours(8.0, 2.0, Some(100.0), Some(crate::felt_temp::UV_NORDIC_PEAK)),
+            RideWindow::from_hours(t(14), 3),
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert!(
+            s.highlights.is_empty(),
+            "overcast should produce no sun highlight, got {:?}",
+            s.highlights,
+        );
+    }
+
+    #[test]
+    fn night_uv_zero_yields_no_highlight() {
+        // Clear sky but UV=0 (night) → no warming, no highlight.
+        let s = score(
+            &make_hours(8.0, 2.0, Some(0.0), Some(0.0)),
+            RideWindow::from_hours(t(14), 3),
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert!(s.highlights.is_empty(), "got {:?}", s.highlights);
+    }
+
+    #[test]
+    fn missing_sun_data_keeps_existing_score_unchanged() {
+        // No cloud / no UV — felt-T must equal pre-sun-feature behaviour.
+        // Reference is pulled from the now-renamed apparent_temp call.
+        let win = RideWindow::from_hours(t(14), 3);
+        let s = score(
+            &make_hours(8.0, 2.0, None, None),
+            win,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert!(s.highlights.is_empty());
+        // Sanity: the score should be in a reasonable cool-day band.
+        assert!((40..=90).contains(&s.total), "got total {}", s.total);
     }
 }
