@@ -301,12 +301,20 @@ mod tests {
     #[test]
     fn solar_warming_clear_sky_peak_uv_still_air() {
         // Clear sky, peak Nordic UV, zero ambient wind → at SOLAR_MAX_C.
-        approx(solar_warming_c(Some(0.0), Some(UV_NORDIC_PEAK), 0.0), SOLAR_MAX_C, 1e-9);
+        approx(
+            solar_warming_c(Some(0.0), Some(UV_NORDIC_PEAK), 0.0),
+            SOLAR_MAX_C,
+            1e-9,
+        );
     }
 
     #[test]
     fn solar_warming_overcast_returns_zero() {
-        approx(solar_warming_c(Some(100.0), Some(UV_NORDIC_PEAK), 0.0), 0.0, 1e-9);
+        approx(
+            solar_warming_c(Some(100.0), Some(UV_NORDIC_PEAK), 0.0),
+            0.0,
+            1e-9,
+        );
     }
 
     #[test]
@@ -319,7 +327,11 @@ mod tests {
     fn solar_warming_missing_uv_uses_half_boost() {
         // No UV reading + clear sky → falls back to half SOLAR_MAX_C, no
         // wind. Keeps long-range forecasts sun-aware without overclaiming.
-        approx(solar_warming_c(Some(0.0), None, 0.0), 0.5 * SOLAR_MAX_C, 1e-9);
+        approx(
+            solar_warming_c(Some(0.0), None, 0.0),
+            0.5 * SOLAR_MAX_C,
+            1e-9,
+        );
     }
 
     #[test]
@@ -370,7 +382,10 @@ mod tests {
         // wind-chilled base.
         let base = apparent_temp(5.0, 2.0, None);
         let with_sun = apparent_temp_with_sun(5.0, 2.0, None, Some(0.0), Some(UV_NORDIC_PEAK));
-        assert!(with_sun > base, "with_sun {with_sun} should exceed base {base}");
+        assert!(
+            with_sun > base,
+            "with_sun {with_sun} should exceed base {base}"
+        );
         // Magnitude check: warming should be inside [2.5, SOLAR_MAX_C].
         let delta = with_sun - base;
         assert!((2.5..=SOLAR_MAX_C).contains(&delta), "got delta {delta}");
@@ -388,8 +403,12 @@ mod tests {
         // 28 °C heat-index base + sun → even hotter felt-T. The score
         // layer's temp-curve will then penalise correctly.
         let base = apparent_temp(28.0, 2.0, Some(75.0));
-        let with_sun = apparent_temp_with_sun(28.0, 2.0, Some(75.0), Some(0.0), Some(UV_NORDIC_PEAK));
-        assert!(with_sun > base, "with_sun {with_sun} should exceed base {base}");
+        let with_sun =
+            apparent_temp_with_sun(28.0, 2.0, Some(75.0), Some(0.0), Some(UV_NORDIC_PEAK));
+        assert!(
+            with_sun > base,
+            "with_sun {with_sun} should exceed base {base}"
+        );
     }
 
     #[test]

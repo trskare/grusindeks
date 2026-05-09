@@ -409,8 +409,13 @@ pub fn score(
     let effective_precip = 0.5 * mean_precip + 0.5 * max_precip_clamped;
 
     let solar_warming = solar_warming_c(mean_cloud_opt, mean_uv_opt, mean_wind);
-    let felt_temp =
-        apparent_temp_with_sun(mean_temp, mean_wind, mean_humidity_opt, mean_cloud_opt, mean_uv_opt);
+    let felt_temp = apparent_temp_with_sun(
+        mean_temp,
+        mean_wind,
+        mean_humidity_opt,
+        mean_cloud_opt,
+        mean_uv_opt,
+    );
     let breakdown = ScoreBreakdown {
         temperature: temp_subscore(felt_temp),
         wind: wind_subscore(mean_wind, max_gust_opt),
@@ -2220,7 +2225,12 @@ mod tests {
             Language::Norwegian,
         );
         let overcast = score(
-            &make_hours(8.0, 2.0, Some(100.0), Some(crate::felt_temp::UV_NORDIC_PEAK)),
+            &make_hours(
+                8.0,
+                2.0,
+                Some(100.0),
+                Some(crate::felt_temp::UV_NORDIC_PEAK),
+            ),
             win,
             Some(SurfaceState::default()),
             Language::Norwegian,
@@ -2248,7 +2258,12 @@ mod tests {
             Language::Norwegian,
         );
         let overcast = score(
-            &make_hours(28.0, 2.0, Some(100.0), Some(crate::felt_temp::UV_NORDIC_PEAK)),
+            &make_hours(
+                28.0,
+                2.0,
+                Some(100.0),
+                Some(crate::felt_temp::UV_NORDIC_PEAK),
+            ),
             win,
             Some(SurfaceState::default()),
             Language::Norwegian,
@@ -2270,8 +2285,9 @@ mod tests {
             Language::Norwegian,
         );
         assert!(
-            s.highlights.iter().any(|h| h.contains("solen hjelper")
-                || h.contains("sol bidrar")),
+            s.highlights
+                .iter()
+                .any(|h| h.contains("solen hjelper") || h.contains("sol bidrar")),
             "expected sun highlight, got {:?}",
             s.highlights,
         );
@@ -2286,8 +2302,9 @@ mod tests {
             Language::Swedish,
         );
         assert!(
-            s.highlights.iter().any(|h| h.contains("solen hjälper")
-                || h.contains("sol bidrar")),
+            s.highlights
+                .iter()
+                .any(|h| h.contains("solen hjälper") || h.contains("sol bidrar")),
             "expected Swedish sun highlight, got {:?}",
             s.highlights,
         );
@@ -2296,7 +2313,12 @@ mod tests {
     #[test]
     fn overcast_day_has_no_sun_highlight() {
         let s = score(
-            &make_hours(8.0, 2.0, Some(100.0), Some(crate::felt_temp::UV_NORDIC_PEAK)),
+            &make_hours(
+                8.0,
+                2.0,
+                Some(100.0),
+                Some(crate::felt_temp::UV_NORDIC_PEAK),
+            ),
             RideWindow::from_hours(t(14), 3),
             Some(SurfaceState::default()),
             Language::Norwegian,
