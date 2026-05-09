@@ -7,15 +7,15 @@
 
 use std::fmt::Write as _;
 
-use chrono::{DateTime, Datelike, Local, NaiveDate, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, Timelike, Utc};
 use grusindeks_core::daily::Confidence;
 use grusindeks_core::lang::Language;
-use grusindeks_core::score::{Penalty, WindowStats};
+use grusindeks_core::score::{Penalty, Severity, WindowStats};
 use grusindeks_core::types::RideWindow;
 use unicode_width::UnicodeWidthStr;
 
 use crate::aggregate::{
-    AggregateScore, DayAggregate, HourlyForecast, MultiDayForecast, RainHistory,
+    AggregateScore, DayAggregate, HourlyForecast, MultiDayForecast, NowcastAlert, RainHistory,
 };
 use crate::theme;
 
@@ -145,6 +145,100 @@ fn local_date(t: DateTime<Utc>) -> String {
     t.with_timezone(&Local).format("%Y-%m-%d").to_string()
 }
 
+/// Single-line banner that surfaces the radar nowcast above the regular
+/// report. Only writes anything when `alert` is `Some` — call sites pass
+/// the option-shaped field straight through.
+///
+/// Tone (`Severity::Critical` red vs. `Severity::Minor` yellow) follows
+/// the same red/yellow split the penalty list uses, so the user
+/// recognises the visual weight at a glance:
+/// - **Critical** when the radar sees a steady downpour (`peak_mm_h ≥ 0.5`
+///   *and* the rain lasts ≥ 30 min) or rain is imminent (≤ 30 min away).
+/// - **Minor** otherwise — light, brief, or far enough out (~60–120 min)
+///   that the extrapolation has slack.
+fn write_nowcast_banner(out: &mut String, alert: Option<&NowcastAlert>, lang: Language) {
+    let Some(a) = alert else {
+        return;
+    };
+    let now = Utc::now();
+    let until_first = a.first_rain_at - now;
+    let duration = a.last_rain_at - a.first_rain_at;
+    let imminent = until_first <= ChronoDuration::minutes(30);
+    let heavy = a.peak_mm_h >= 0.5 && duration >= ChronoDuration::minutes(30);
+    let severity = if imminent || heavy {
+        Severity::Critical
+    } else {
+        Severity::Minor
+    };
+
+    let mut parts = String::new();
+    let _ = write!(
+        parts,
+        "{}  {}: ",
+        theme::paint_severity("⚠", severity),
+        theme::paint_severity(radar_label(lang), severity),
+    );
+    let _ = write!(
+        parts,
+        "{} {} ",
+        rain_word(lang),
+        format_time_until(until_first, lang),
+    );
+    let peak_label = match lang {
+        Language::Norwegian => "topp",
+        Language::Swedish => "topp",
+    };
+    let _ = write!(
+        parts,
+        "({peak_label} {:.1} mm/h kl {})",
+        a.peak_mm_h,
+        local_hm(a.peak_at),
+    );
+    let _ = writeln!(out, "{parts}");
+    let _ = writeln!(out);
+}
+
+fn radar_label(lang: Language) -> &'static str {
+    match lang {
+        Language::Norwegian => "Radar",
+        Language::Swedish => "Radar",
+    }
+}
+
+fn rain_word(lang: Language) -> &'static str {
+    match lang {
+        Language::Norwegian => "regn",
+        Language::Swedish => "regn",
+    }
+}
+
+/// Format `delta` as "om N min" / "om Xt Ym" / "nå". Negative deltas
+/// shouldn't reach this path (`build_nowcast_alert` filters them), but
+/// we render them as "nå" defensively rather than as "om -3 min".
+fn format_time_until(delta: ChronoDuration, lang: Language) -> String {
+    let total_min = delta.num_minutes();
+    if total_min <= 0 {
+        return match lang {
+            Language::Norwegian => "nå".into(),
+            Language::Swedish => "nu".into(),
+        };
+    }
+    let prefix = match lang {
+        Language::Norwegian => "om",
+        Language::Swedish => "om",
+    };
+    if total_min < 60 {
+        return format!("{prefix} {total_min} min");
+    }
+    let hours = total_min / 60;
+    let mins = total_min % 60;
+    if mins == 0 {
+        format!("{prefix} {hours}t")
+    } else {
+        format!("{prefix} {hours}t {mins} min")
+    }
+}
+
 /// Render the aggregate score for a single ride window. Penalties (when
 /// present) are listed under the bar block so the user immediately sees
 /// what dragged the score down. `verbose` lifts the cap on penalty count
@@ -167,6 +261,7 @@ pub fn render_human(
     );
     let _ = writeln!(out, "{}", theme::paint_accent(&header));
     let _ = writeln!(out, "{}", theme::paint_dim(&"═".repeat(63)));
+    write_nowcast_banner(&mut out, agg.nowcast_alert.as_ref(), lang);
 
     // Headline total + label, both painted with the score colour.
     let total_word = match lang {
@@ -316,6 +411,7 @@ pub fn render_multi_day(
     let title = format!("Grusindeks · {label} · {radius_km:.0} km · {n} {day_word}");
     let _ = writeln!(out, "{}", theme::paint_accent(&title));
     let _ = writeln!(out);
+    write_nowcast_banner(&mut out, forecast.nowcast_alert.as_ref(), lang);
 
     let today_local: NaiveDate = Local::now().date_naive();
 
@@ -1185,6 +1281,7 @@ pub fn render_hourly(
         format!("Grusindeks · {label} · {radius_km:.0} km · {n} {day_word} · {title_suffix}");
     let _ = writeln!(out, "{}", theme::paint_accent(&title));
     let _ = writeln!(out);
+    write_nowcast_banner(&mut out, forecast.nowcast_alert.as_ref(), lang);
 
     if forecast.header_hours.is_empty() || forecast.days.is_empty() {
         let empty_msg = match lang {
@@ -1425,6 +1522,57 @@ mod tests {
         }
     }
 
+    // ---- Nowcast banner ----
+
+    fn alert_with(peak_mm_h: f64, first_in_min: i64, last_in_min: i64) -> NowcastAlert {
+        let now = Utc::now();
+        NowcastAlert {
+            first_rain_at: now + ChronoDuration::minutes(first_in_min),
+            last_rain_at: now + ChronoDuration::minutes(last_in_min),
+            peak_at: now + ChronoDuration::minutes((first_in_min + last_in_min) / 2),
+            peak_mm_h,
+        }
+    }
+
+    #[test]
+    fn nowcast_banner_omitted_when_alert_is_none() {
+        let mut out = String::new();
+        write_nowcast_banner(&mut out, None, Language::Norwegian);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn nowcast_banner_includes_peak_and_label_for_imminent_rain() {
+        let mut out = String::new();
+        let a = alert_with(0.4, 15, 25);
+        write_nowcast_banner(&mut out, Some(&a), Language::Norwegian);
+        assert!(out.contains("Radar"), "got {out}");
+        assert!(out.contains("regn"), "got {out}");
+        assert!(out.contains("0.4 mm/h"), "got {out}");
+        // 15 min away → "om 15 min" or near.
+        assert!(out.contains(" min"), "got {out}");
+    }
+
+    #[test]
+    fn nowcast_banner_uses_hours_minutes_for_far_alerts() {
+        let mut out = String::new();
+        let a = alert_with(0.2, 95, 100);
+        write_nowcast_banner(&mut out, Some(&a), Language::Norwegian);
+        assert!(out.contains("1t"), "expected hour fragment in {out}");
+    }
+
+    #[test]
+    fn nowcast_banner_swedish_uses_swedish_words() {
+        let mut out = String::new();
+        let a = alert_with(0.4, 25, 35);
+        write_nowcast_banner(&mut out, Some(&a), Language::Swedish);
+        assert!(out.contains("Radar"), "got {out}");
+        assert!(
+            out.contains("om "),
+            "Swedish should still use 'om' prefix: {out}"
+        );
+    }
+
     #[test]
     fn human_output_includes_total_and_breakdown_labels() {
         let win = RideWindow::from_hours(t(14), 3);
@@ -1578,6 +1726,7 @@ mod tests {
         let forecast = MultiDayForecast {
             days: vec![day],
             rain_history: None,
+            nowcast_alert: None,
         };
         let out = render_multi_day(
             "Oslo",
@@ -1624,6 +1773,7 @@ mod tests {
         let forecast = MultiDayForecast {
             days: vec![day],
             rain_history: None,
+            nowcast_alert: None,
         };
         let out = render_multi_day(
             "Oslo",
@@ -1682,6 +1832,7 @@ mod tests {
         let forecast = MultiDayForecast {
             days: vec![day],
             rain_history: None,
+            nowcast_alert: None,
         };
         let out = render_multi_day(
             "Oslo",
@@ -1735,6 +1886,7 @@ mod tests {
         let forecast = MultiDayForecast {
             days: vec![day],
             rain_history: None,
+            nowcast_alert: None,
         };
         let out = render_multi_day(
             "Oslo",
@@ -1797,6 +1949,7 @@ mod tests {
         let forecast = MultiDayForecast {
             days: vec![day],
             rain_history: None,
+            nowcast_alert: None,
         };
         // Verbose surfaces "Beste luke" under days with a usable
         // optimal window. Default mode keeps the per-day rows lean and
@@ -1847,6 +2000,7 @@ mod tests {
         let forecast = MultiDayForecast {
             days: vec![day],
             rain_history: None,
+            nowcast_alert: None,
         };
         let out = render_multi_day(
             "Oslo",
@@ -2007,6 +2161,7 @@ mod tests {
         let forecast = MultiDayForecast {
             days,
             rain_history: None,
+            nowcast_alert: None,
         };
         eprintln!(
             "\n--- DEFAULT ---\n{}",
@@ -2067,6 +2222,7 @@ mod tests {
         let forecast = MultiDayForecast {
             days: vec![day],
             rain_history: None,
+            nowcast_alert: None,
         };
         let default_out = render_multi_day(
             "Oslo",
@@ -2135,6 +2291,7 @@ mod tests {
         MultiDayForecast {
             days: vec![day],
             rain_history: None,
+            nowcast_alert: None,
         }
     }
 
@@ -2601,6 +2758,7 @@ mod tests {
             header_hours: verbose_window.to_vec(),
             days: vec![day],
             rain_history: None,
+            nowcast_alert: None,
         }
     }
 
@@ -2822,6 +2980,7 @@ mod tests {
             header_hours: vec![],
             days: vec![],
             rain_history: None,
+            nowcast_alert: None,
         };
         let out = render_hourly(
             "Oslo",

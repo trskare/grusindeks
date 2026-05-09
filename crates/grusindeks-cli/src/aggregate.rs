@@ -39,6 +39,27 @@ pub struct AggregateScore {
     /// Frost was unavailable or the response contained no usable data.
     #[serde(default)]
     pub rain_history: Option<RainHistory>,
+    /// Radar-based imminent-rain alert. `Some` when nowcast saw
+    /// precipitation ≥ threshold in the next ~2 hours. `None` when nowcast
+    /// wasn't fetched, the location is outside Norden, or the radar series
+    /// is dry. See [`NowcastAlert`].
+    #[serde(default)]
+    pub nowcast_alert: Option<NowcastAlert>,
+}
+
+/// Presentation-ready summary of an upcoming radar-observed rain event.
+/// Built from `Nowcast::summary` plus the system clock so the renderer
+/// can format "regn om N min" without time arithmetic.
+///
+/// **Reliability bands** (see plan): 0–30 min ≈ direct radar observation,
+/// 30–90 min extrapolated, 90–120 min approaches locationforecast quality.
+/// The renderer uses `peak_mm_h` and `first_rain_at - now` to pick a tone.
+#[derive(Debug, Clone, Serialize)]
+pub struct NowcastAlert {
+    pub first_rain_at: DateTime<Utc>,
+    pub last_rain_at: DateTime<Utc>,
+    pub peak_at: DateTime<Utc>,
+    pub peak_mm_h: f64,
 }
 
 /// Aggregate stats over the past N hours of Frost observations. Surfaced
@@ -102,6 +123,7 @@ impl AggregateScore {
             max,
             points: scored,
             rain_history: None,
+            nowcast_alert: None,
         }
     }
 
@@ -301,6 +323,9 @@ pub struct MultiDayForecast {
     /// unavailable. See [`RainHistory`].
     #[serde(default)]
     pub rain_history: Option<RainHistory>,
+    /// See [`AggregateScore::nowcast_alert`].
+    #[serde(default)]
+    pub nowcast_alert: Option<NowcastAlert>,
 }
 
 fn lower_confidence(a: Confidence, b: Confidence) -> Confidence {
@@ -362,6 +387,9 @@ pub struct HourlyForecast {
     /// unavailable. See [`RainHistory`].
     #[serde(default)]
     pub rain_history: Option<RainHistory>,
+    /// See [`AggregateScore::nowcast_alert`].
+    #[serde(default)]
+    pub nowcast_alert: Option<NowcastAlert>,
 }
 
 #[cfg(test)]

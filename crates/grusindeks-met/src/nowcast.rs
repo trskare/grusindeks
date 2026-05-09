@@ -25,6 +25,17 @@ pub struct NowcastStep {
     pub precipitation_rate_mm_h: f64,
 }
 
+/// Roll-up of a [`Nowcast`]'s rainy steps. `peak_mm_h` is the highest
+/// rate observed over the threshold; `first_rain_at` / `last_rain_at`
+/// bracket the contiguous-or-not period the user should care about.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowcastSummary {
+    pub first_rain_at: DateTime<Utc>,
+    pub last_rain_at: DateTime<Utc>,
+    pub peak_mm_h: f64,
+    pub peak_at: DateTime<Utc>,
+}
+
 impl Nowcast {
     /// First step at or above `threshold_mm_h`, if any. With the default
     /// drizzle threshold (`0.1`) this returns "wet riding starts at T".
@@ -33,6 +44,32 @@ impl Nowcast {
             .iter()
             .find(|s| s.precipitation_rate_mm_h >= threshold_mm_h)
             .map(|s| s.time)
+    }
+
+    /// Roll-up of every step at or above `threshold_mm_h`. Returns `None`
+    /// when the series is dry (or radar coverage is missing — `steps` is
+    /// empty in that case). Lets the CLI render a single-line banner
+    /// without traversing the timeseries itself.
+    pub fn summary(&self, threshold_mm_h: f64) -> Option<NowcastSummary> {
+        let mut iter = self
+            .steps
+            .iter()
+            .filter(|s| s.precipitation_rate_mm_h >= threshold_mm_h);
+        let first = iter.next()?;
+        let mut last = first;
+        let mut peak = first;
+        for s in iter {
+            last = s;
+            if s.precipitation_rate_mm_h > peak.precipitation_rate_mm_h {
+                peak = s;
+            }
+        }
+        Some(NowcastSummary {
+            first_rain_at: first.time,
+            last_rain_at: last.time,
+            peak_mm_h: peak.precipitation_rate_mm_h,
+            peak_at: peak.time,
+        })
     }
 }
 
@@ -185,6 +222,98 @@ mod tests {
             Some(Utc.with_ymd_and_hms(2026, 4, 26, 14, 10, 0).unwrap())
         );
         assert_eq!(n.next_rain_at(1.0), None);
+    }
+
+    #[test]
+    fn summary_returns_none_for_dry_series() {
+        let n = Nowcast {
+            radar_coverage_ok: true,
+            steps: vec![
+                NowcastStep {
+                    time: Utc.with_ymd_and_hms(2026, 4, 26, 14, 0, 0).unwrap(),
+                    precipitation_rate_mm_h: 0.0,
+                },
+                NowcastStep {
+                    time: Utc.with_ymd_and_hms(2026, 4, 26, 14, 5, 0).unwrap(),
+                    precipitation_rate_mm_h: 0.05,
+                },
+            ],
+        };
+        assert!(n.summary(0.1).is_none());
+    }
+
+    #[test]
+    fn summary_returns_none_when_steps_empty() {
+        let n = Nowcast {
+            radar_coverage_ok: false,
+            steps: vec![],
+        };
+        assert!(n.summary(0.1).is_none());
+    }
+
+    #[test]
+    fn summary_brackets_first_last_and_picks_peak() {
+        let t = |m: u32| Utc.with_ymd_and_hms(2026, 4, 26, 14, m, 0).unwrap();
+        let n = Nowcast {
+            radar_coverage_ok: true,
+            steps: vec![
+                NowcastStep {
+                    time: t(0),
+                    precipitation_rate_mm_h: 0.0,
+                },
+                NowcastStep {
+                    time: t(5),
+                    precipitation_rate_mm_h: 0.2,
+                },
+                NowcastStep {
+                    time: t(10),
+                    precipitation_rate_mm_h: 0.6,
+                },
+                NowcastStep {
+                    time: t(15),
+                    precipitation_rate_mm_h: 0.4,
+                },
+                NowcastStep {
+                    time: t(20),
+                    precipitation_rate_mm_h: 0.0,
+                },
+                NowcastStep {
+                    time: t(25),
+                    precipitation_rate_mm_h: 0.3,
+                },
+            ],
+        };
+        let s = n.summary(0.1).expect("rain in series");
+        assert_eq!(s.first_rain_at, t(5));
+        assert_eq!(s.last_rain_at, t(25));
+        assert!(
+            (s.peak_mm_h - 0.6).abs() < 1e-9,
+            "expected peak 0.6, got {}",
+            s.peak_mm_h
+        );
+        assert_eq!(s.peak_at, t(10));
+    }
+
+    #[test]
+    fn summary_threshold_excludes_subthreshold_blip() {
+        // A 0.05 mm/h blip 5 min in shouldn't anchor `first_rain_at` if
+        // the threshold is 0.1.
+        let t = |m: u32| Utc.with_ymd_and_hms(2026, 4, 26, 14, m, 0).unwrap();
+        let n = Nowcast {
+            radar_coverage_ok: true,
+            steps: vec![
+                NowcastStep {
+                    time: t(5),
+                    precipitation_rate_mm_h: 0.05,
+                },
+                NowcastStep {
+                    time: t(15),
+                    precipitation_rate_mm_h: 0.4,
+                },
+            ],
+        };
+        let s = n.summary(0.1).expect("0.4 is over threshold");
+        assert_eq!(s.first_rain_at, t(15));
     }
 
     #[test]
