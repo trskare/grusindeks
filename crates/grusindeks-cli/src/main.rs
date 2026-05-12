@@ -10,7 +10,8 @@ use std::time::Duration as StdDuration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Local, NaiveDate, NaiveTime, TimeZone, Utc};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use grusindeks_core::geo::Point;
 use grusindeks_core::types::{Location, RideWindow};
 use grusindeks_met::client::{MetClient, MetClientConfig, UserAgent};
@@ -118,6 +119,11 @@ enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Generate shell completion script.
+    Completions {
+        /// Shell to generate completions for.
+        shell: Shell,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -152,6 +158,12 @@ async fn main() -> Result<()> {
                 .map(Ok)
                 .unwrap_or_else(Config::default_path)?;
             println!("{}", p.display());
+            Ok(())
+        }
+        Some(Command::Completions { shell }) => {
+            let mut cmd = Cli::command();
+            let name = cmd.get_name().to_owned();
+            generate(*shell, &mut cmd, name, &mut std::io::stdout());
             Ok(())
         }
         // No subcommand → score the configured `default_place` (or whatever
