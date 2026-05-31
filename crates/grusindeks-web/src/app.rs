@@ -84,6 +84,7 @@ fn NavBar() -> impl IntoView {
 #[component]
 fn DashboardPage() -> impl IntoView {
     let places = Resource::new(|| (), |_| async move { list_places().await });
+    let prefs = Resource::new(|| (), |_| async move { get_prefs().await });
     let selected = RwSignal::new(String::new());
 
     let score = Resource::new(
@@ -114,12 +115,17 @@ fn DashboardPage() -> impl IntoView {
                 <Suspense>
                     {move || Suspend::new(async move {
                         let opts = places.await.unwrap_or_default();
+                        let default_label = prefs.await
+                            .ok()
+                            .map(|p| p.default_place)
+                            .filter(|name| !name.trim().is_empty())
+                            .unwrap_or_else(|| "Velg sted".to_string());
                         view! {
                             <select
                                 class="rounded-lg border border-gruv-bg2 bg-gruv-bg1 px-3 py-1.5 text-sm"
                                 on:change=move |ev| selected.set(event_target_value(&ev))
                             >
-                                <option value="">"(standardsted)"</option>
+                                <option value="">{default_label}</option>
                                 {opts.into_iter().map(|p| {
                                     let value = p.name.clone();
                                     view! { <option value=value>{p.name}</option> }
@@ -146,7 +152,15 @@ fn DashboardPage() -> impl IntoView {
                                     let has_pen = !penalties.is_empty();
                                     let reason = score_reason(c.score.breakdown, &penalties);
                                     let highlights = c.score.highlights.clone();
-                                    let place = selected.get_untracked();
+                                    let place = match selected.get_untracked() {
+                                        p if !p.trim().is_empty() => p,
+                                        _ => prefs
+                                            .get_untracked()
+                                            .and_then(Result::ok)
+                                            .map(|p| p.default_place)
+                                            .filter(|name| !name.trim().is_empty())
+                                            .unwrap_or_else(|| "standardsted".to_string()),
+                                    };
                                     view! {
                                         <div class="mt-8 space-y-6">
                                             <Recommendation total=agg.mean label=c.score.label.clone() reason=reason place=place/>
