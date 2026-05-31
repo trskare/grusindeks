@@ -7,8 +7,8 @@ use leptos_router::components::{Route, Router, Routes, A};
 use leptos_router::path;
 
 use crate::components::{
-    score_reason, BestWindowHint, DayCard, NowcastBanner, PenaltyChips, Recommendation, ScoreGauge,
-    Sparkline, SubscoreBars, WindowStatsRow,
+    score_reason, BestWindowHint, DayCard, HourlyPrecipStrip, NowcastBanner, PenaltyChips,
+    Recommendation, ScoreGauge, Sparkline, SubscoreBars, WindowStatsRow,
 };
 use crate::dto::{PlaceDto, PrefsDto, WorkHoursDto};
 use crate::map::MapView;
@@ -160,6 +160,7 @@ fn DashboardPage() -> impl IntoView {
                                     let chips = penalties.iter().skip(1).cloned().collect::<Vec<_>>();
                                     let highlights = c.score.highlights.clone();
                                     let stats = c.score.stats;
+                                    let sunset = agg.sun.and_then(|s| s.sunset);
                                     // Today's stand-out window, promoted from the multi-day strip.
                                     // Only surface it while it's still relevant (not fully past).
                                     let now = chrono::Utc::now();
@@ -168,8 +169,19 @@ fn DashboardPage() -> impl IntoView {
                                             .first()
                                             .and_then(|d| d.optimal_window.as_ref())
                                             .filter(|ow| ow.window.end > now)
-                                            .map(|ow| BestWindowHint::from_window(ow, now))
+                                            .map(|ow| BestWindowHint::from_window(ow, now, sunset))
                                     });
+                                    // Daylight hint from the centre's sunset.
+                                    let daylight = sunset.map(|s| {
+                                        let t = s.with_timezone(&chrono::Local).format("%H:%M");
+                                        if now > s {
+                                            format!("Mørkt nå — solnedgang var {t}")
+                                        } else {
+                                            format!("Dagslys til {t}")
+                                        }
+                                    });
+                                    let hourly_precip = agg.hourly_precip.clone();
+                                    let produced_at = agg.produced_at;
                                     // Plain-language surface history, only when the pref is on.
                                     let show_rain = prefs.await.map(|p| p.show_rain_history).unwrap_or(false);
                                     let rain_line = show_rain
@@ -194,10 +206,11 @@ fn DashboardPage() -> impl IntoView {
                                     };
                                     view! {
                                         <div class="space-y-6">
-                                            <Recommendation total=agg.mean label=c.score.label.clone() reason=reason place=place best_window=best_window/>
+                                            <Recommendation total=agg.mean label=c.score.label.clone() reason=reason place=place best_window=best_window updated=produced_at/>
                                             <div class="space-y-6 rounded-2xl bg-gruv-bg1 p-6 shadow-lg ring-1 ring-gruv-bg2/60">
                                                 {nowcast.map(|a| view! { <NowcastBanner alert=a/> })}
                                                 <WindowStatsRow stats=stats/>
+                                                <HourlyPrecipStrip hours=hourly_precip/>
                                                 <div class="flex items-center gap-6">
                                                     <ScoreGauge total=agg.mean/>
                                                     <div class="flex-1">
@@ -213,6 +226,7 @@ fn DashboardPage() -> impl IntoView {
                                                     </div>
                                                 })}
                                                 {rain_line.map(|t| view! { <p class="text-sm text-gruv-fg/70">{t}</p> })}
+                                                {daylight.map(|t| view! { <p class="text-sm text-gruv-fg/70">{t}</p> })}
                                                 {(!chips.is_empty()).then(|| view! { <PenaltyChips penalties=chips/> })}
                                             </div>
                                             <MapView points=agg.points.clone()/>

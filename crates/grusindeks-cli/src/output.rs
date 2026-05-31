@@ -2612,6 +2612,7 @@ mod tests {
     fn window_stats_chip_renders_temp_range() {
         let stats = WindowStats {
             mean_temp_c: 15.0,
+            felt_temp_c: 15.0,
             min_temp_c: 12.0,
             max_temp_c: 18.0,
             total_precip_mm: 0.4,
@@ -2630,6 +2631,7 @@ mod tests {
     fn window_stats_chip_omits_gust_when_none() {
         let stats = WindowStats {
             mean_temp_c: 15.0,
+            felt_temp_c: 15.0,
             min_temp_c: 15.0,
             max_temp_c: 15.0,
             total_precip_mm: 0.0,
@@ -3003,6 +3005,7 @@ mod tests {
         let mut forecast = hourly_fixture(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
         forecast.days[0].stats = Some(WindowStats {
             mean_temp_c: 14.0,
+            felt_temp_c: 14.0,
             min_temp_c: 12.0,
             max_temp_c: 18.0,
             total_precip_mm: 0.0,
@@ -3035,6 +3038,7 @@ mod tests {
         let mut forecast = hourly_fixture(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
         forecast.days[0].stats = Some(WindowStats {
             mean_temp_c: 14.0,
+            felt_temp_c: 14.0,
             min_temp_c: 12.0,
             max_temp_c: 18.0,
             total_precip_mm: 0.0,
@@ -3062,6 +3066,7 @@ mod tests {
         let mut forecast = hourly_fixture(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
         forecast.days[0].stats = Some(WindowStats {
             mean_temp_c: 14.0,
+            felt_temp_c: 14.0,
             min_temp_c: 12.0,
             max_temp_c: 18.0,
             total_precip_mm: 0.0,

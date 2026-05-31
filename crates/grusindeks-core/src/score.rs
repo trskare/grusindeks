@@ -188,6 +188,10 @@ pub struct Penalty {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct WindowStats {
     pub mean_temp_c: f64,
+    /// Apparent ("feels like") temperature over the window — the value the
+    /// temperature sub-score is actually computed from (wind chill / heat
+    /// index, with a clear-sky solar bump). `NaN` on the empty-window path.
+    pub felt_temp_c: f64,
     pub min_temp_c: f64,
     pub max_temp_c: f64,
     pub total_precip_mm: f64,
@@ -203,6 +207,7 @@ impl WindowStats {
     pub fn empty() -> Self {
         Self {
             mean_temp_c: f64::NAN,
+            felt_temp_c: f64::NAN,
             min_temp_c: f64::NAN,
             max_temp_c: f64::NAN,
             total_precip_mm: 0.0,
@@ -513,6 +518,7 @@ pub fn score(
 
     let stats = WindowStats {
         mean_temp_c: mean_temp,
+        felt_temp_c: felt_temp,
         min_temp_c: min_temp,
         max_temp_c: max_temp,
         total_precip_mm: total_precip,

@@ -17,8 +17,8 @@ use grusindeks_met::locationforecast;
 use grusindeks_met::nowcast::{self, Nowcast};
 
 use crate::aggregate::{
-    AggregateScore, DayAggregate, HourScore, HourlyDayAggregate, HourlyForecast, MultiDayForecast,
-    NowcastAlert, RainHistory,
+    AggregateScore, DayAggregate, HourScore, HourlyDayAggregate, HourlyForecast, HourlyPrecip,
+    MultiDayForecast, NowcastAlert, RainHistory,
 };
 
 /// Threshold for "this hour got rain on radar" — matches yr.no's
@@ -102,6 +102,26 @@ pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<Ag
     if let Some(nc) = &nowcast {
         apply_nowcast_overrides(&mut per_point_hours, nc);
     }
+    // Per-hour precipitation for the centre point inside the scored window —
+    // captured after any nowcast override so it reflects the radar. Lets the
+    // renderer show *when* the rain falls, not just the window total.
+    let center_truncated = inputs.center.truncated();
+    let hourly_precip: Vec<HourlyPrecip> = per_point_hours
+        .iter()
+        .find(|(p, _)| *p == center_truncated)
+        .or_else(|| per_point_hours.first())
+        .map(|(_, hours)| {
+            hours
+                .iter()
+                .filter(|h| inputs.window.contains(h.time) && h.precipitation_mm.is_finite())
+                .map(|h| HourlyPrecip {
+                    time: h.time,
+                    precip_mm: h.precipitation_mm.max(0.0),
+                    prob_pct: h.probability_of_precip,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let scored: Vec<(Point, _)> = per_point_hours
         .into_iter()
         .map(|(p, hours)| (p, score(&hours, inputs.window, surface, inputs.lang)))
@@ -111,6 +131,7 @@ pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<Ag
     out.nowcast_alert = nowcast
         .as_ref()
         .and_then(|n| build_nowcast_alert(n, Utc::now()));
+    out.hourly_precip = hourly_precip;
     Ok(out)
 }
 

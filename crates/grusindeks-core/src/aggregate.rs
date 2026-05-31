@@ -45,6 +45,31 @@ pub struct AggregateScore {
     /// is dry. See [`NowcastAlert`].
     #[serde(default)]
     pub nowcast_alert: Option<NowcastAlert>,
+    /// When this score was computed (server clock). Lets a renderer show a
+    /// real "oppdatert" time instead of guessing from the client clock.
+    /// `None` for consumers that don't stamp it (e.g. the CLI).
+    #[serde(default)]
+    pub produced_at: Option<DateTime<Utc>>,
+    /// Sunrise/sunset for the centre on the scored date. `None` when not
+    /// computed by the caller.
+    #[serde(default)]
+    pub sun: Option<crate::sun::SunTimes>,
+    /// Per-hour precipitation across the scored window for the centre point,
+    /// oldest-first. Empty when unavailable. Lets the renderer show *when*
+    /// inside the window the rain falls, not just the window total.
+    #[serde(default)]
+    pub hourly_precip: Vec<HourlyPrecip>,
+}
+
+/// One hour of forecast precipitation inside a scored window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HourlyPrecip {
+    pub time: DateTime<Utc>,
+    /// Forecast precipitation amount for this hour, mm (≥ 0).
+    pub precip_mm: f64,
+    /// Probability of precipitation 0–100, when the forecast provides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prob_pct: Option<f64>,
 }
 
 /// Presentation-ready summary of an upcoming radar-observed rain event.
@@ -124,6 +149,9 @@ impl AggregateScore {
             points: scored,
             rain_history: None,
             nowcast_alert: None,
+            produced_at: None,
+            sun: None,
+            hourly_precip: Vec::new(),
         }
     }
 

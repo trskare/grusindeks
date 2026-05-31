@@ -11,4 +11,5 @@ pub mod felt_temp;
 pub mod geo;
 pub mod lang;
 pub mod score;
+pub mod sun;
 pub mod types;

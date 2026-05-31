@@ -2,10 +2,10 @@
 //! awaited server-fn response) and renders with the shared score palette
 //! ([`crate::color`]). Animations are plain CSS transitions.
 
-use chrono::Local;
+use chrono::{DateTime, Local, Utc};
 use leptos::prelude::*;
 
-use grusindeks_core::aggregate::{DayAggregate, NowcastAlert};
+use grusindeks_core::aggregate::{DayAggregate, HourlyPrecip, NowcastAlert};
 use grusindeks_core::daily::{BestWindowReason, Confidence};
 use grusindeks_core::score::{Component, Penalty, ScoreBreakdown, Severity, WindowStats};
 
@@ -38,15 +38,19 @@ pub struct BestWindowHint {
     /// `true` when the window hasn't started yet (so "Vent til {start}" makes
     /// sense). Computed once against the wall clock in `app.rs`.
     pub starts_in_future: bool,
+    /// `true` when the window starts before sunset (or sunset is unknown) — we
+    /// don't suggest waiting for a window that lands in the dark.
+    pub before_sunset: bool,
 }
 
 impl BestWindowHint {
     /// Build from an [`OptimalWindow`], formatting the window edges in local
     /// time. `now` is the wall clock used to decide whether the window is
-    /// still ahead.
+    /// still ahead; `sunset` (if known) gates the "wait for it" suggestion.
     pub fn from_window(
         ow: &grusindeks_core::daily::OptimalWindow,
-        now: chrono::DateTime<chrono::Utc>,
+        now: DateTime<Utc>,
+        sunset: Option<DateTime<Utc>>,
     ) -> Self {
         Self {
             start: ow.window.start.with_timezone(&Local).format("%H:%M").to_string(),
@@ -55,6 +59,7 @@ impl BestWindowHint {
             reason: ow.reason.map(best_window_reason_label),
             total: ow.score.total,
             starts_in_future: ow.window.start > now,
+            before_sunset: sunset.is_none_or(|s| ow.window.start < s),
         }
     }
 }
@@ -137,19 +142,26 @@ pub fn Recommendation(
     /// a rider sees the timing decision next to the verdict. `None` when no
     /// stand-out window beats the current conditions.
     best_window: Option<BestWindowHint>,
+    /// When the score was computed (server clock). Falls back to the client
+    /// clock when the server didn't stamp it.
+    updated: Option<DateTime<Utc>>,
 ) -> impl IntoView {
     let (default_cta, default_summary) = cta_for(total);
     // Window-aware CTA: when the next 3 h aren't already good but a later
-    // window today is meaningfully better, suggest waiting for it rather than
-    // riding now.
-    let wait_for = best_window
-        .as_ref()
-        .filter(|bw| total < 65 && bw.starts_in_future && bw.total >= total + 10);
+    // window today is meaningfully better — and still in daylight — suggest
+    // waiting for it rather than riding now.
+    let wait_for = best_window.as_ref().filter(|bw| {
+        total < 65 && bw.starts_in_future && bw.before_sunset && bw.total >= total + 10
+    });
     let (cta, summary) = match wait_for {
         Some(bw) => (format!("Vent til {}", bw.start), default_summary),
         None => (default_cta.to_string(), default_summary),
     };
-    let updated = Local::now().format("%H:%M").to_string();
+    let updated = updated
+        .unwrap_or_else(Utc::now)
+        .with_timezone(&Local)
+        .format("%H:%M")
+        .to_string();
     let place = if place.trim().is_empty() {
         "standardsted".to_string()
     } else {
@@ -219,7 +231,18 @@ pub fn WindowStatsRow(stats: WindowStats) -> impl IntoView {
         return ().into_any();
     }
     let temp = format!("{:.0}°C", stats.mean_temp_c);
-    let temp_range = format!("{:.0}–{:.0}", stats.min_temp_c, stats.max_temp_c);
+    // Lead the caption with "feels like" when it diverges from the air temp by
+    // a degree or more; otherwise just show the range.
+    let temp_sub = if stats.felt_temp_c.is_finite()
+        && (stats.felt_temp_c - stats.mean_temp_c).abs() >= 1.0
+    {
+        format!(
+            "føles {:.0}° · {:.0}–{:.0}",
+            stats.felt_temp_c, stats.min_temp_c, stats.max_temp_c
+        )
+    } else {
+        format!("temp {:.0}–{:.0}", stats.min_temp_c, stats.max_temp_c)
+    };
     let wind = match stats.max_gust_ms {
         Some(g) if g > stats.max_wind_ms => format!("{:.0} m/s · kast {:.0}", stats.max_wind_ms, g),
         _ => format!("{:.0} m/s", stats.max_wind_ms),
@@ -236,7 +259,7 @@ pub fn WindowStatsRow(stats: WindowStats) -> impl IntoView {
         <div class="grid grid-cols-3 gap-3">
             <div class=cell>
                 <span class=metric>{temp}</span>
-                <span class=cap>{format!("temp {temp_range}")}</span>
+                <span class=cap>{temp_sub}</span>
             </div>
             <div class=cell>
                 <span class=metric>{wind}</span>
@@ -245,6 +268,42 @@ pub fn WindowStatsRow(stats: WindowStats) -> impl IntoView {
             <div class=cell>
                 <span class=metric>{rain}</span>
                 <span class=cap>"nedbør 3t"</span>
+            </div>
+        </div>
+    }
+    .into_any()
+}
+
+/// A per-hour precipitation mini-chart for the scored window — answers "when
+/// inside the next 3 h does it actually rain?". Renders nothing on a dry
+/// window (the stats row already says "tørt").
+#[component]
+pub fn HourlyPrecipStrip(hours: Vec<HourlyPrecip>) -> impl IntoView {
+    let max = hours.iter().map(|h| h.precip_mm).fold(0.0_f64, f64::max);
+    if hours.len() < 2 || max < 0.05 {
+        return ().into_any();
+    }
+    view! {
+        <div class="space-y-1.5">
+            <p class="text-xs uppercase tracking-wide text-gruv-fg/70">"Nedbør per time"</p>
+            <div class="flex items-end gap-2">
+                {hours.into_iter().map(|h| {
+                    let label = h.time.with_timezone(&Local).format("%H").to_string();
+                    let wet = h.precip_mm >= 0.05;
+                    // Floor the height so a wet hour is always visibly taller than a dry one.
+                    let pct = if wet { ((h.precip_mm / max) * 100.0).clamp(12.0, 100.0) } else { 4.0 };
+                    let amt = if wet { format!("{:.1}", h.precip_mm) } else { "·".to_string() };
+                    let fill = if wet { "bg-gruv-blue" } else { "bg-gruv-bg2" };
+                    view! {
+                        <div class="flex flex-1 flex-col items-center gap-1">
+                            <span class="text-xs tabular-nums text-gruv-fg/70">{amt}</span>
+                            <div class="flex h-10 w-full items-end">
+                                <div class=format!("w-full rounded-t {fill}") style=format!("height:{pct:.0}%")></div>
+                            </div>
+                            <span class="text-xs tabular-nums text-gruv-fg/70">{label}</span>
+                        </div>
+                    }
+                }).collect_view()}
             </div>
         </div>
     }
@@ -309,7 +368,6 @@ pub fn PenaltyChips(penalties: Vec<Penalty>) -> impl IntoView {
 /// client-side from the absolute UTC times in the alert.
 #[component]
 pub fn NowcastBanner(alert: NowcastAlert) -> impl IntoView {
-    use chrono::Utc;
     let mins = (alert.first_rain_at - Utc::now()).num_minutes().max(0);
     let peak = alert.peak_mm_h;
     let cls = if peak >= 2.0 {

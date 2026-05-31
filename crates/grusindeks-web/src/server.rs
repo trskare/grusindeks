@@ -47,7 +47,7 @@ pub async fn get_score(place: String, hours: i64) -> Result<AggregateScore, Serv
     let win = resolve_window(None, hours).map_err(err)?;
     let fetch_nowcast = window_starts_within_nowcast_horizon(win, Utc::now());
 
-    let agg = run_score(
+    let mut agg = run_score(
         &state.client(),
         ScoreInputs {
             center: location.center,
@@ -62,6 +62,16 @@ pub async fn get_score(place: String, hours: i64) -> Result<AggregateScore, Serv
     )
     .await
     .map_err(err)?;
+
+    // Stamp the real compute time and the centre's sunrise/sunset so the UI can
+    // show an honest "oppdatert" and a daylight hint instead of guessing from
+    // the client clock.
+    agg.produced_at = Some(Utc::now());
+    agg.sun = Some(grusindeks_core::sun::sun_times(
+        win.start.date_naive(),
+        location.center.lat,
+        location.center.lon,
+    ));
 
     // Best-effort history log, bucketed to the hour (named places only).
     if let Ok(Some(pid)) = place_id_by_name(&state.db, DEFAULT_USER_ID, &location.name).await {
