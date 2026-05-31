@@ -32,17 +32,29 @@ pub struct BestWindowHint {
     pub end: String,
     pub improvement: u8,
     pub reason: Option<&'static str>,
+    /// Absolute score of the window — lets the card decide whether it's worth
+    /// suggesting the rider wait for it.
+    pub total: u8,
+    /// `true` when the window hasn't started yet (so "Vent til {start}" makes
+    /// sense). Computed once against the wall clock in `app.rs`.
+    pub starts_in_future: bool,
 }
 
 impl BestWindowHint {
     /// Build from an [`OptimalWindow`], formatting the window edges in local
-    /// time. Returns `None` when there's no stand-out window.
-    pub fn from_window(ow: &grusindeks_core::daily::OptimalWindow) -> Self {
+    /// time. `now` is the wall clock used to decide whether the window is
+    /// still ahead.
+    pub fn from_window(
+        ow: &grusindeks_core::daily::OptimalWindow,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
         Self {
             start: ow.window.start.with_timezone(&Local).format("%H:%M").to_string(),
             end: ow.window.end.with_timezone(&Local).format("%H:%M").to_string(),
             improvement: ow.improvement,
             reason: ow.reason.map(best_window_reason_label),
+            total: ow.score.total,
+            starts_in_future: ow.window.start > now,
         }
     }
 }
@@ -126,7 +138,17 @@ pub fn Recommendation(
     /// stand-out window beats the current conditions.
     best_window: Option<BestWindowHint>,
 ) -> impl IntoView {
-    let (cta, summary) = cta_for(total);
+    let (default_cta, default_summary) = cta_for(total);
+    // Window-aware CTA: when the next 3 h aren't already good but a later
+    // window today is meaningfully better, suggest waiting for it rather than
+    // riding now.
+    let wait_for = best_window
+        .as_ref()
+        .filter(|bw| total < 65 && bw.starts_in_future && bw.total >= total + 10);
+    let (cta, summary) = match wait_for {
+        Some(bw) => (format!("Vent til {}", bw.start), default_summary),
+        None => (default_cta.to_string(), default_summary),
+    };
     let updated = Local::now().format("%H:%M").to_string();
     let place = if place.trim().is_empty() {
         "standardsted".to_string()

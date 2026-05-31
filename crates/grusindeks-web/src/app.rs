@@ -161,11 +161,14 @@ fn DashboardPage() -> impl IntoView {
                                     let highlights = c.score.highlights.clone();
                                     let stats = c.score.stats;
                                     // Today's stand-out window, promoted from the multi-day strip.
+                                    // Only surface it while it's still relevant (not fully past).
+                                    let now = chrono::Utc::now();
                                     let best_window = forecast.await.ok().and_then(|mf| {
                                         mf.days
                                             .first()
                                             .and_then(|d| d.optimal_window.as_ref())
-                                            .map(BestWindowHint::from_window)
+                                            .filter(|ow| ow.window.end > now)
+                                            .map(|ow| BestWindowHint::from_window(ow, now))
                                     });
                                     // Plain-language surface history, only when the pref is on.
                                     let show_rain = prefs.await.map(|p| p.show_rain_history).unwrap_or(false);
