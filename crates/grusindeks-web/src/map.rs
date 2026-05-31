@@ -68,6 +68,11 @@ fn ring_geojson(center: grusindeks_core::geo::Point, radius_km: f64) -> String {
 
 #[component]
 pub fn MapView(points: Vec<PointScore>) -> impl IntoView {
+    let center_score = points
+        .iter()
+        .find(|p| p.is_center)
+        .or_else(|| points.first())
+        .map(|p| (p.bearing_label.clone(), p.score.total));
     #[cfg(feature = "hydrate")]
     {
         let points = points.clone();
@@ -85,7 +90,7 @@ pub fn MapView(points: Vec<PointScore>) -> impl IntoView {
                     .map(|p| haversine_km(center_pt, Point::new(p.point.lat, p.point.lon)))
                     .fold(0.0_f64, f64::max)
                     .max(1.0);
-                glue::init("gi-map", center_pt.lon, center_pt.lat, 9.0);
+                glue::init("gi-map", center_pt.lon, center_pt.lat, 8.0);
                 glue::set_ring(&ring_geojson(center_pt, radius));
                 glue::set_points(&points_geojson(&points));
             }
@@ -95,9 +100,32 @@ pub fn MapView(points: Vec<PointScore>) -> impl IntoView {
     let _ = &points;
 
     view! {
-        <div
-            id="gi-map"
-            class="mt-6 h-80 w-full overflow-hidden rounded-2xl border border-gruv-bg2"
-        ></div>
+        <section class="overflow-hidden rounded-2xl bg-gruv-bg1 shadow-lg ring-1 ring-gruv-bg2/60">
+            <div class="flex items-start justify-between gap-4 px-5 py-4">
+                <div>
+                    <div class="flex items-center gap-2">
+                        <h2 class="text-sm font-semibold uppercase tracking-wide text-gruv-gray">"Kart"</h2>
+                        <a
+                            class="text-[10px] text-gruv-gray underline-offset-2 hover:text-gruv-fg hover:underline"
+                            href="https://www.openstreetmap.org/copyright"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                        >"© OSM"</a>
+                    </div>
+                    <p class="mt-1 text-sm text-gruv-fg/85">
+                        {center_score.map(|(label, total)| format!("{label}: {total}"))}
+                    </p>
+                </div>
+                <div class="flex flex-wrap justify-end gap-2 text-[10px] uppercase tracking-wide text-gruv-gray">
+                    <span class="inline-flex items-center gap-1"><i class="h-2 w-2 rounded-full bg-gruv-green"></i>"bra"</span>
+                    <span class="inline-flex items-center gap-1"><i class="h-2 w-2 rounded-full bg-gruv-yellow"></i>"middels"</span>
+                    <span class="inline-flex items-center gap-1"><i class="h-2 w-2 rounded-full bg-gruv-red"></i>"dårlig"</span>
+                </div>
+            </div>
+            <div
+                id="gi-map"
+                class="h-80 w-full border-t border-gruv-bg2"
+            ></div>
+        </section>
     }
 }

@@ -7,10 +7,108 @@ use leptos::prelude::*;
 
 use grusindeks_core::aggregate::{DayAggregate, NowcastAlert};
 use grusindeks_core::daily::Confidence;
-use grusindeks_core::score::{Penalty, ScoreBreakdown, Severity};
+use grusindeks_core::score::{Component, Penalty, ScoreBreakdown, Severity};
 
 use crate::color;
 use crate::dto::HistoryPoint;
+
+fn cta_for(total: u8) -> (&'static str, &'static str) {
+    match total {
+        85..=100 => ("Kjør nå", "Strålende forhold de neste 3 timene."),
+        65..=84 => ("Kjør nå", "Gode forhold de neste 3 timene."),
+        45..=64 => (
+            "Vurder kort tur",
+            "Brukbart, men med noen tydelige forbehold.",
+        ),
+        25..=44 => ("Vent hvis du kan", "Forholdene er svake akkurat nå."),
+        _ => ("Ikke anbefalt", "Dårlige forhold for grus akkurat nå."),
+    }
+}
+
+fn soft_bg_class(total: u8) -> &'static str {
+    match color::bucket(total) {
+        color::Bucket::Bad => "from-gruv-red/20 via-gruv-bg1 to-gruv-bg1 ring-gruv-red/30",
+        color::Bucket::Marginal => {
+            "from-gruv-orange/20 via-gruv-bg1 to-gruv-bg1 ring-gruv-orange/30"
+        }
+        color::Bucket::Ok => "from-gruv-yellow/20 via-gruv-bg1 to-gruv-bg1 ring-gruv-yellow/30",
+        color::Bucket::Good => "from-gruv-lime/20 via-gruv-bg1 to-gruv-bg1 ring-gruv-lime/30",
+        color::Bucket::Great => "from-gruv-green/20 via-gruv-bg1 to-gruv-bg1 ring-gruv-green/30",
+    }
+}
+
+fn component_label(c: Component) -> &'static str {
+    match c {
+        Component::Temperature => "temperatur",
+        Component::Wind => "vind",
+        Component::Precipitation => "nedbør",
+        Component::PrecipProbability => "nedbørssjanse",
+        Component::Ground => "underlag",
+        Component::HardCap => "været",
+        Component::NoData => "datagrunnlaget",
+    }
+}
+
+fn weakest_axis(b: ScoreBreakdown) -> (&'static str, u8) {
+    [
+        ("temperatur", b.temperature),
+        ("vind", b.wind),
+        ("nedbør", b.precipitation),
+        ("nedbørssjanse", b.precip_probability),
+        ("underlag", b.ground),
+    ]
+    .into_iter()
+    .min_by_key(|(_, v)| *v)
+    .unwrap_or(("forhold", 100))
+}
+
+pub fn score_reason(breakdown: ScoreBreakdown, penalties: &[Penalty]) -> String {
+    if let Some(p) = penalties.first() {
+        format!(
+            "Trekkes ned av {}: {}",
+            component_label(p.component),
+            p.message
+        )
+    } else {
+        let (axis, val) = weakest_axis(breakdown);
+        if val >= 85 {
+            "Ingen tydelige trekk — jevnt gode delscore.".to_string()
+        } else {
+            format!("Svakeste delscore er {axis} ({val}).")
+        }
+    }
+}
+
+/// A plain-language recommendation for the current score.
+#[component]
+pub fn Recommendation(total: u8, label: String, reason: String, place: String) -> impl IntoView {
+    let (cta, summary) = cta_for(total);
+    let updated = Local::now().format("%H:%M").to_string();
+    let place = if place.trim().is_empty() {
+        "standardsted".to_string()
+    } else {
+        place
+    };
+    view! {
+        <div class=format!("rounded-2xl bg-gradient-to-br p-5 ring-1 shadow-xl {}", soft_bg_class(total))>
+            <div class="flex items-start justify-between gap-4">
+                <div>
+                    <p class="text-xs font-semibold uppercase tracking-wide text-gruv-gray">
+                        {format!("{place} · oppdatert {updated}")}
+                    </p>
+                    <h2 class="mt-2 text-3xl font-extrabold tracking-tight">{cta}</h2>
+                    <p class="mt-1 text-sm text-gruv-fg/90">
+                        {format!("Grusindeks {total} — {summary}")}
+                    </p>
+                </div>
+                <span class=format!("rounded-full px-3 py-1 text-xs font-semibold ring-1 ring-current {}", color::text_class(total))>
+                    {label}
+                </span>
+            </div>
+            <p class="mt-4 rounded-xl bg-gruv-bg0/45 px-4 py-3 text-sm text-gruv-fg/90">{reason}</p>
+        </div>
+    }
+}
 
 /// Radial score gauge: a ring filled to `total`% in the score colour, with the
 /// number and a verdict label in the middle.
@@ -144,14 +242,34 @@ pub fn Sparkline(points: Vec<HistoryPoint>) -> impl IntoView {
         let y = h - (last as f64 / 100.0) * h;
         (x, y)
     };
+    let min = points.iter().map(|p| p.mean).min().unwrap_or(last);
+    let max = points.iter().map(|p| p.mean).max().unwrap_or(last);
     view! {
-        <svg width="100%" viewBox=format!("0 0 {w} {h}") preserveAspectRatio="none" class="w-full">
-            <polyline
-                points=poly fill="none" stroke=stroke stroke-width="2"
-                stroke-linecap="round" stroke-linejoin="round"
-            />
-            <circle cx=format!("{lx:.1}") cy=format!("{ly:.1}") r="3" fill=stroke/>
-        </svg>
+        <div>
+            <div class="mb-3 flex items-end justify-between gap-4">
+                <div>
+                    <div class=format!("text-2xl font-bold tabular-nums {}", color::text_class(last))>{last}</div>
+                    <div class="text-xs text-gruv-gray">"siste måling"</div>
+                </div>
+                <div class="text-right text-xs text-gruv-gray">
+                    <div>{format!("min {min} · maks {max}")}</div>
+                    <div>"siste 48 timer"</div>
+                </div>
+            </div>
+            <svg width="100%" viewBox=format!("0 0 {w} {h}") preserveAspectRatio="none" class="w-full overflow-visible">
+                <line x1="0" y1=format!("{:.1}", h / 2.0) x2=w.to_string() y2=format!("{:.1}", h / 2.0) stroke="#504945" stroke-width="1" stroke-dasharray="3 4"/>
+                <polyline
+                    points=poly fill="none" stroke=stroke stroke-width="2.5"
+                    stroke-linecap="round" stroke-linejoin="round"
+                />
+                <circle cx=format!("{lx:.1}") cy=format!("{ly:.1}") r="3" fill=stroke/>
+            </svg>
+            <div class="mt-2 flex justify-between text-[10px] uppercase tracking-wide text-gruv-gray">
+                <span>"48t"</span>
+                <span>"50"</span>
+                <span>"nå"</span>
+            </div>
+        </div>
     }
     .into_any()
 }

@@ -34,13 +34,13 @@
       id: "gi-ring-fill",
       type: "fill",
       source: "gi-ring",
-      paint: { "fill-color": "#83a598", "fill-opacity": 0.07 },
+      paint: { "fill-color": "#83a598", "fill-opacity": 0.12 },
     });
     map.addLayer({
       id: "gi-ring-line",
       type: "line",
       source: "gi-ring",
-      paint: { "line-color": "#83a598", "line-width": 1.5, "line-dasharray": [2, 2] },
+      paint: { "line-color": "#83a598", "line-width": 2.5, "line-dasharray": [2, 2] },
     });
     map.addLayer({
       id: "gi-points",
@@ -57,10 +57,33 @@
     });
   }
 
+  function ringBounds(ring) {
+    const coords = ring?.features?.[0]?.geometry?.coordinates?.[0];
+    if (!coords || coords.length === 0 || !window.maplibregl) return null;
+    const bounds = coords.reduce(
+      (b, coord) => b.extend(coord),
+      new maplibregl.LngLatBounds(coords[0], coords[0]),
+    );
+    return bounds;
+  }
+
+  function fitRing(ring, animate) {
+    const bounds = ringBounds(ring);
+    if (!bounds || bounds.isEmpty()) return;
+    map.fitBounds(bounds, {
+      padding: 72,
+      maxZoom: 8,
+      duration: animate ? 500 : 0,
+    });
+  }
+
   function applyPending() {
     if (!ready || !map) return;
     ensureLayers();
-    if (pending.ring) map.getSource("gi-ring").setData(pending.ring);
+    if (pending.ring) {
+      map.getSource("gi-ring").setData(pending.ring);
+      fitRing(pending.ring, false);
+    }
     if (pending.points) map.getSource("gi-points").setData(pending.points);
   }
 
@@ -79,6 +102,7 @@
       style: STYLE,
       center: [lng, lat],
       zoom: zoom,
+      attributionControl: false,
     });
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     map.on("load", function () {
@@ -95,6 +119,9 @@
 
   window.gi_map_set_ring = function (geojson) {
     pending.ring = JSON.parse(geojson);
-    if (ready) map.getSource("gi-ring").setData(pending.ring);
+    if (ready) {
+      map.getSource("gi-ring").setData(pending.ring);
+      fitRing(pending.ring, true);
+    }
   };
 })();
