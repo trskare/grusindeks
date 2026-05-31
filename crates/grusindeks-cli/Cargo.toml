@@ -15,6 +15,7 @@ path = "src/main.rs"
 grusindeks-core = { workspace = true }
 grusindeks-met = { workspace = true }
 clap = { workspace = true }
+clap_complete = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }

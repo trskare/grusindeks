@@ -20,6 +20,62 @@ fn write_config(dir: &TempDir, body: &str) -> PathBuf {
     p
 }
 
+/// Re-anchor every `"time"` inside a locationforecast fixture so the
+/// earliest entry lands ~30 min before `Utc::now()`. The fixture on disk
+/// is a real MET capture from a specific day, so without this shift it
+/// goes stale within ~10 days and tests that assert on day-1 content
+/// (anything inside today's clipped daytime window) start to flake. We
+/// only walk `properties.timeseries[*].time` and `properties.meta.updated_at`;
+/// other fields don't carry day-of-the-week semantics that the renderer
+/// reads.
+fn shift_fixture_to_now(fixture: &str) -> String {
+    use chrono::{DateTime, Duration, Utc};
+    let mut v: serde_json::Value = serde_json::from_str(fixture).expect("valid JSON fixture");
+    let parse = |s: &str| -> Option<DateTime<Utc>> {
+        DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|d| d.with_timezone(&Utc))
+    };
+    let earliest = v
+        .pointer("/properties/timeseries")
+        .and_then(|ts| ts.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .filter_map(|s| s.get("time").and_then(|t| t.as_str()))
+                .filter_map(parse)
+                .min()
+        });
+    let Some(earliest) = earliest else {
+        return fixture.to_string();
+    };
+    let now = Utc::now();
+    let offset = (now - earliest) - Duration::minutes(30);
+    let bump = |t: &str| -> Option<String> {
+        parse(t).map(|d| (d + offset).format("%Y-%m-%dT%H:%M:%SZ").to_string())
+    };
+    if let Some(arr) = v
+        .pointer_mut("/properties/timeseries")
+        .and_then(|t| t.as_array_mut())
+    {
+        for entry in arr.iter_mut() {
+            if let Some(t) = entry.get("time").and_then(|t| t.as_str()) {
+                if let Some(shifted) = bump(t) {
+                    entry["time"] = serde_json::Value::String(shifted);
+                }
+            }
+        }
+    }
+    if let Some(t) = v
+        .pointer("/properties/meta/updated_at")
+        .and_then(|u| u.as_str())
+    {
+        if let Some(shifted) = bump(t) {
+            v["properties"]["meta"]["updated_at"] = serde_json::Value::String(shifted);
+        }
+    }
+    serde_json::to_string(&v).expect("re-serialize")
+}
+
 #[test]
 fn help_works() {
     Command::cargo_bin("grusindeks")
@@ -275,9 +331,10 @@ radius_km = 20.0
 #[tokio::test]
 async fn score_with_best_window_surfaces_a_window_per_day() {
     let server = MockServer::start().await;
+    let fixture = shift_fixture_to_now(LOCATIONFORECAST_FIXTURE);
     Mock::given(method("GET"))
         .and(path_m("/weatherapi/locationforecast/2.0/complete"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(LOCATIONFORECAST_FIXTURE))
+        .respond_with(ResponseTemplate::new(200).set_body_string(fixture))
         .mount(&server)
         .await;
 

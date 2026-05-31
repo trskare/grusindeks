@@ -45,11 +45,10 @@ pub const MEANINGFUL_RAIN_MM: f64 = SURFACE_WETTED_MM;
 /// histories.
 pub const FROST_FACTOR: f64 = 0.1;
 
-/// UV index value that represents the upper end of typical Nordic peak
-/// summer noon irradiance. Used to normalise `uv_index_clear_sky` into a
-/// 0–1.5 sunshine multiplier; previously was 5, which over-weighted
-/// sunny midsummer hours since real Nordic peaks reach 6–7.
-pub const UV_NORDIC_PEAK: f64 = 7.0;
+/// Re-exported from `felt_temp` so the drying model and the cyclist
+/// felt-T scale solar contributions against the same Nordic peak. Single
+/// source of truth lives in `felt_temp::UV_NORDIC_PEAK` (= 7.0).
+pub use crate::felt_temp::UV_NORDIC_PEAK;
 
 /// Coefficients for the per-hour drying rate (mm/h). Exposed so tests and
 /// future calibration can override them without forking the function.

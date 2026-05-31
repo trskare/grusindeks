@@ -10,7 +10,8 @@ use std::time::Duration as StdDuration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Local, NaiveDate, NaiveTime, TimeZone, Utc};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use grusindeks_core::geo::Point;
 use grusindeks_core::types::{Location, RideWindow};
 use grusindeks_met::client::{MetClient, MetClientConfig, UserAgent};
@@ -118,6 +119,11 @@ enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Generate shell completion script.
+    Completions {
+        /// Shell to generate completions for.
+        shell: Shell,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -152,6 +158,12 @@ async fn main() -> Result<()> {
                 .map(Ok)
                 .unwrap_or_else(Config::default_path)?;
             println!("{}", p.display());
+            Ok(())
+        }
+        Some(Command::Completions { shell }) => {
+            let mut cmd = Cli::command();
+            let name = cmd.get_name().to_owned();
+            generate(*shell, &mut cmd, name, &mut std::io::stdout());
             Ok(())
         }
         // No subcommand → score the configured `default_place` (or whatever
@@ -264,6 +276,9 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
             cfg.daytime_window,
         )?;
         let header_hours = daytime_header_hours(cfg.daytime_window);
+        let fetch_nowcast = day_windows
+            .first()
+            .is_some_and(|d| window_starts_within_nowcast_horizon(d.window, Utc::now()));
         let progress = TerminalProgress::new();
         let result = run_hourly(
             &client,
@@ -275,6 +290,7 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
                 history_hours: 168,
                 lang: cfg.language,
                 header_hours,
+                fetch_nowcast,
                 progress: &progress,
             },
         )
@@ -313,6 +329,9 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
             Utc::now(),
             cfg.daytime_window,
         )?;
+        let fetch_nowcast = day_windows
+            .first()
+            .is_some_and(|d| window_starts_within_nowcast_horizon(d.window, Utc::now()));
         let progress = TerminalProgress::new();
         let result = run_forecast(
             &client,
@@ -324,6 +343,7 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
                 history_hours: 168,
                 lang: cfg.language,
                 best_window,
+                fetch_nowcast,
                 progress: &progress,
             },
         )
@@ -351,6 +371,7 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
     }
 
     let win = resolve_window(cli.window.as_deref(), cli.hours.unwrap_or(3))?;
+    let fetch_nowcast = window_starts_within_nowcast_horizon(win, Utc::now());
     let progress = TerminalProgress::new();
     let result = run_score(
         &client,
@@ -361,6 +382,7 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
             frost_source_id: frost_source_id.as_deref(),
             history_hours: 168,
             lang: cfg.language,
+            fetch_nowcast,
             progress: &progress,
         },
     )
@@ -388,6 +410,20 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
         print!("{body}");
     }
     Ok(())
+}
+
+/// Nowcast covers ~2 hours of radar-based extrapolation. Beyond that the
+/// signal merges with locationforecast, so paying for an extra HTTP call
+/// stops being worth it. Used to gate `fetch_nowcast` on each ride window.
+const NOWCAST_HORIZON: ChronoDuration = ChronoDuration::hours(2);
+
+/// True when the window we're about to score overlaps the nowcast's
+/// reliable horizon. We require both: (a) the window has at least some
+/// future-time component (`end > now`, otherwise we'd be scoring a past
+/// ride), and (b) `start` is within `NOWCAST_HORIZON` of `now` so the
+/// fetched radar series actually covers the early portion of the window.
+fn window_starts_within_nowcast_horizon(window: RideWindow, now: DateTime<Utc>) -> bool {
+    window.end > now && window.start <= now + NOWCAST_HORIZON
 }
 
 /// Default horizon when the user runs `grusindeks` with no time arguments

@@ -32,6 +32,7 @@ pub struct TerminalProgress {
     multi: MultiProgress,
     frost: Mutex<Option<ProgressBar>>,
     forecast: Mutex<Option<ProgressBar>>,
+    nowcast: Mutex<Option<ProgressBar>>,
 }
 
 impl TerminalProgress {
@@ -45,6 +46,7 @@ impl TerminalProgress {
             multi,
             frost: Mutex::new(None),
             forecast: Mutex::new(None),
+            nowcast: Mutex::new(None),
         }
     }
 
@@ -59,6 +61,9 @@ impl TerminalProgress {
             pb.finish_and_clear();
         }
         if let Some(pb) = self.forecast.lock().unwrap().take() {
+            pb.finish_and_clear();
+        }
+        if let Some(pb) = self.nowcast.lock().unwrap().take() {
             pb.finish_and_clear();
         }
     }
@@ -80,6 +85,15 @@ impl TerminalProgress {
             .add(ProgressBar::new(total).with_style(bar_style()));
         pb.enable_steady_tick(Duration::from_millis(150));
         pb.set_message("Henter prognose");
+        pb
+    }
+
+    fn make_nowcast(&self) -> ProgressBar {
+        let pb = self
+            .multi
+            .add(ProgressBar::new_spinner().with_style(spinner_style()));
+        pb.enable_steady_tick(Duration::from_millis(150));
+        pb.set_message("Henter radar (Norden)…");
         pb
     }
 }
@@ -133,6 +147,19 @@ impl ProgressSink for TerminalProgress {
 
     fn forecast_finished(&self) {
         if let Some(pb) = self.forecast.lock().unwrap().take() {
+            pb.finish_and_clear();
+        }
+    }
+
+    fn nowcast_started(&self) {
+        let mut slot = self.nowcast.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(self.make_nowcast());
+        }
+    }
+
+    fn nowcast_finished(&self, _found: bool) {
+        if let Some(pb) = self.nowcast.lock().unwrap().take() {
             pb.finish_and_clear();
         }
     }

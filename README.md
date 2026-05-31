@@ -86,6 +86,36 @@ grusindeks --place oslo --json
 grusindeks --place oslo --days 5 --json
 ```
 
+### Shell-completions
+
+CLI-en kan generere completions for `bash`, `elvish`, `fish`,
+`powershell` og `zsh`:
+
+```sh
+grusindeks completions <SHELL>
+```
+
+Installer dem ved å skrive outputen til shell-ets completion-katalog:
+
+```sh
+# bash (Linux)
+mkdir -p ~/.local/share/bash-completion/completions
+grusindeks completions bash > ~/.local/share/bash-completion/completions/grusindeks
+
+# zsh
+mkdir -p ~/.zfunc
+grusindeks completions zsh > ~/.zfunc/_grusindeks
+# Legg dette i ~/.zshrc hvis du ikke allerede har det:
+# fpath=(~/.zfunc $fpath)
+# autoload -Uz compinit && compinit
+
+# fish
+mkdir -p ~/.config/fish/completions
+grusindeks completions fish > ~/.config/fish/completions/grusindeks.fish
+```
+
+Start shell-et på nytt etter installasjon, eller source filen manuelt.
+
 ### Dag-for-dag prognose
 
 Uten `--window` / `--hours` defaulter CLI-en til en **6-dagers

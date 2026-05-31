@@ -1,10 +1,13 @@
 //! Apparent temperature ("felt-T") for cyclists.
 //!
-//! Combines air temperature with wind (cold side: wind chill) and humidity
-//! (warm side: heat index) to produce the temperature a cyclist actually
-//! feels. The cold-side formula is the NWS / Environment Canada wind
-//! chill (2001 JAG/TI revision); the warm-side is the NWS Rothfusz heat
-//! index regression.
+//! Combines air temperature with wind (cold side: wind chill), humidity
+//! (warm side: heat index) and solar radiation (sun warms the rider on
+//! clear days) to produce the temperature a cyclist actually feels. The
+//! cold-side formula is the NWS / Environment Canada wind chill (2001
+//! JAG/TI revision); the warm-side is the NWS Rothfusz heat index
+//! regression. Solar warming is added on top of either base, scaled by
+//! cloud cover, UV index, and wind (which strips solar heat off the skin
+//! via forced convection).
 //!
 //! Wind chill is "always on" for a moving cyclist because they generate
 //! their own relative airflow from forward speed. We bake that into
@@ -29,6 +32,32 @@ pub const HEAT_INDEX_MIN_T_C: f64 = 27.0;
 /// NWS regression is unreliable below ≈ 4.8 km/h (1.33 m/s); below this
 /// the formula returns warmer-than-air values, so we pass through.
 const WIND_CHILL_MIN_KMH: f64 = 4.8;
+
+/// UV index value that represents the upper end of typical Nordic peak
+/// summer noon irradiance. Used to normalise `uv_index_clear_sky` into a
+/// 0–1.5 sunshine multiplier. Shared with the drying model so both
+/// signals scale consistently.
+pub const UV_NORDIC_PEAK: f64 = 7.0;
+
+/// Maximum °C added to felt-T from direct sunshine, hit at clear sky +
+/// UV ≈ Nordic peak + still air. Calibrated against UTCI / MRT studies
+/// where mean radiant temperature on bright days runs 20–30 °C above
+/// air temp; the 3.5 °C felt-T equivalent is conservative because (a)
+/// cyclists are partially clothed and moving, and (b) the temperature
+/// sub-score curve already amplifies any felt-T shift toward whichever
+/// edge of the comfort plateau the rider sits closest to.
+pub const SOLAR_MAX_C: f64 = 3.5;
+
+/// Wind attenuation slope in `1 / (1 + k · v)`. At 10 m/s relative wind
+/// the rider feels roughly half the still-air sun warmth — forced
+/// convection strips solar heat off the skin faster than radiation
+/// deposits it.
+const SOLAR_WIND_K: f64 = 0.1;
+
+/// Threshold below which a solar contribution is treated as 0 — a sliver
+/// of warmth from a nearly-overcast sky is noise, not signal, and
+/// renderers can use this to suppress "Sol bidrar med +0.1 °C" chatter.
+pub const SOLAR_NEGLIGIBLE_C: f64 = 0.5;
 
 /// Wind chill in °C using the NWS / Environment Canada 2001 formula:
 /// `Twc = 13.12 + 0.6215·T − 11.37·v^0.16 + 0.3965·T·v^0.16`
@@ -110,6 +139,67 @@ pub fn apparent_temp(t_c: f64, wind_ms: f64, humidity_pct: Option<f64>) -> f64 {
         }
     }
     t_c
+}
+
+/// Solar warming added to felt-T for an outdoor cyclist, in °C. Always
+/// non-negative — the sun never *cools* the rider; whether that warmth
+/// helps or hurts the score is decided by the temperature sub-score
+/// curve (good in cold, bad in heat).
+///
+/// Returns 0 when either input is missing or non-finite, mirroring the
+/// drying model's defensive handling. Inputs:
+/// * `cloud_pct` — total cloud area, 0–100 %.
+/// * `uv_clear_sky` — UV index for clear sky (0+); api.met.no returns 0
+///   at night, so no separate daylight gate is needed.
+/// * `wind_ms` — ambient wind speed at 10 m. Higher wind reduces the
+///   warmth the rider feels because moving air strips solar-deposited
+///   heat off the skin faster than radiation adds it.
+pub fn solar_warming_c(cloud_pct: Option<f64>, uv_clear_sky: Option<f64>, wind_ms: f64) -> f64 {
+    let (cloud, uv) = match (cloud_pct, uv_clear_sky) {
+        (Some(c), Some(u)) if c.is_finite() && u.is_finite() => (c, u),
+        // Cloud-only fallback: gives half the boost when UV is missing.
+        // Keeps long-range forecasts (which sometimes drop UV) from going
+        // sun-blind, while still flagging that we're guessing.
+        (Some(c), _) if c.is_finite() => {
+            let clear = (1.0 - c / 100.0).clamp(0.0, 1.0);
+            let wind_att = solar_wind_attenuation(wind_ms);
+            return 0.5 * SOLAR_MAX_C * clear * wind_att;
+        }
+        _ => return 0.0,
+    };
+    let clear = (1.0 - cloud / 100.0).clamp(0.0, 1.0);
+    let uv_factor = (uv / UV_NORDIC_PEAK).clamp(0.0, 1.5);
+    let wind_att = solar_wind_attenuation(wind_ms);
+    SOLAR_MAX_C * clear * uv_factor * wind_att
+}
+
+/// `1 / (1 + k · v)` with non-finite or negative wind treated as 0.
+/// Capped at 1.0 to keep the function monotone-decreasing in v.
+fn solar_wind_attenuation(wind_ms: f64) -> f64 {
+    if !wind_ms.is_finite() {
+        return 1.0;
+    }
+    let v = wind_ms.max(0.0);
+    1.0 / (1.0 + SOLAR_WIND_K * v)
+}
+
+/// Felt-T including solar warming. Wraps [`apparent_temp`] and adds the
+/// non-negative `solar_warming_c` term; pass `None` for either sun input
+/// to skip the solar contribution. Used by the score path; the bare
+/// [`apparent_temp`] is kept for callers (and tests) that only want the
+/// wind-chill / heat-index base.
+pub fn apparent_temp_with_sun(
+    t_c: f64,
+    wind_ms: f64,
+    humidity_pct: Option<f64>,
+    cloud_pct: Option<f64>,
+    uv_clear_sky: Option<f64>,
+) -> f64 {
+    let base = apparent_temp(t_c, wind_ms, humidity_pct);
+    if !base.is_finite() {
+        return base;
+    }
+    base + solar_warming_c(cloud_pct, uv_clear_sky, wind_ms)
 }
 
 #[cfg(test)]
@@ -206,5 +296,125 @@ mod tests {
     #[test]
     fn apparent_temp_handles_nan() {
         assert!(apparent_temp(f64::NAN, 5.0, Some(70.0)).is_nan());
+    }
+
+    #[test]
+    fn solar_warming_clear_sky_peak_uv_still_air() {
+        // Clear sky, peak Nordic UV, zero ambient wind → at SOLAR_MAX_C.
+        approx(
+            solar_warming_c(Some(0.0), Some(UV_NORDIC_PEAK), 0.0),
+            SOLAR_MAX_C,
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn solar_warming_overcast_returns_zero() {
+        approx(
+            solar_warming_c(Some(100.0), Some(UV_NORDIC_PEAK), 0.0),
+            0.0,
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn solar_warming_no_uv_at_night() {
+        // api.met.no returns UV=0 at night; expect no warming.
+        approx(solar_warming_c(Some(0.0), Some(0.0), 0.0), 0.0, 1e-9);
+    }
+
+    #[test]
+    fn solar_warming_missing_uv_uses_half_boost() {
+        // No UV reading + clear sky → falls back to half SOLAR_MAX_C, no
+        // wind. Keeps long-range forecasts sun-aware without overclaiming.
+        approx(
+            solar_warming_c(Some(0.0), None, 0.0),
+            0.5 * SOLAR_MAX_C,
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn solar_warming_missing_cloud_returns_zero() {
+        // Without cloud cover we can't tell sunny from grey — bail.
+        approx(solar_warming_c(None, Some(UV_NORDIC_PEAK), 0.0), 0.0, 1e-9);
+        approx(solar_warming_c(None, None, 0.0), 0.0, 1e-9);
+    }
+
+    #[test]
+    fn solar_warming_wind_attenuates() {
+        let calm = solar_warming_c(Some(0.0), Some(UV_NORDIC_PEAK), 0.0);
+        let breezy = solar_warming_c(Some(0.0), Some(UV_NORDIC_PEAK), 10.0);
+        // 1 / (1 + 0.1 · 10) = 0.5.
+        approx(breezy / calm, 0.5, 1e-9);
+    }
+
+    #[test]
+    fn solar_warming_uv_clamps_above_peak() {
+        // Midsummer noon UV can exceed Nordic peak; we cap at 1.5×.
+        let high = solar_warming_c(Some(0.0), Some(UV_NORDIC_PEAK * 3.0), 0.0);
+        approx(high, SOLAR_MAX_C * 1.5, 1e-9);
+    }
+
+    #[test]
+    fn solar_warming_partial_clouds_scale_linearly() {
+        let half = solar_warming_c(Some(50.0), Some(UV_NORDIC_PEAK), 0.0);
+        let full = solar_warming_c(Some(0.0), Some(UV_NORDIC_PEAK), 0.0);
+        approx(half / full, 0.5, 1e-9);
+    }
+
+    #[test]
+    fn solar_warming_handles_nan_inputs() {
+        // Non-finite cloud → no signal at all, even if UV is OK.
+        approx(solar_warming_c(Some(f64::NAN), Some(5.0), 4.0), 0.0, 1e-9);
+        // Non-finite UV with finite cloud → falls back to the cloud-only
+        // half-boost path, same as missing UV. Both "Some(NaN)" and
+        // "None" represent "we don't trust this reading".
+        let cloud_only = solar_warming_c(Some(50.0), None, 4.0);
+        let with_nan_uv = solar_warming_c(Some(50.0), Some(f64::NAN), 4.0);
+        approx(with_nan_uv, cloud_only, 1e-9);
+        assert!(cloud_only > 0.0);
+    }
+
+    #[test]
+    fn apparent_temp_with_sun_warms_cold_clear_day() {
+        // 5 °C, light wind, clear sky, peak UV → felt-T warmer than the
+        // wind-chilled base.
+        let base = apparent_temp(5.0, 2.0, None);
+        let with_sun = apparent_temp_with_sun(5.0, 2.0, None, Some(0.0), Some(UV_NORDIC_PEAK));
+        assert!(
+            with_sun > base,
+            "with_sun {with_sun} should exceed base {base}"
+        );
+        // Magnitude check: warming should be inside [2.5, SOLAR_MAX_C].
+        let delta = with_sun - base;
+        assert!((2.5..=SOLAR_MAX_C).contains(&delta), "got delta {delta}");
+    }
+
+    #[test]
+    fn apparent_temp_with_sun_overcast_matches_base() {
+        let base = apparent_temp(5.0, 2.0, None);
+        let with_sun = apparent_temp_with_sun(5.0, 2.0, None, Some(100.0), Some(UV_NORDIC_PEAK));
+        approx(with_sun, base, 1e-9);
+    }
+
+    #[test]
+    fn apparent_temp_with_sun_pushes_hot_day_further_from_optimum() {
+        // 28 °C heat-index base + sun → even hotter felt-T. The score
+        // layer's temp-curve will then penalise correctly.
+        let base = apparent_temp(28.0, 2.0, Some(75.0));
+        let with_sun =
+            apparent_temp_with_sun(28.0, 2.0, Some(75.0), Some(0.0), Some(UV_NORDIC_PEAK));
+        assert!(
+            with_sun > base,
+            "with_sun {with_sun} should exceed base {base}"
+        );
+    }
+
+    #[test]
+    fn apparent_temp_with_sun_propagates_nan() {
+        assert!(
+            apparent_temp_with_sun(f64::NAN, 5.0, None, Some(0.0), Some(UV_NORDIC_PEAK)).is_nan()
+        );
     }
 }

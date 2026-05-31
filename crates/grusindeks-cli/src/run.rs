@@ -14,11 +14,24 @@ use grusindeks_core::types::{HourlyConditions, Resolution, RideWindow};
 use grusindeks_met::client::MetClient;
 use grusindeks_met::frost;
 use grusindeks_met::locationforecast;
+use grusindeks_met::nowcast::{self, Nowcast};
 
 use crate::aggregate::{
     AggregateScore, DayAggregate, HourScore, HourlyDayAggregate, HourlyForecast, MultiDayForecast,
-    RainHistory,
+    NowcastAlert, RainHistory,
 };
+
+/// Threshold for "this hour got rain on radar" — matches yr.no's
+/// nedbørsvarsel which surfaces from ~0.1 mm/h. Used both for the alert
+/// banner and to decide whether nowcast bumps `probability_of_precip` to
+/// 95% on a forecast hour.
+pub(crate) const NOWCAST_ALERT_THRESHOLD_MM_H: f64 = 0.1;
+
+/// Probability written into `HourlyConditions::probability_of_precip` on
+/// hours where nowcast saw rain ≥ threshold. Radar observation is near
+/// certainty; we don't pin to 100 because the 5-minute-step extrapolation
+/// can drift on the 90–120 min tail.
+pub(crate) const NOWCAST_OVERRIDE_PROBABILITY_PCT: f64 = 95.0;
 
 /// Callbacks the orchestration layer fires as it walks through the
 /// fetch/score pipeline. The CLI binds these to an `indicatif`-backed
@@ -43,6 +56,12 @@ pub trait ProgressSink: Send + Sync {
     fn forecast_point_done(&self) {}
     /// All forecast fetches finished, scoring is starting.
     fn forecast_finished(&self) {}
+    /// We're about to fetch the radar nowcast (Norden only). Only fires
+    /// when nowcast was requested for this run.
+    fn nowcast_started(&self) {}
+    /// Nowcast call done. `found = false` means the request failed or the
+    /// location has no radar coverage; the run continues without alert.
+    fn nowcast_finished(&self, _found: bool) {}
 }
 
 pub struct ScoreInputs<'a> {
@@ -54,6 +73,10 @@ pub struct ScoreInputs<'a> {
     pub history_hours: i64,
     /// Language for human-readable labels and penalty messages.
     pub lang: Language,
+    /// Fetch the radar nowcast and apply its rain overrides to the next
+    /// ~2 h of forecast hours. CLI sets this when the requested window
+    /// starts within the nowcast horizon (see `cmd_score`).
+    pub fetch_nowcast: bool,
     pub progress: &'a dyn ProgressSink,
 }
 
@@ -73,13 +96,21 @@ pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<Ag
     )
     .await;
 
-    let per_point_hours = fetch_forecasts_parallel(client, &points, inputs.progress).await?;
+    let mut per_point_hours = fetch_forecasts_parallel(client, &points, inputs.progress).await?;
+    let nowcast =
+        fetch_nowcast_optional(client, inputs.center, inputs.fetch_nowcast, inputs.progress).await;
+    if let Some(nc) = &nowcast {
+        apply_nowcast_overrides(&mut per_point_hours, nc);
+    }
     let scored: Vec<(Point, _)> = per_point_hours
         .into_iter()
         .map(|(p, hours)| (p, score(&hours, inputs.window, surface, inputs.lang)))
         .collect();
     let mut out = AggregateScore::from_points(inputs.center, scored, inputs.lang);
     out.rain_history = rain_history;
+    out.nowcast_alert = nowcast
+        .as_ref()
+        .and_then(|n| build_nowcast_alert(n, Utc::now()));
     Ok(out)
 }
 
@@ -105,6 +136,8 @@ pub struct ForecastInputs<'a> {
     /// user-chosen length and `min_improvement = 0` so every day shows
     /// its top-scoring sub-window.
     pub best_window: BestWindowConfig,
+    /// See [`ScoreInputs::fetch_nowcast`].
+    pub fetch_nowcast: bool,
     pub progress: &'a dyn ProgressSink,
 }
 
@@ -126,7 +159,12 @@ pub async fn run_forecast(
     .await;
 
     let now = Utc::now();
-    let per_point_hours = fetch_forecasts_parallel(client, &points, inputs.progress).await?;
+    let mut per_point_hours = fetch_forecasts_parallel(client, &points, inputs.progress).await?;
+    let nowcast =
+        fetch_nowcast_optional(client, inputs.center, inputs.fetch_nowcast, inputs.progress).await;
+    if let Some(nc) = &nowcast {
+        apply_nowcast_overrides(&mut per_point_hours, nc);
+    }
 
     // Project ground state forward day by day. The same `Some(state)` was
     // previously fed to every day's `compute_day`, which meant Friday's
@@ -183,7 +221,11 @@ pub async fn run_forecast(
             inputs.lang,
         ));
     }
-    Ok(MultiDayForecast { days, rain_history })
+    Ok(MultiDayForecast {
+        days,
+        rain_history,
+        nowcast_alert: nowcast.as_ref().and_then(|n| build_nowcast_alert(n, now)),
+    })
 }
 
 pub struct HourlyInputs<'a> {
@@ -197,6 +239,8 @@ pub struct HourlyInputs<'a> {
     /// (e.g. \[10..21\] for a 10:00-22:00 window). Drives the column header
     /// in the rendered grid; the orchestration layer only forwards it.
     pub header_hours: Vec<u8>,
+    /// See [`ScoreInputs::fetch_nowcast`].
+    pub fetch_nowcast: bool,
     pub progress: &'a dyn ProgressSink,
 }
 
@@ -217,7 +261,12 @@ pub async fn run_hourly(client: &MetClient, inputs: HourlyInputs<'_>) -> Result<
     .await;
 
     let now = Utc::now();
-    let per_point_hours = fetch_forecasts_parallel(client, &points, inputs.progress).await?;
+    let mut per_point_hours = fetch_forecasts_parallel(client, &points, inputs.progress).await?;
+    let nowcast =
+        fetch_nowcast_optional(client, inputs.center, inputs.fetch_nowcast, inputs.progress).await;
+    if let Some(nc) = &nowcast {
+        apply_nowcast_overrides(&mut per_point_hours, nc);
+    }
 
     let center_truncated = inputs.center.truncated();
     let center_hours = per_point_hours
@@ -341,6 +390,7 @@ pub async fn run_hourly(client: &MetClient, inputs: HourlyInputs<'_>) -> Result<
         header_hours: inputs.header_hours,
         days,
         rain_history,
+        nowcast_alert: nowcast.as_ref().and_then(|n| build_nowcast_alert(n, now)),
     })
 }
 
@@ -420,6 +470,102 @@ fn project_states_for_days(
     out
 }
 
+/// Apply radar-based overrides to the per-point forecast. Mutates each
+/// `HourlyConditions` whose hour bucket overlaps the nowcast window so
+/// the score reflects the **most pessimistic** of the two sources:
+///
+/// 1. `precipitation_mm` ← `max(locationforecast_mm, sum(rate)/12)` —
+///    nowcast steps are 5-min apart, so 12 of them cover an hour. We use
+///    sum-of-rates rather than mean × 1h so partial coverage (nowcast
+///    runs out 90 min in, only 6 steps fall in the last bucket) shows up
+///    as "rain only fell for half the hour" instead of being projected
+///    forward. The `max()` against locationforecast keeps us from
+///    *underestimating* a bucket where radar happens to dip but the
+///    longer-range forecast still expects rain.
+///
+/// 2. `probability_of_precip` ← `max(existing, 95)` when **any** step in
+///    the bucket is at or above [`NOWCAST_ALERT_THRESHOLD_MM_H`]. A 5-min
+///    burst on radar means rain definitely fell in that hour, even if
+///    `nc_mm` rounds small.
+///
+/// No-op when `radar_coverage_ok` is false or `steps` is empty (we just
+/// got a "no coverage" response — bail and let locationforecast stand
+/// alone). Radar bucket geometry is regional, so we apply the same
+/// nowcast to **every** sample point's hours.
+pub(crate) fn apply_nowcast_overrides(
+    per_point_hours: &mut [(Point, Vec<HourlyConditions>)],
+    nowcast: &Nowcast,
+) {
+    if !nowcast.radar_coverage_ok || nowcast.steps.is_empty() {
+        return;
+    }
+    // Bracket the nowcast window for an early skip — most forecast hours
+    // sit far outside it.
+    let nc_first = nowcast.steps.first().expect("non-empty checked above").time;
+    let nc_last_step = nowcast.steps.last().expect("non-empty checked above").time;
+    // Each step represents the rate at a 5-min mark; cover the trailing
+    // 5-min interval too so a step at 14:55 still feeds into a 14:00–15:00
+    // bucket.
+    let nc_end = nc_last_step + Duration::minutes(5);
+
+    for (_, hours) in per_point_hours.iter_mut() {
+        for h in hours.iter_mut() {
+            let bucket_end = h.time + Duration::hours(1);
+            if bucket_end <= nc_first || h.time >= nc_end {
+                continue;
+            }
+            let mut sum_rate = 0.0_f64;
+            let mut peak_rate = 0.0_f64;
+            let mut count: u32 = 0;
+            for s in &nowcast.steps {
+                if s.time >= h.time && s.time < bucket_end {
+                    sum_rate += s.precipitation_rate_mm_h;
+                    if s.precipitation_rate_mm_h > peak_rate {
+                        peak_rate = s.precipitation_rate_mm_h;
+                    }
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                continue;
+            }
+            // 12 5-min steps fill an hour → rate sum × (5/60) = sum / 12 mm.
+            let nc_mm = sum_rate / 12.0;
+            if nc_mm > h.precipitation_mm {
+                h.precipitation_mm = nc_mm;
+            }
+            if peak_rate >= NOWCAST_ALERT_THRESHOLD_MM_H {
+                let new_prob = NOWCAST_OVERRIDE_PROBABILITY_PCT;
+                h.probability_of_precip = Some(match h.probability_of_precip {
+                    Some(existing) if existing > new_prob => existing,
+                    _ => new_prob,
+                });
+            }
+        }
+    }
+}
+
+/// Build a presentation-ready alert from a [`Nowcast`]. `None` when the
+/// series is dry, has no radar coverage, or starts entirely in the past
+/// (nowcast occasionally surfaces a step or two with `time` already
+/// elapsed by the time we render — surfacing those would say "regn om
+/// -3 min", which is just confusing).
+pub(crate) fn build_nowcast_alert(nowcast: &Nowcast, now: DateTime<Utc>) -> Option<NowcastAlert> {
+    if !nowcast.radar_coverage_ok {
+        return None;
+    }
+    let summary = nowcast.summary(NOWCAST_ALERT_THRESHOLD_MM_H)?;
+    if summary.last_rain_at < now {
+        return None;
+    }
+    Some(NowcastAlert {
+        first_rain_at: summary.first_rain_at,
+        last_rain_at: summary.last_rain_at,
+        peak_at: summary.peak_at,
+        peak_mm_h: summary.peak_mm_h,
+    })
+}
+
 /// Fan out one `locationforecast` request per sample point in parallel.
 /// Each completion notifies `progress`; the bar fills as responses
 /// arrive, regardless of completion order.
@@ -476,6 +622,41 @@ async fn fetch_forecasts_parallel(
             })
     });
     Ok(out)
+}
+
+/// Fetch the radar nowcast for `center` when the caller asked for it.
+/// Failure modes (network error, no radar coverage, decode error) are
+/// **non-fatal**: we log and return `None` so the run continues with
+/// locationforecast alone. Nowcast is a best-effort enhancement, not a
+/// dependency of the core score.
+async fn fetch_nowcast_optional(
+    client: &MetClient,
+    center: Point,
+    fetch: bool,
+    progress: &dyn ProgressSink,
+) -> Option<Nowcast> {
+    if !fetch {
+        return None;
+    }
+    progress.nowcast_started();
+    let result = nowcast::fetch(client, center).await;
+    let outcome = match result {
+        Ok(n) if n.radar_coverage_ok => Some(n),
+        Ok(_) => {
+            tracing::info!(
+                "nowcast: no radar coverage for ({:.4}, {:.4}); skipping radar overrides",
+                center.lat,
+                center.lon,
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!("nowcast lookup failed, radar overrides skipped: {e}");
+            None
+        }
+    };
+    progress.nowcast_finished(outcome.is_some());
+    outcome
 }
 
 async fn fetch_ground_state(
@@ -700,6 +881,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+    use grusindeks_met::nowcast::NowcastStep;
     use std::sync::Mutex;
 
     /// Records every event for assertion. Order matters because the CLI
@@ -727,6 +910,189 @@ mod tests {
         fn forecast_finished(&self) {
             self.events.lock().unwrap().push("forecast_finished");
         }
+        fn nowcast_started(&self) {
+            self.events.lock().unwrap().push("nowcast_started");
+        }
+        fn nowcast_finished(&self, _: bool) {
+            self.events.lock().unwrap().push("nowcast_finished");
+        }
+    }
+
+    /// Build a nowcast response body with 24 5-min steps (2h horizon) at
+    /// the given rate, anchored on `start`. Lets us drive end-to-end
+    /// tests without a frozen fixture going stale every day.
+    fn nowcast_body(start: DateTime<Utc>, rate: f64, coverage_ok: bool) -> String {
+        let coverage = if coverage_ok { "ok" } else { "no coverage" };
+        let mut steps = String::new();
+        for i in 0..24 {
+            if !steps.is_empty() {
+                steps.push(',');
+            }
+            let t = start + Duration::minutes(5 * i);
+            steps.push_str(&format!(
+                r#"{{"time":"{}","data":{{"instant":{{"details":{{"precipitation_rate":{:.2}}}}}}}}}"#,
+                t.format("%Y-%m-%dT%H:%M:%SZ"),
+                rate,
+            ));
+        }
+        format!(
+            r#"{{"properties":{{"meta":{{"radar_coverage":"{coverage}"}},"timeseries":[{steps}]}}}}"#,
+        )
+    }
+
+    #[tokio::test]
+    async fn run_score_with_wet_nowcast_degrades_precip_subscore() {
+        use grusindeks_met::client::{MetClient, MetClientConfig, UserAgent};
+        use wiremock::matchers::{method, path as path_m};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let lf_fixture = include_str!("../../../fixtures/locationforecast_oslo.json");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_m("/weatherapi/locationforecast/2.0/complete"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(lf_fixture))
+            .mount(&server)
+            .await;
+        // Wet radar: 1 mm/h sustained for the next 2 hours.
+        let now = Utc::now();
+        // Anchor steps at the next 5-min mark so they line up with the
+        // forecast hour buckets the apply step will hit.
+        let nc_start = now + Duration::seconds(60); // ensure first_rain is in the future
+        Mock::given(method("GET"))
+            .and(path_m("/weatherapi/nowcast/2.0/complete"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(nowcast_body(nc_start, 1.0, true)),
+            )
+            .mount(&server)
+            .await;
+
+        let ua = UserAgent::new("grusindeks-test", "0.1.0", "dev@example.invalid").unwrap();
+        let mut cfg = MetClientConfig::production(ua, None);
+        cfg.api_base = format!("{}/", server.uri()).parse().unwrap();
+        let client = MetClient::new(cfg).unwrap();
+
+        let center = Point::new(59.9139, 10.7522);
+        let win = RideWindow::from_hours(now, 3);
+
+        let dry = run_score(
+            &client,
+            ScoreInputs {
+                center,
+                radius_km: 20.0,
+                window: win,
+                frost_source_id: None,
+                history_hours: 168,
+                lang: Language::Norwegian,
+                fetch_nowcast: false,
+                progress: &RecordingProgress::default(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let wet = run_score(
+            &client,
+            ScoreInputs {
+                center,
+                radius_km: 20.0,
+                window: win,
+                frost_source_id: None,
+                history_hours: 168,
+                lang: Language::Norwegian,
+                fetch_nowcast: true,
+                progress: &RecordingProgress::default(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let alert = wet
+            .nowcast_alert
+            .clone()
+            .expect("wet radar should produce an alert");
+        assert!(
+            alert.peak_mm_h >= 0.9,
+            "alert should reflect 1 mm/h radar rate, got {}",
+            alert.peak_mm_h
+        );
+        assert!(
+            wet.mean <= dry.mean,
+            "radar-overridden run should not score higher than the dry baseline (wet={}, dry={})",
+            wet.mean,
+            dry.mean,
+        );
+        // Probability subscore: nowcast bumps `probability_of_precip` to
+        // 95 on the affected hours, so the prob subscore should drop or
+        // stay at 0 — never improve relative to the dry baseline.
+        let dry_prob = avg_axis_probability(&dry);
+        let wet_prob = avg_axis_probability(&wet);
+        assert!(
+            wet_prob <= dry_prob,
+            "radar should not improve the probability axis (dry={dry_prob}, wet={wet_prob})",
+        );
+    }
+
+    #[tokio::test]
+    async fn run_score_with_no_radar_coverage_skips_alert() {
+        use grusindeks_met::client::{MetClient, MetClientConfig, UserAgent};
+        use wiremock::matchers::{method, path as path_m};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let lf_fixture = include_str!("../../../fixtures/locationforecast_oslo.json");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_m("/weatherapi/locationforecast/2.0/complete"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(lf_fixture))
+            .mount(&server)
+            .await;
+        let now = Utc::now();
+        Mock::given(method("GET"))
+            .and(path_m("/weatherapi/nowcast/2.0/complete"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(nowcast_body(
+                now + Duration::seconds(60),
+                1.0,
+                false,
+            )))
+            .mount(&server)
+            .await;
+
+        let ua = UserAgent::new("grusindeks-test", "0.1.0", "dev@example.invalid").unwrap();
+        let mut cfg = MetClientConfig::production(ua, None);
+        cfg.api_base = format!("{}/", server.uri()).parse().unwrap();
+        let client = MetClient::new(cfg).unwrap();
+
+        let center = Point::new(59.9139, 10.7522);
+        let win = RideWindow::from_hours(now, 3);
+        let agg = run_score(
+            &client,
+            ScoreInputs {
+                center,
+                radius_km: 20.0,
+                window: win,
+                frost_source_id: None,
+                history_hours: 168,
+                lang: Language::Norwegian,
+                fetch_nowcast: true,
+                progress: &RecordingProgress::default(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            agg.nowcast_alert.is_none(),
+            "no radar coverage → no alert (got {:?})",
+            agg.nowcast_alert,
+        );
+    }
+
+    fn avg_axis_probability(agg: &AggregateScore) -> u32 {
+        let n = agg.points.len() as u32;
+        let sum: u32 = agg
+            .points
+            .iter()
+            .map(|p| u32::from(p.score.breakdown.precip_probability))
+            .sum();
+        (sum + n / 2) / n
     }
 
     #[tokio::test]
@@ -761,6 +1127,7 @@ mod tests {
                 frost_source_id: None, // Frost not configured → no ground events
                 history_hours: 168,
                 lang: Language::Norwegian,
+                fetch_nowcast: false,
                 progress: &progress,
             },
         )
@@ -780,6 +1147,222 @@ mod tests {
             .filter(|e| **e == "forecast_point_done")
             .count();
         assert_eq!(ticks, total, "one tick per fanned-out point");
+    }
+
+    // ---- apply_nowcast_overrides ----
+
+    fn point_oslo() -> Point {
+        Point::new(59.9139, 10.7522)
+    }
+
+    /// 12 nowcast steps (5-min apart) within `[start, start + 1h)`,
+    /// constant rate. With rate=0.6 the per-hour mm is 0.6.
+    fn constant_rate_steps(start: DateTime<Utc>, rate: f64) -> Vec<NowcastStep> {
+        (0..12)
+            .map(|i| NowcastStep {
+                time: start + Duration::minutes(5 * i),
+                precipitation_rate_mm_h: rate,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nowcast_overrides_dry_locationforecast_with_radar_rain() {
+        let h_start = Utc.with_ymd_and_hms(2026, 4, 26, 14, 0, 0).unwrap();
+        let hours = vec![
+            HourlyConditions::minimal(h_start, 12.0, 3.0, 0.0),
+            HourlyConditions::minimal(h_start + Duration::hours(1), 12.0, 3.0, 0.0),
+        ];
+        let mut per_point = vec![(point_oslo(), hours.clone())];
+        let nowcast = Nowcast {
+            radar_coverage_ok: true,
+            steps: constant_rate_steps(h_start, 0.6),
+        };
+        apply_nowcast_overrides(&mut per_point, &nowcast);
+        let updated = &per_point[0].1;
+        // First hour got 0.6 mm of radar rain.
+        assert!(
+            (updated[0].precipitation_mm - 0.6).abs() < 1e-9,
+            "expected 0.6 mm, got {}",
+            updated[0].precipitation_mm
+        );
+        // Second hour outside nowcast window → untouched.
+        assert_eq!(updated[1].precipitation_mm, 0.0);
+        // Probability bumped to 95 because peak rate (0.6) clears the threshold.
+        assert_eq!(updated[0].probability_of_precip, Some(95.0));
+        assert_eq!(updated[1].probability_of_precip, None);
+        let _ = hours; // silence the unused-original-clone warning
+    }
+
+    #[test]
+    fn nowcast_does_not_lower_a_wetter_locationforecast() {
+        // Locationforecast says 1.5 mm in this hour; radar only sees 0.3 mm.
+        // Conservative max() rule keeps locationforecast.
+        let h_start = Utc.with_ymd_and_hms(2026, 4, 26, 14, 0, 0).unwrap();
+        let mut per_point = vec![(
+            point_oslo(),
+            vec![HourlyConditions {
+                probability_of_precip: Some(80.0),
+                ..HourlyConditions::minimal(h_start, 12.0, 3.0, 1.5)
+            }],
+        )];
+        let nowcast = Nowcast {
+            radar_coverage_ok: true,
+            steps: constant_rate_steps(h_start, 0.3),
+        };
+        apply_nowcast_overrides(&mut per_point, &nowcast);
+        let updated = &per_point[0].1[0];
+        assert_eq!(updated.precipitation_mm, 1.5, "max() should win");
+        // Probability does climb to 95 since radar rate (0.3 ≥ 0.1) confirms rain.
+        assert_eq!(updated.probability_of_precip, Some(95.0));
+    }
+
+    #[test]
+    fn nowcast_skips_buckets_outside_window() {
+        // Hour starts 3h after now — nowcast only covers next 2h.
+        let now = Utc.with_ymd_and_hms(2026, 4, 26, 14, 0, 0).unwrap();
+        let mut per_point = vec![(
+            point_oslo(),
+            vec![HourlyConditions::minimal(
+                now + Duration::hours(3),
+                12.0,
+                3.0,
+                0.0,
+            )],
+        )];
+        let nowcast = Nowcast {
+            radar_coverage_ok: true,
+            steps: constant_rate_steps(now, 1.0),
+        };
+        apply_nowcast_overrides(&mut per_point, &nowcast);
+        assert_eq!(
+            per_point[0].1[0].precipitation_mm, 0.0,
+            "bucket 3h out should be untouched"
+        );
+        assert_eq!(per_point[0].1[0].probability_of_precip, None);
+    }
+
+    #[test]
+    fn nowcast_no_coverage_is_a_noop() {
+        let h_start = Utc.with_ymd_and_hms(2026, 4, 26, 14, 0, 0).unwrap();
+        let mut per_point = vec![(
+            point_oslo(),
+            vec![HourlyConditions::minimal(h_start, 12.0, 3.0, 0.0)],
+        )];
+        // Steps would otherwise mutate the bucket — but coverage_ok=false bails.
+        let nowcast = Nowcast {
+            radar_coverage_ok: false,
+            steps: constant_rate_steps(h_start, 0.6),
+        };
+        apply_nowcast_overrides(&mut per_point, &nowcast);
+        assert_eq!(per_point[0].1[0].precipitation_mm, 0.0);
+    }
+
+    #[test]
+    fn nowcast_partial_coverage_only_affects_present_minutes() {
+        // 6 steps over the first 30 min of an hour, then nothing. Sum of
+        // rates = 6 × 0.6 = 3.6 mm/h-equivalents → 3.6 / 12 = 0.3 mm.
+        // (Reads as "rain fell for half the hour at 0.6 mm/h".)
+        let h_start = Utc.with_ymd_and_hms(2026, 4, 26, 14, 0, 0).unwrap();
+        let mut per_point = vec![(
+            point_oslo(),
+            vec![HourlyConditions::minimal(h_start, 12.0, 3.0, 0.0)],
+        )];
+        let nowcast = Nowcast {
+            radar_coverage_ok: true,
+            steps: (0..6)
+                .map(|i| NowcastStep {
+                    time: h_start + Duration::minutes(5 * i),
+                    precipitation_rate_mm_h: 0.6,
+                })
+                .collect(),
+        };
+        apply_nowcast_overrides(&mut per_point, &nowcast);
+        assert!(
+            (per_point[0].1[0].precipitation_mm - 0.3).abs() < 1e-9,
+            "expected 0.3 mm for 30-min coverage, got {}",
+            per_point[0].1[0].precipitation_mm
+        );
+    }
+
+    #[test]
+    fn nowcast_propagates_to_every_sample_point() {
+        let h_start = Utc.with_ymd_and_hms(2026, 4, 26, 14, 0, 0).unwrap();
+        let make_hours = || vec![HourlyConditions::minimal(h_start, 12.0, 3.0, 0.0)];
+        let mut per_point = vec![
+            (Point::new(59.91, 10.75), make_hours()),
+            (Point::new(60.00, 10.75), make_hours()),
+            (Point::new(59.85, 10.85), make_hours()),
+        ];
+        let nowcast = Nowcast {
+            radar_coverage_ok: true,
+            steps: constant_rate_steps(h_start, 0.6),
+        };
+        apply_nowcast_overrides(&mut per_point, &nowcast);
+        for (_, hours) in &per_point {
+            assert!(
+                (hours[0].precipitation_mm - 0.6).abs() < 1e-9,
+                "every sample point should receive the same radar override"
+            );
+        }
+    }
+
+    // ---- build_nowcast_alert ----
+
+    #[test]
+    fn build_nowcast_alert_dry_returns_none() {
+        let now = Utc.with_ymd_and_hms(2026, 4, 26, 14, 0, 0).unwrap();
+        let nowcast = Nowcast {
+            radar_coverage_ok: true,
+            steps: constant_rate_steps(now, 0.0),
+        };
+        assert!(build_nowcast_alert(&nowcast, now).is_none());
+    }
+
+    #[test]
+    fn build_nowcast_alert_no_coverage_returns_none() {
+        let now = Utc.with_ymd_and_hms(2026, 4, 26, 14, 0, 0).unwrap();
+        let nowcast = Nowcast {
+            radar_coverage_ok: false,
+            steps: constant_rate_steps(now, 0.6),
+        };
+        assert!(build_nowcast_alert(&nowcast, now).is_none());
+    }
+
+    #[test]
+    fn build_nowcast_alert_returns_some_when_rain_in_future() {
+        let now = Utc.with_ymd_and_hms(2026, 4, 26, 14, 0, 0).unwrap();
+        let nowcast = Nowcast {
+            radar_coverage_ok: true,
+            steps: vec![
+                NowcastStep {
+                    time: now + Duration::minutes(15),
+                    precipitation_rate_mm_h: 0.4,
+                },
+                NowcastStep {
+                    time: now + Duration::minutes(20),
+                    precipitation_rate_mm_h: 0.6,
+                },
+            ],
+        };
+        let a = build_nowcast_alert(&nowcast, now).expect("rain in future");
+        assert_eq!(a.first_rain_at, now + Duration::minutes(15));
+        assert!((a.peak_mm_h - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn build_nowcast_alert_returns_none_when_only_past_steps() {
+        // Nowcast occasionally returns the most recent few steps in the
+        // past — those shouldn't surface as "regn om -3 min".
+        let now = Utc.with_ymd_and_hms(2026, 4, 26, 14, 0, 0).unwrap();
+        let nowcast = Nowcast {
+            radar_coverage_ok: true,
+            steps: vec![NowcastStep {
+                time: now - Duration::minutes(10),
+                precipitation_rate_mm_h: 0.6,
+            }],
+        };
+        assert!(build_nowcast_alert(&nowcast, now).is_none());
     }
 
     #[test]
