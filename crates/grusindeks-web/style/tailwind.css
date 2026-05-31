@@ -1,0 +1,23 @@
+@import "tailwindcss";
+
+/* Scan the Leptos `view!` macros for class names (Tailwind v4 doesn't read
+   tailwind.config.js; sources and theme are declared here). */
+@source "../src";
+
+/* Gruvbox dark — mirrors crates/grusindeks-cli/src/theme.rs so the web UI and
+   the CLI share one palette. `--color-<name>` makes `bg-<name>`, `text-<name>`,
+   `border-<name>`, etc. available. */
+@theme {
+  --color-gruv-bg0: #282828;
+  --color-gruv-bg1: #3c3836;
+  --color-gruv-bg2: #504945;
+  --color-gruv-fg: #ebdbb2;
+  --color-gruv-gray: #928374;
+  --color-gruv-red: #cc241d;
+  --color-gruv-orange: #fe8019;
+  --color-gruv-yellow: #fabd2f;
+  --color-gruv-lime: #b8bb26;
+  --color-gruv-green: #689d6a;
+  --color-gruv-aqua: #458588;
+  --color-gruv-blue: #83a598;
+}

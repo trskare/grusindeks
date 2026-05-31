@@ -224,7 +224,10 @@ impl WindowStats {
 pub struct Grusindeks {
     pub total: u8,
     pub breakdown: ScoreBreakdown,
-    pub label: &'static str,
+    /// Localized one-word verdict ("Strålende"/"Bra"/…). Owned so the type
+    /// round-trips through serde (JSON API / web client); the value is the
+    /// same string [`label_for`] returns.
+    pub label: String,
     /// `true` when a hard cap (heavy rain or storm wind) clamped the total.
     pub hard_capped: bool,
     /// Explanations for the sub-scores that got reduced. Sorted by
@@ -309,7 +312,7 @@ pub fn score(
                 precip_probability: 0,
                 ground: 0,
             },
-            label,
+            label: label.to_string(),
             hard_capped: false,
             penalties: vec![Penalty {
                 component: Component::NoData,
@@ -526,7 +529,7 @@ pub fn score(
     Grusindeks {
         total,
         breakdown,
-        label: label_for(total, lang),
+        label: label_for(total, lang).to_string(),
         hard_capped,
         penalties,
         highlights,

@@ -1,0 +1,21 @@
+services:
+  grusindeks:
+    build: .
+    image: grusindeks-web
+    ports:
+      - "3000:3000"
+    volumes:
+      # SQLite database + MET response cache. Survives container recreation.
+      - grusindeks-data:/data
+    environment:
+      LEPTOS_SITE_ADDR: 0.0.0.0:3000
+      GRUSINDEKS_DB: sqlite:///data/grusindeks.db
+      GRUSINDEKS_CACHE_DIR: /data/cache
+      # REQUIRED by api.met.no's TOS — set a real contact (email or URL).
+      # Persisted to the DB on startup; can also be changed in the settings UI.
+      GRUSINDEKS_CONTACT: "set-me@example.com"
+      RUST_LOG: info
+    restart: unless-stopped
+
+volumes:
+  grusindeks-data:

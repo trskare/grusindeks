@@ -8,7 +8,7 @@
 //! first ~60 hours.
 
 use chrono::{DateTime, Duration, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::drying::SurfaceState;
 use crate::lang::Language;
@@ -17,7 +17,7 @@ use crate::types::{HourlyConditions, Resolution, RideWindow};
 
 /// How much the user should trust a forecast. Drops as the horizon grows
 /// and as the proportion of 6-hourly data overtakes hourly data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Confidence {
     Hoy,
@@ -61,7 +61,7 @@ impl Confidence {
 /// it when the window is 9 °C is misleading, even if 9 °C is the
 /// warmest stretch of the day. `MinstKald` covers that comparative
 /// case without overselling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BestWindowReason {
     /// Window's felt-temperature is in the comfortable plateau (16–22 °C)
@@ -97,7 +97,7 @@ impl BestWindowReason {
 
 /// A sub-window of the day that scores meaningfully better than the day
 /// as a whole — the "go ride now" suggestion.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OptimalWindow {
     pub window: RideWindow,
     pub score: Grusindeks,
@@ -111,7 +111,7 @@ pub struct OptimalWindow {
 }
 
 /// One day's worth of summary data.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DayScore {
     /// The full day window in UTC. Whatever the caller passed in.
     pub window: RideWindow,
@@ -125,8 +125,9 @@ pub struct DayScore {
     pub optimal_window: Option<OptimalWindow>,
     /// Single-glyph weather summary for the day. Derived from the in-window
     /// cloud cover, total precipitation, max wind, and mean temperature so
-    /// the renderer can show one icon per day.
-    pub weather_icon: &'static str,
+    /// the renderer can show one icon per day. Owned so the type round-trips
+    /// through serde; the value is what [`weather_icon_for`] returns.
+    pub weather_icon: String,
 }
 
 /// Default minimum point-improvement before we surface a "best window" in
@@ -200,7 +201,7 @@ pub fn compute_day(
     )
     .filter(|ow| ow.improvement >= best_window.min_improvement);
 
-    let weather_icon = weather_icon_for(&in_window);
+    let weather_icon = weather_icon_for(&in_window).to_string();
 
     DayScore {
         window: day_window,

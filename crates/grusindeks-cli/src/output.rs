@@ -825,7 +825,7 @@ fn write_day_row(
 ) {
     let center = day.center();
     let day_label = day_label(day.date, today_local, lang);
-    let icon = center.weather_icon;
+    let icon = center.weather_icon.as_str();
 
     let dim = theme::dim_for_confidence(day.confidence);
 
@@ -2431,7 +2431,7 @@ mod tests {
             confidence,
             hours_with_data: 12,
             optimal_window: None,
-            weather_icon: "☀",
+            weather_icon: "☀".to_string(),
         };
         DayAggregate {
             date,
@@ -2444,7 +2444,7 @@ mod tests {
             points: vec![DayPointScore {
                 point: center,
                 bearing_deg: 0.0,
-                bearing_label: "senter",
+                bearing_label: "senter".to_string(),
                 is_center: true,
                 day_score,
             }],

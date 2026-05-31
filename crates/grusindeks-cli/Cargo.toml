@@ -7,15 +7,36 @@ license.workspace = true
 authors.workspace = true
 description = "CLI for the grusindeks weather/cycling app — computes Grusindeks for a given area"
 
+[lib]
+name = "grusindeks_cli"
+path = "src/lib.rs"
+
+# The binary needs the `cli` feature (clap + terminal rendering). This lets
+# the web crate depend on the library target with `default-features = false`
+# and skip the CLI-only dependency tree.
 [[bin]]
 name = "grusindeks"
 path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# Everything the terminal binary needs on top of the reusable library:
+# argument parsing, completions, the colored/progress renderer, and the
+# tracing subscriber. Library consumers (e.g. grusindeks-web) leave this off.
+cli = [
+    "dep:clap",
+    "dep:clap_complete",
+    "dep:tracing-subscriber",
+    "dep:owo-colors",
+    "dep:terminal_size",
+    "dep:indicatif",
+    "dep:unicode-width",
+]
 
 [dependencies]
 grusindeks-core = { workspace = true }
 grusindeks-met = { workspace = true }
-clap = { workspace = true }
-clap_complete = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
@@ -24,12 +45,14 @@ toml = { workspace = true }
 chrono = { workspace = true }
 directories = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 url = "2"
-owo-colors = { version = "4", features = ["supports-colors"] }
-terminal_size = "0.4"
-indicatif = "0.18"
-unicode-width = "0.2"
+clap = { workspace = true, optional = true }
+clap_complete = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+owo-colors = { version = "4", features = ["supports-colors"], optional = true }
+terminal_size = { version = "0.4", optional = true }
+indicatif = { version = "0.18", optional = true }
+unicode-width = { version = "0.2", optional = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
