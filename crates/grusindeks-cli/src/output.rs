@@ -618,6 +618,47 @@ fn rain_history_chip_content(history: &RainHistory, lang: Language) -> Option<St
     })
 }
 
+/// Rain status appended to the "Beste luke" / "Beste vindu" line.
+///
+/// The day row can already show a rain icon for the whole day; this tiny
+/// trailer answers the more actionable question: does the suggested
+/// sub-window itself look dry, or is there forecast rain inside it?
+fn best_window_rain_trailer(
+    stats: &WindowStats,
+    lang: Language,
+    is_opening: bool,
+) -> Option<String> {
+    if stats.is_empty() {
+        return None;
+    }
+
+    let place = match (lang, is_opening) {
+        (Language::Norwegian, true) => "i luka",
+        (Language::Norwegian, false) => "i vinduet",
+        (Language::Swedish, true) => "i luckan",
+        (Language::Swedish, false) => "i fönstret",
+    };
+    let total = stats.total_precip_mm.max(0.0);
+    let peak = stats.max_hourly_precip_mm.max(0.0);
+    let text = match (lang, total, peak) {
+        (Language::Norwegian, t, p) if t < 0.05 && p < 0.05 => format!("☂ opphold {place}"),
+        (Language::Swedish, t, p) if t < 0.05 && p < 0.05 => format!("☂ uppehåll {place}"),
+        (Language::Norwegian, t, p) if t < 0.5 && p < 0.5 => format!("🌦 yr {t:.1} mm {place}"),
+        (Language::Swedish, t, p) if t < 0.5 && p < 0.5 => {
+            format!("🌦 duggregn {t:.1} mm {place}")
+        }
+        (Language::Norwegian, _, p) if p >= 3.0 => {
+            format!("⛈ kraftig regn {place}, topp {p:.1} mm/t")
+        }
+        (Language::Swedish, _, p) if p >= 3.0 => {
+            format!("⛈ kraftigt regn {place}, topp {p:.1} mm/h")
+        }
+        (Language::Norwegian, t, _) => format!("🌧 regn {t:.1} mm {place}"),
+        (Language::Swedish, t, _) => format!("🌧 regn {t:.1} mm {place}"),
+    };
+    Some(text)
+}
+
 /// Compact, colour-coded one-liner for the "Tall" per-day stats row:
 /// `12–14 °C · 0.4 mm · 5 m/s (kast 8)`. Each number is painted by
 /// mapping the raw value through the relevant axis sub-score so harsh
@@ -894,15 +935,19 @@ fn write_day_row(
             .reason
             .map(|r| format!(" — {}", theme::paint_dim(r.label(lang))))
             .unwrap_or_default();
+        let rain_trailer = best_window_rain_trailer(&ow.score.stats, lang, ow.improvement > 0)
+            .map(|s| format!(" · {}", theme::paint_dim(&s)))
+            .unwrap_or_default();
         let _ = writeln!(
             out,
-            "{BREAKDOWN_INDENT}★ {phrase}: {}–{} → {} ({}{}){}",
+            "{BREAKDOWN_INDENT}★ {phrase}: {}–{} → {} ({}{}){}{}",
             local_hm(ow.window.start),
             local_hm(ow.window.end),
             theme::paint_score(ow.score.total),
             theme::paint_label(mean_label(ow.score.total, lang), ow.score.total),
             suffix,
             reason_trailer,
+            rain_trailer,
         );
     }
 
@@ -1845,6 +1890,67 @@ mod tests {
         assert!(
             out.contains("tørrest"),
             "expected 'tørrest' reason after Beste luke line: {out}"
+        );
+        assert!(
+            out.contains("opphold i luka"),
+            "expected dry-window rain status after Beste luke line: {out}"
+        );
+    }
+
+    #[test]
+    fn multi_day_render_appends_rain_status_after_rainy_best_window() {
+        use crate::aggregate::DayAggregate;
+        use grusindeks_core::daily::{compute_day, BestWindowConfig};
+
+        fn rainy(time_h: u32) -> HourlyConditions {
+            HourlyConditions {
+                probability_of_precip: Some(95.0),
+                ..HourlyConditions::minimal(t(time_h), 12.0, 3.0, 1.0)
+            }
+        }
+
+        let win = RideWindow::from_hours(t(6), 12);
+        let now = t(5);
+        let center = Point::new(59.9139, 10.7522);
+        let hours: Vec<_> = (6..18).map(rainy).collect();
+        let cfg = BestWindowConfig {
+            length_hours: 3,
+            min_improvement: 0,
+            excluded_windows: Vec::new(),
+        };
+        let day = DayAggregate::from_points(
+            NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),
+            win,
+            center,
+            vec![(
+                center,
+                compute_day(
+                    &hours,
+                    win,
+                    Some(SurfaceState::default()),
+                    now,
+                    Language::Norwegian,
+                    cfg,
+                ),
+            )],
+            Language::Norwegian,
+        );
+        let forecast = MultiDayForecast {
+            days: vec![day],
+            rain_history: None,
+            nowcast_alert: None,
+        };
+        let out = render_multi_day(
+            "Oslo",
+            20.0,
+            &forecast,
+            false,
+            ChipFlags::default(),
+            Language::Norwegian,
+        );
+        assert!(
+            out.contains("regn 3.0 mm i vinduet"),
+            "expected rainy-window status after Beste vindu line: {out}"
         );
     }
 
