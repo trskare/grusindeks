@@ -209,7 +209,7 @@ pub async fn run_forecast(
                 *day_surface,
                 now,
                 inputs.lang,
-                inputs.best_window,
+                inputs.best_window.clone(),
             );
             day_points.push((*p, ds));
         }

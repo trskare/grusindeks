@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Local, NaiveDate, NaiveTime, TimeZone, Utc};
+use chrono::{
+    DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, NaiveTime, TimeZone, Utc,
+};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use grusindeks_core::geo::Point;
@@ -19,7 +21,7 @@ use url::Url;
 
 use grusindeks_core::daily::BestWindowConfig;
 
-use crate::config::{Config, DaytimeWindow};
+use crate::config::{Config, DaytimeWindow, WorkHoursConfig};
 use crate::progress::TerminalProgress;
 use crate::run::{
     run_forecast, run_hourly, run_score, DayWindow, ForecastInputs, HourlyInputs, ScoreInputs,
@@ -92,6 +94,9 @@ struct Cli {
     /// Uten verdi: 2 timer.
     #[arg(long = "best-window", num_args = 0..=1, default_missing_value = "2", value_name = "TIMER", value_parser = clap::value_parser!(i64).range(1..=MAX_HOURS))]
     best_window: Option<i64>,
+    /// Ignorer work_hours fra config når --best-window velger vinduer.
+    #[arg(long = "include-work-hours")]
+    include_work_hours: bool,
     /// Vis time-for-time-score for alle dagene i prognosen, begrenset til
     /// dag-vinduet i config (default 10:00–22:00). Kan kombineres med
     /// --days; ikke med --window/--hours/--best-window.
@@ -215,13 +220,14 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
     if single_day && cli.best_window.is_some() {
         bail!("--best-window gjelder bare multi-dags-prognosen — kan ikke kombineres med --window/--hours");
     }
-    let best_window = match cli.best_window {
+    let mut best_window = match cli.best_window {
         Some(h) => BestWindowConfig {
             length_hours: h,
             // Override the default improvement filter so every day surfaces
             // its top-scoring sub-window, even on uniform days where the
             // window only matches the day mean.
             min_improvement: 0,
+            excluded_windows: Vec::new(),
         },
         None => BestWindowConfig::default(),
     };
@@ -236,6 +242,11 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
             cfg_path.display()
         )
     })?;
+
+    if cli.best_window.is_some() && !cli.include_work_hours {
+        best_window.excluded_windows =
+            build_work_hour_exclusions(Local::now().date_naive(), days, &cfg.work_hours);
+    }
 
     let location = resolve_location(&cfg, cli.lat, cli.lon, cli.place.clone(), cli.radius_km)?;
     let frost_source_id = location_frost_source(&cfg, &location);
@@ -516,6 +527,29 @@ fn build_day_windows(
     Ok(out)
 }
 
+fn build_work_hour_exclusions(
+    start_date: NaiveDate,
+    n: u8,
+    work_hours: &WorkHoursConfig,
+) -> Vec<RideWindow> {
+    if !work_hours.enabled {
+        return Vec::new();
+    }
+    let work_days: Vec<_> = work_hours.days.iter().copied().map(Into::into).collect();
+    let max_offsets = if n < MAX_FORECAST_DAYS { n + 1 } else { n };
+    (0..i64::from(max_offsets))
+        .filter_map(|offset| {
+            let date = start_date + ChronoDuration::days(offset);
+            if !work_days.contains(&date.weekday()) {
+                return None;
+            }
+            let start = local_to_utc(date.and_time(work_hours.window.start)).ok()?;
+            let end = local_to_utc(date.and_time(work_hours.window.end)).ok()?;
+            Some(RideWindow { start, end })
+        })
+        .collect()
+}
+
 fn has_forecast_hour_in_window(start: DateTime<Utc>, end: DateTime<Utc>) -> bool {
     next_whole_hour_at_or_after(start) < end
 }
@@ -743,6 +777,32 @@ mod build_day_windows_tests {
         let days = build_day_windows(today, 1, now, custom).unwrap();
         assert_eq!(days[0].window.start, dt(today, 7, 0));
         assert_eq!(days[0].window.end, dt(today, 19, 0));
+    }
+
+    #[test]
+    fn work_hour_exclusions_follow_configured_weekdays() {
+        let monday = NaiveDate::from_ymd_opt(2026, 4, 27).unwrap();
+        let cfg = WorkHoursConfig {
+            enabled: true,
+            days: vec![crate::config::Workday::Mon, crate::config::Workday::Wed],
+            window: DaytimeWindow {
+                start: NaiveTime::from_hms_opt(8, 0, 0).unwrap(),
+                end: NaiveTime::from_hms_opt(15, 0, 0).unwrap(),
+            },
+        };
+        let exclusions = build_work_hour_exclusions(monday, 3, &cfg);
+        assert_eq!(exclusions.len(), 2);
+        assert_eq!(exclusions[0].start, dt(monday, 8, 0));
+        assert_eq!(exclusions[0].end, dt(monday, 15, 0));
+        let wednesday = monday + ChronoDuration::days(2);
+        assert_eq!(exclusions[1].start, dt(wednesday, 8, 0));
+    }
+
+    #[test]
+    fn work_hour_exclusions_are_empty_when_disabled() {
+        let monday = NaiveDate::from_ymd_opt(2026, 4, 27).unwrap();
+        let exclusions = build_work_hour_exclusions(monday, 5, &WorkHoursConfig::default());
+        assert!(exclusions.is_empty());
     }
 
     #[test]

@@ -1865,6 +1865,7 @@ mod tests {
         let cfg = BestWindowConfig {
             length_hours: 2,
             min_improvement: 0,
+            excluded_windows: Vec::new(),
         };
         let day = DayAggregate::from_points(
             NaiveDate::from_ymd_opt(2026, 4, 26).unwrap(),

@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::NaiveTime;
+use chrono::{NaiveTime, Weekday};
 use directories::ProjectDirs;
 use grusindeks_core::geo::Point;
 use grusindeks_core::lang::Language;
@@ -32,6 +32,12 @@ pub struct Config {
     /// rides through.
     #[serde(default)]
     pub daytime_window: DaytimeWindow,
+
+    /// Optional recurring local work hours that `--best-window` should avoid.
+    /// Configure this in TOML; use `--include-work-hours` for a one-off run
+    /// that ignores it.
+    #[serde(default)]
+    pub work_hours: WorkHoursConfig,
 
     #[serde(default)]
     pub frost: FrostConfig,
@@ -108,6 +114,69 @@ impl TryFrom<String> for DaytimeWindow {
 impl From<DaytimeWindow> for String {
     fn from(d: DaytimeWindow) -> Self {
         format!("{}-{}", d.start.format("%H:%M"), d.end.format("%H:%M"))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkHoursConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_work_days")]
+    pub days: Vec<Workday>,
+    #[serde(default = "default_work_window")]
+    pub window: DaytimeWindow,
+}
+
+impl Default for WorkHoursConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            days: default_work_days(),
+            window: default_work_window(),
+        }
+    }
+}
+
+fn default_work_days() -> Vec<Workday> {
+    vec![
+        Workday::Mon,
+        Workday::Tue,
+        Workday::Wed,
+        Workday::Thu,
+        Workday::Fri,
+    ]
+}
+
+fn default_work_window() -> DaytimeWindow {
+    DaytimeWindow {
+        start: NaiveTime::from_hms_opt(8, 0, 0).expect("08:00 is a valid time"),
+        end: NaiveTime::from_hms_opt(15, 0, 0).expect("15:00 is a valid time"),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Workday {
+    Mon,
+    Tue,
+    Wed,
+    Thu,
+    Fri,
+    Sat,
+    Sun,
+}
+
+impl From<Workday> for Weekday {
+    fn from(day: Workday) -> Self {
+        match day {
+            Workday::Mon => Weekday::Mon,
+            Workday::Tue => Weekday::Tue,
+            Workday::Wed => Weekday::Wed,
+            Workday::Thu => Weekday::Thu,
+            Workday::Fri => Weekday::Fri,
+            Workday::Sat => Weekday::Sat,
+            Workday::Sun => Weekday::Sun,
+        }
     }
 }
 
@@ -202,6 +271,13 @@ default_place = "oslo"
 # Optional: extra footer chips. Both default to true.
 # show_rain_history = true   # "Regn 7d" — total mm, wettest day, rain days
 # show_window_stats = true   # "Tall" — temp range, total precip, max wind/gust
+
+# Optional: recurring local work hours that --best-window should avoid.
+# Override once with --include-work-hours.
+# [work_hours]
+# enabled = true
+# days = ["mon", "tue", "wed", "thu", "fri"]
+# window = "08:00-15:00"
 
 [frost]
 # Register a free client_id at https://frost.met.no/auth/requestCredentials.html
@@ -355,6 +431,38 @@ frost_source_id = "SN50540"
             "user_agent_contact = \"dev@example.invalid\"\ndaytime_window = \"morning\"\n",
         );
         assert!(Config::load_from(&p).is_err());
+    }
+
+    #[test]
+    fn work_hours_default_disabled_but_uses_weekday_08_to_15() {
+        let dir = TempDir::new().unwrap();
+        let p = write_cfg(&dir, "user_agent_contact = \"dev@example.invalid\"\n");
+        let cfg = Config::load_from(&p).unwrap();
+        assert!(!cfg.work_hours.enabled);
+        assert_eq!(cfg.work_hours.days, default_work_days());
+        assert_eq!(cfg.work_hours.window, default_work_window());
+    }
+
+    #[test]
+    fn loads_enabled_work_hours() {
+        let dir = TempDir::new().unwrap();
+        let p = write_cfg(
+            &dir,
+            r#"
+user_agent_contact = "dev@example.invalid"
+[work_hours]
+enabled = true
+days = ["mon", "wed", "fri"]
+window = "08:00-15:00"
+"#,
+        );
+        let cfg = Config::load_from(&p).unwrap();
+        assert!(cfg.work_hours.enabled);
+        assert_eq!(
+            cfg.work_hours.days,
+            vec![Workday::Mon, Workday::Wed, Workday::Fri]
+        );
+        assert_eq!(cfg.work_hours.window, default_work_window());
     }
 
     #[test]
