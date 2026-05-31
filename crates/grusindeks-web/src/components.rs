@@ -6,11 +6,46 @@ use chrono::Local;
 use leptos::prelude::*;
 
 use grusindeks_core::aggregate::{DayAggregate, NowcastAlert};
-use grusindeks_core::daily::Confidence;
-use grusindeks_core::score::{Component, Penalty, ScoreBreakdown, Severity};
+use grusindeks_core::daily::{BestWindowReason, Confidence};
+use grusindeks_core::score::{Component, Penalty, ScoreBreakdown, Severity, WindowStats};
 
 use crate::color;
 use crate::dto::HistoryPoint;
+
+/// Norwegian one-word "why this window is best" phrase. The web UI is
+/// Norwegian-only (like every other string here), so we hardcode the
+/// Norwegian arm rather than plumbing a `Language` through every component.
+fn best_window_reason_label(r: BestWindowReason) -> &'static str {
+    match r {
+        BestWindowReason::Mildest => "mildest",
+        BestWindowReason::MinstKald => "minst kald",
+        BestWindowReason::Vind => "minst vind",
+        BestWindowReason::Nedbor => "tørrest",
+    }
+}
+
+/// Pre-formatted "better window later today" hint for the recommendation card.
+/// Built in `app.rs` from `MultiDayForecast::days[0].optimal_window`.
+#[derive(Clone)]
+pub struct BestWindowHint {
+    pub start: String,
+    pub end: String,
+    pub improvement: u8,
+    pub reason: Option<&'static str>,
+}
+
+impl BestWindowHint {
+    /// Build from an [`OptimalWindow`], formatting the window edges in local
+    /// time. Returns `None` when there's no stand-out window.
+    pub fn from_window(ow: &grusindeks_core::daily::OptimalWindow) -> Self {
+        Self {
+            start: ow.window.start.with_timezone(&Local).format("%H:%M").to_string(),
+            end: ow.window.end.with_timezone(&Local).format("%H:%M").to_string(),
+            improvement: ow.improvement,
+            reason: ow.reason.map(best_window_reason_label),
+        }
+    }
+}
 
 fn cta_for(total: u8) -> (&'static str, &'static str) {
     match total {
@@ -81,7 +116,16 @@ pub fn score_reason(breakdown: ScoreBreakdown, penalties: &[Penalty]) -> String 
 
 /// A plain-language recommendation for the current score.
 #[component]
-pub fn Recommendation(total: u8, label: String, reason: String, place: String) -> impl IntoView {
+pub fn Recommendation(
+    total: u8,
+    label: String,
+    reason: String,
+    place: String,
+    /// "Better window later today" — promoted up from the multi-day strip so
+    /// a rider sees the timing decision next to the verdict. `None` when no
+    /// stand-out window beats the current conditions.
+    best_window: Option<BestWindowHint>,
+) -> impl IntoView {
     let (cta, summary) = cta_for(total);
     let updated = Local::now().format("%H:%M").to_string();
     let place = if place.trim().is_empty() {
@@ -90,22 +134,27 @@ pub fn Recommendation(total: u8, label: String, reason: String, place: String) -
         place
     };
     view! {
-        <div class=format!("rounded-2xl bg-gradient-to-br p-5 ring-1 shadow-xl {}", soft_bg_class(total))>
+        <div class=format!("rounded-2xl bg-gradient-to-br p-6 ring-1 shadow-xl {}", soft_bg_class(total))>
             <div class="flex items-start justify-between gap-4">
                 <div>
                     <p class="text-xs font-semibold uppercase tracking-wide text-gruv-gray">
                         {format!("{place} · oppdatert {updated}")}
                     </p>
-                    <h2 class="mt-2 text-3xl font-extrabold tracking-tight">{cta}</h2>
-                    <p class="mt-1 text-sm text-gruv-fg/90">
-                        {format!("Grusindeks {total} — {summary}")}
-                    </p>
+                    <h2 class="mt-2 text-3xl font-bold tracking-tight">{cta}</h2>
+                    <p class="mt-1 text-sm text-gruv-fg/90">{summary}</p>
                 </div>
                 <span class=format!("rounded-full px-3 py-1 text-xs font-semibold ring-1 ring-current {}", color::text_class(total))>
                     {label}
                 </span>
             </div>
             <p class="mt-4 rounded-xl bg-gruv-bg0/45 px-4 py-3 text-sm text-gruv-fg/90">{reason}</p>
+            {best_window.map(|bw| view! {
+                <p class="mt-3 flex flex-wrap items-center gap-x-2 text-sm font-semibold text-gruv-aqua">
+                    <span>{format!("Bedre vindu {}–{}", bw.start, bw.end)}</span>
+                    {bw.reason.map(|r| view! { <span class="font-normal text-gruv-fg/70">{format!("· {r}")}</span> })}
+                    <span class="font-normal text-gruv-fg/60">{format!("+{} poeng", bw.improvement)}</span>
+                </p>
+            })}
         </div>
     }
 }
@@ -113,7 +162,7 @@ pub fn Recommendation(total: u8, label: String, reason: String, place: String) -
 /// Radial score gauge: a ring filled to `total`% in the score colour, with the
 /// number and a verdict label in the middle.
 #[component]
-pub fn ScoreGauge(total: u8, label: String) -> impl IntoView {
+pub fn ScoreGauge(total: u8) -> impl IntoView {
     let r = 52.0_f64;
     let circ = 2.0 * std::f64::consts::PI * r;
     let offset = circ * (1.0 - (total as f64 / 100.0));
@@ -131,16 +180,59 @@ pub fn ScoreGauge(total: u8, label: String) -> impl IntoView {
                 />
             </svg>
             <div class="absolute text-center">
-                <div class=format!("text-4xl font-extrabold tabular-nums {}", color::text_class(total))>
+                <div class=format!("text-4xl font-bold tabular-nums {}", color::text_class(total))>
                     {total}
                 </div>
-                <div class="text-xs text-gruv-gray">{label}</div>
+                <div class="text-xs text-gruv-fg/60">"indeks"</div>
             </div>
         </div>
     }
 }
 
-/// Five per-axis sub-score bars from a [`ScoreBreakdown`].
+/// Compact real-world numbers (°C / m/s / mm) for the current window. Renders
+/// nothing on the empty-window (NaN) path so we never print "NaN°C".
+#[component]
+pub fn WindowStatsRow(stats: WindowStats) -> impl IntoView {
+    if stats.is_empty() {
+        return ().into_any();
+    }
+    let temp = format!("{:.0}°C", stats.mean_temp_c);
+    let temp_range = format!("{:.0}–{:.0}", stats.min_temp_c, stats.max_temp_c);
+    let wind = match stats.max_gust_ms {
+        Some(g) if g > stats.max_wind_ms => format!("{:.0} m/s · kast {:.0}", stats.max_wind_ms, g),
+        _ => format!("{:.0} m/s", stats.max_wind_ms),
+    };
+    let rain = if stats.total_precip_mm > 0.0 {
+        format!("{:.1} mm", stats.total_precip_mm)
+    } else {
+        "tørt".to_string()
+    };
+    let cell = "flex flex-col gap-0.5";
+    let metric = "text-base font-semibold tabular-nums text-gruv-fg";
+    let cap = "text-xs uppercase tracking-wide text-gruv-fg/70";
+    view! {
+        <div class="grid grid-cols-3 gap-3">
+            <div class=cell>
+                <span class=metric>{temp}</span>
+                <span class=cap>{format!("temp {temp_range}")}</span>
+            </div>
+            <div class=cell>
+                <span class=metric>{wind}</span>
+                <span class=cap>"vind"</span>
+            </div>
+            <div class=cell>
+                <span class=metric>{rain}</span>
+                <span class=cap>"nedbør 3t"</span>
+            </div>
+        </div>
+    }
+    .into_any()
+}
+
+/// Five per-axis sub-score bars from a [`ScoreBreakdown`]. Bars are monochrome
+/// (aqua) by default so colour stays meaningful: only sub-scores that are
+/// actually weak turn orange/red. A faint tick marks the "good" cutoff (65) so
+/// the bars read positionally, not by colour alone.
 #[component]
 pub fn SubscoreBars(breakdown: ScoreBreakdown) -> impl IntoView {
     let rows = [
@@ -151,17 +243,18 @@ pub fn SubscoreBars(breakdown: ScoreBreakdown) -> impl IntoView {
         ("Bakke", breakdown.ground),
     ];
     view! {
-        <div class="space-y-2">
+        <div class="space-y-2.5">
             {rows.into_iter().map(|(name, val)| {
-                let bar = color::bg_class(val);
+                let bar = color::bar_fill_class(val);
                 view! {
                     <div class="flex items-center gap-3 text-sm">
-                        <span class="w-16 text-gruv-gray">{name}</span>
-                        <div class="h-2 flex-1 overflow-hidden rounded-full bg-gruv-bg2">
+                        <span class="w-16 text-gruv-fg/70">{name}</span>
+                        <div class="relative h-2.5 flex-1 overflow-hidden rounded-full bg-gruv-bg2">
                             <div
                                 class=format!("h-full rounded-full {bar}")
                                 style=format!("width:{val}%; transition: width 700ms cubic-bezier(0.22,1,0.36,1);")
                             ></div>
+                            <div class="absolute inset-y-0 w-px bg-gruv-bg0/70" style="left:65%"></div>
                         </div>
                         <span class="w-8 text-right tabular-nums">{val}</span>
                     </div>
@@ -249,9 +342,9 @@ pub fn Sparkline(points: Vec<HistoryPoint>) -> impl IntoView {
             <div class="mb-3 flex items-end justify-between gap-4">
                 <div>
                     <div class=format!("text-2xl font-bold tabular-nums {}", color::text_class(last))>{last}</div>
-                    <div class="text-xs text-gruv-gray">"siste måling"</div>
+                    <div class="text-xs text-gruv-fg/70">"siste måling"</div>
                 </div>
-                <div class="text-right text-xs text-gruv-gray">
+                <div class="text-right text-xs text-gruv-fg/70">
                     <div>{format!("min {min} · maks {max}")}</div>
                     <div>"siste 48 timer"</div>
                 </div>
@@ -264,9 +357,8 @@ pub fn Sparkline(points: Vec<HistoryPoint>) -> impl IntoView {
                 />
                 <circle cx=format!("{lx:.1}") cy=format!("{ly:.1}") r="3" fill=stroke/>
             </svg>
-            <div class="mt-2 flex justify-between text-[10px] uppercase tracking-wide text-gruv-gray">
+            <div class="mt-2 flex justify-between text-xs uppercase tracking-wide text-gruv-fg/70">
                 <span>"48t"</span>
-                <span>"50"</span>
                 <span>"nå"</span>
             </div>
         </div>
@@ -282,6 +374,15 @@ fn confidence_label(c: Confidence) -> &'static str {
     }
 }
 
+/// A non-colour-only confidence cue: literal dot colour by confidence band.
+fn confidence_dot(c: Confidence) -> &'static str {
+    match c {
+        Confidence::Hoy => "bg-gruv-green",
+        Confidence::Middels => "bg-gruv-yellow",
+        Confidence::Lav => "bg-gruv-gray",
+    }
+}
+
 /// One day in the multi-day strip: weather icon, coloured mean, spread, the
 /// best sub-window, and a confidence note. Long-range low-confidence days are
 /// dimmed.
@@ -290,29 +391,46 @@ pub fn DayCard(day: DayAggregate) -> impl IntoView {
     let mean = day.mean;
     let date = day.date.format("%a %d.%m").to_string();
     let icon = day.center().weather_icon.clone();
-    let dim = if day.confidence == Confidence::Lav {
-        "opacity-60"
+    let low = day.confidence == Confidence::Lav;
+    // Low-confidence days are signalled by a dashed border and a neutral mean
+    // colour — never by dimming, which would drop the numbers below readable
+    // contrast.
+    let border = if low {
+        "border border-dashed border-gruv-bg2"
     } else {
-        ""
+        "ring-1 ring-gruv-bg2/60"
     };
+    let mean_color = if low { "text-gruv-fg/70" } else { color::text_class(mean) };
+
+    let st = &day.center().score.stats;
+    let weather = (!st.is_empty())
+        .then(|| format!("{:.0}° · {:.1} mm", st.max_temp_c, st.total_precip_mm));
+
     let best = day.optimal_window.as_ref().map(|ow| {
         let s = ow.window.start.with_timezone(&Local).format("%H:%M");
         let e = ow.window.end.with_timezone(&Local).format("%H:%M");
-        format!("beste {s}–{e} (+{})", ow.improvement)
+        match ow.reason.map(best_window_reason_label) {
+            Some(r) => format!("beste {s}–{e} · {r}"),
+            None => format!("beste {s}–{e}"),
+        }
     });
 
     view! {
-        <div class=format!("min-w-[8.5rem] flex-1 rounded-xl bg-gruv-bg1 p-4 shadow transition hover:-translate-y-0.5 {dim}")>
+        <div class=format!("min-w-[8.5rem] flex-1 rounded-xl bg-gruv-bg1 p-4 shadow-lg transition hover:-translate-y-0.5 {border}")>
             <div class="flex items-center justify-between">
-                <span class="text-sm text-gruv-gray">{date}</span>
+                <span class="text-sm text-gruv-fg/70">{date}</span>
                 <span class="text-lg">{icon}</span>
             </div>
-            <div class=format!("mt-2 text-3xl font-bold tabular-nums {}", color::text_class(mean))>
+            <div class=format!("mt-2 text-2xl font-bold tabular-nums {mean_color}")>
                 {mean}
             </div>
-            <div class="text-xs text-gruv-gray">{format!("{}–{}", day.min, day.max)}</div>
+            <div class="text-xs text-gruv-fg/70">{format!("{}–{}", day.min, day.max)}</div>
+            {weather.map(|w| view! { <div class="mt-1 text-xs text-gruv-fg/70">{w}</div> })}
             {best.map(|b| view! { <div class="mt-1 text-xs text-gruv-aqua">{b}</div> })}
-            <div class="mt-1 text-[10px] text-gruv-gray">{confidence_label(day.confidence)}</div>
+            <div class="mt-2 flex items-center gap-1.5 text-xs text-gruv-fg/70">
+                <span class=format!("h-1.5 w-1.5 rounded-full {}", confidence_dot(day.confidence))></span>
+                {confidence_label(day.confidence)}
+            </div>
         </div>
     }
 }

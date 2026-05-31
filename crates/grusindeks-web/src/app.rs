@@ -7,8 +7,8 @@ use leptos_router::components::{Route, Router, Routes, A};
 use leptos_router::path;
 
 use crate::components::{
-    score_reason, DayCard, NowcastBanner, PenaltyChips, Recommendation, ScoreGauge, Sparkline,
-    SubscoreBars,
+    score_reason, BestWindowHint, DayCard, NowcastBanner, PenaltyChips, Recommendation, ScoreGauge,
+    Sparkline, SubscoreBars, WindowStatsRow,
 };
 use crate::dto::{PlaceDto, PrefsDto, WorkHoursDto};
 use crate::map::MapView;
@@ -67,7 +67,7 @@ pub fn App() -> impl IntoView {
 fn NavBar() -> impl IntoView {
     view! {
         <header class="border-b border-gruv-bg2 bg-gruv-bg0/80 backdrop-blur">
-            <nav class="mx-auto flex max-w-3xl items-center justify-between px-6 py-4">
+            <nav class="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
                 <A href="/">
                     <span class="text-lg font-bold tracking-tight">"Grusindeks"</span>
                 </A>
@@ -107,10 +107,10 @@ fn DashboardPage() -> impl IntoView {
 
     view! {
         <section class="mx-auto max-w-5xl px-6 py-10">
-            <div class="flex items-baseline justify-between">
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                 <div>
                     <h1 class="text-3xl font-bold tracking-tight">"Grusindeks"</h1>
-                    <p class="mt-1 text-gruv-gray">"Neste 3 timer"</p>
+                    <p class="mt-1 text-gruv-fg/70">"Neste 3 timer"</p>
                 </div>
                 <Suspense>
                     {move || Suspend::new(async move {
@@ -121,24 +121,29 @@ fn DashboardPage() -> impl IntoView {
                             .filter(|name| !name.trim().is_empty())
                             .unwrap_or_else(|| "Velg sted".to_string());
                         view! {
-                            <select
-                                class="rounded-lg border border-gruv-bg2 bg-gruv-bg1 px-3 py-1.5 text-sm"
-                                on:change=move |ev| selected.set(event_target_value(&ev))
-                            >
-                                <option value="">{default_label}</option>
-                                {opts.into_iter().map(|p| {
-                                    let value = p.name.clone();
-                                    view! { <option value=value>{p.name}</option> }
-                                }).collect_view()}
-                            </select>
+                            <label class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-gruv-fg/70 sm:items-end">
+                                "Sted"
+                                <select
+                                    class="min-h-[44px] w-full rounded-lg border border-gruv-bg2 bg-gruv-bg1 px-3 py-2.5 text-sm normal-case tracking-normal text-gruv-fg sm:w-auto"
+                                    on:change=move |ev| selected.set(event_target_value(&ev))
+                                >
+                                    <option value="">{default_label}</option>
+                                    {opts.into_iter().map(|p| {
+                                        let value = p.name.clone();
+                                        view! { <option value=value>{p.name}</option> }
+                                    }).collect_view()}
+                                </select>
+                            </label>
                         }
                     })}
                 </Suspense>
             </div>
 
+            <div class="mt-8 space-y-8">
+
             // ---- current window card ----
             <Suspense fallback=move || {
-                view! { <p class="mt-8 animate-pulse text-gruv-gray">"Laster prognose…"</p> }
+                view! { <p class="animate-pulse text-gruv-fg/70">"Laster prognose…"</p> }
             }>
                 {move || Suspend::new(async move {
                     match score.await {
@@ -149,9 +154,32 @@ fn DashboardPage() -> impl IntoView {
                                 Some(c) => {
                                     let nowcast = agg.nowcast_alert.clone();
                                     let penalties = c.score.penalties.clone();
-                                    let has_pen = !penalties.is_empty();
                                     let reason = score_reason(c.score.breakdown, &penalties);
+                                    // `score_reason` leads with the top penalty, so don't repeat it
+                                    // as a chip — show only the *additional* penalties.
+                                    let chips = penalties.iter().skip(1).cloned().collect::<Vec<_>>();
                                     let highlights = c.score.highlights.clone();
+                                    let stats = c.score.stats;
+                                    // Today's stand-out window, promoted from the multi-day strip.
+                                    let best_window = forecast.await.ok().and_then(|mf| {
+                                        mf.days
+                                            .first()
+                                            .and_then(|d| d.optimal_window.as_ref())
+                                            .map(BestWindowHint::from_window)
+                                    });
+                                    // Plain-language surface history, only when the pref is on.
+                                    let show_rain = prefs.await.map(|p| p.show_rain_history).unwrap_or(false);
+                                    let rain_line = show_rain
+                                        .then(|| agg.rain_history.as_ref().map(|rh| {
+                                            format!(
+                                                "Underlag · siste {}t: {:.0} mm over {} regndag{}",
+                                                rh.lookback_hours,
+                                                rh.total_mm,
+                                                rh.rain_days,
+                                                if rh.rain_days == 1 { "" } else { "er" },
+                                            )
+                                        }))
+                                        .flatten();
                                     let place = match selected.get_untracked() {
                                         p if !p.trim().is_empty() => p,
                                         _ => prefs
@@ -162,29 +190,29 @@ fn DashboardPage() -> impl IntoView {
                                             .unwrap_or_else(|| "standardsted".to_string()),
                                     };
                                     view! {
-                                        <div class="mt-8 space-y-6">
-                                            <Recommendation total=agg.mean label=c.score.label.clone() reason=reason place=place/>
-                                            <div class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,0.9fr)]">
-                                                <div class="space-y-6 rounded-2xl bg-gruv-bg1 p-6 shadow-lg ring-1 ring-gruv-bg2/60">
-                                                    {nowcast.map(|a| view! { <NowcastBanner alert=a/> })}
-                                                    <div class="flex items-center gap-6">
-                                                        <ScoreGauge total=agg.mean label=c.score.label.clone()/>
-                                                        <div class="flex-1">
-                                                            <SubscoreBars breakdown=c.score.breakdown/>
-                                                            <p class="mt-3 text-sm text-gruv-gray">
-                                                                {format!("spenn {}–{} over {} punkter", agg.min, agg.max, agg.points.len())}
-                                                            </p>
-                                                        </div>
+                                        <div class="space-y-6">
+                                            <Recommendation total=agg.mean label=c.score.label.clone() reason=reason place=place best_window=best_window/>
+                                            <div class="space-y-6 rounded-2xl bg-gruv-bg1 p-6 shadow-lg ring-1 ring-gruv-bg2/60">
+                                                {nowcast.map(|a| view! { <NowcastBanner alert=a/> })}
+                                                <WindowStatsRow stats=stats/>
+                                                <div class="flex items-center gap-6">
+                                                    <ScoreGauge total=agg.mean/>
+                                                    <div class="flex-1">
+                                                        <SubscoreBars breakdown=c.score.breakdown/>
+                                                        <p class="mt-3 text-sm text-gruv-fg/70">
+                                                            {format!("spenn {}–{} over {} punkter", agg.min, agg.max, agg.points.len())}
+                                                        </p>
                                                     </div>
-                                                    {(!highlights.is_empty()).then(|| view! {
-                                                        <div class="space-y-1 rounded-xl bg-gruv-bg0/45 p-3 text-sm text-gruv-blue">
-                                                            {highlights.into_iter().map(|h| view! { <p>{h}</p> }).collect_view()}
-                                                        </div>
-                                                    })}
-                                                    {has_pen.then(|| view! { <PenaltyChips penalties=penalties/> })}
                                                 </div>
-                                                <MapView points=agg.points.clone()/>
+                                                {(!highlights.is_empty()).then(|| view! {
+                                                    <div class="space-y-1 rounded-xl bg-gruv-bg0/45 p-3 text-sm text-gruv-blue">
+                                                        {highlights.into_iter().map(|h| view! { <p>{h}</p> }).collect_view()}
+                                                    </div>
+                                                })}
+                                                {rain_line.map(|t| view! { <p class="text-sm text-gruv-fg/70">{t}</p> })}
+                                                {(!chips.is_empty()).then(|| view! { <PenaltyChips penalties=chips/> })}
                                             </div>
+                                            <MapView points=agg.points.clone()/>
                                         </div>
                                     }.into_any()
                                 }
@@ -200,42 +228,36 @@ fn DashboardPage() -> impl IntoView {
                 })}
             </Suspense>
 
-            // ---- trend sparkline ----
-            <div class="mt-8 rounded-2xl bg-gruv-bg1 p-6 shadow-lg ring-1 ring-gruv-bg2/60">
-                <div class="mb-3 flex items-center justify-between">
-                    <h2 class="text-sm font-semibold uppercase tracking-wide text-gruv-gray">
-                        "Trend"
-                    </h2>
-                    <span class="text-xs text-gruv-gray">"snitt over tid"</span>
-                </div>
-                <Suspense fallback=move || view! { <p class="text-xs text-gruv-gray">"Laster…"</p> }>
-                    {move || Suspend::new(async move {
-                        match history.await {
-                            Ok(pts) => view! { <Sparkline points=pts/> }.into_any(),
-                            Err(_) => ().into_any(),
-                        }
-                    })}
-                </Suspense>
-            </div>
+            // ---- trend sparkline (hidden entirely until there's enough history) ----
+            <Suspense>
+                {move || Suspend::new(async move {
+                    match history.await {
+                        Ok(pts) if pts.len() >= 2 => view! {
+                            <div class="rounded-2xl bg-gruv-bg1 p-6 shadow-lg ring-1 ring-gruv-bg2/60">
+                                <div class="mb-3 flex items-center justify-between">
+                                    <h2 class="text-sm font-semibold uppercase tracking-wide text-gruv-gray">
+                                        "Trend"
+                                    </h2>
+                                    <span class="text-xs text-gruv-fg/70">"snitt over tid"</span>
+                                </div>
+                                <Sparkline points=pts/>
+                            </div>
+                        }.into_any(),
+                        _ => ().into_any(),
+                    }
+                })}
+            </Suspense>
 
             // ---- multi-day strip ----
             <Suspense>
                 {move || Suspend::new(async move {
                     match forecast.await {
                         Ok(mf) => {
-                            let best_hint = mf.days.first().and_then(|d| d.optimal_window.as_ref()).map(|ow| {
-                                let s = ow.window.start.with_timezone(&chrono::Local).format("%H:%M");
-                                let e = ow.window.end.with_timezone(&chrono::Local).format("%H:%M");
-                                format!("Beste vindu i dag: {s}–{e} (+{})", ow.improvement)
-                            });
                             view! {
-                                <div class="mt-10">
-                                    <div class="mb-3 flex items-end justify-between gap-4">
-                                        <h2 class="text-sm font-semibold uppercase tracking-wide text-gruv-gray">
-                                            "Dagene fremover"
-                                        </h2>
-                                        {best_hint.map(|h| view! { <p class="text-sm text-gruv-aqua">{h}</p> })}
-                                    </div>
+                                <div>
+                                    <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-gruv-gray">
+                                        "Dagene fremover"
+                                    </h2>
                                     <div class="flex gap-3 overflow-x-auto pb-2">
                                         {mf.days.into_iter().map(|d| view! { <DayCard day=d/> }).collect_view()}
                                     </div>
@@ -246,6 +268,8 @@ fn DashboardPage() -> impl IntoView {
                     }
                 })}
             </Suspense>
+
+            </div>
         </section>
     }
 }

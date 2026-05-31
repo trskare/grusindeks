@@ -68,11 +68,6 @@ fn ring_geojson(center: grusindeks_core::geo::Point, radius_km: f64) -> String {
 
 #[component]
 pub fn MapView(points: Vec<PointScore>) -> impl IntoView {
-    let center_score = points
-        .iter()
-        .find(|p| p.is_center)
-        .or_else(|| points.first())
-        .map(|p| (p.bearing_label.clone(), p.score.total));
     #[cfg(feature = "hydrate")]
     {
         let points = points.clone();
@@ -101,24 +96,22 @@ pub fn MapView(points: Vec<PointScore>) -> impl IntoView {
 
     view! {
         <section class="overflow-hidden rounded-2xl bg-gruv-bg1 shadow-lg ring-1 ring-gruv-bg2/60">
-            <div class="flex items-start justify-between gap-4 px-5 py-4">
-                <div>
-                    <div class="flex items-center gap-2">
-                        <h2 class="text-sm font-semibold uppercase tracking-wide text-gruv-gray">"Kart"</h2>
-                        <a
-                            class="text-[10px] text-gruv-gray underline-offset-2 hover:text-gruv-fg hover:underline"
-                            href="https://www.openstreetmap.org/copyright"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                        >"© OSM"</a>
-                    </div>
-                    <p class="mt-1 text-sm text-gruv-fg/85">
-                        {center_score.map(|(label, total)| format!("{label}: {total}"))}
-                    </p>
+            <div class="flex items-center justify-between gap-4 px-5 py-4">
+                <div class="flex items-center gap-2">
+                    <h2 class="text-sm font-semibold uppercase tracking-wide text-gruv-gray">"Kart over området"</h2>
+                    <a
+                        class="text-xs text-gruv-fg/70 underline-offset-2 hover:text-gruv-fg hover:underline"
+                        href="https://www.openstreetmap.org/copyright"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                    >"© OSM"</a>
                 </div>
-                <div class="flex flex-wrap justify-end gap-2 text-[10px] uppercase tracking-wide text-gruv-gray">
-                    <span class="inline-flex items-center gap-1"><i class="h-2 w-2 rounded-full bg-gruv-green"></i>"bra"</span>
-                    <span class="inline-flex items-center gap-1"><i class="h-2 w-2 rounded-full bg-gruv-yellow"></i>"middels"</span>
+                // Legend mirrors the five score buckets the dots are coloured by.
+                <div class="flex flex-wrap justify-end gap-x-2 gap-y-1 text-xs uppercase tracking-wide text-gruv-fg/70">
+                    <span class="inline-flex items-center gap-1"><i class="h-2 w-2 rounded-full bg-gruv-green"></i>"strålende"</span>
+                    <span class="inline-flex items-center gap-1"><i class="h-2 w-2 rounded-full bg-gruv-lime"></i>"bra"</span>
+                    <span class="inline-flex items-center gap-1"><i class="h-2 w-2 rounded-full bg-gruv-yellow"></i>"brukbart"</span>
+                    <span class="inline-flex items-center gap-1"><i class="h-2 w-2 rounded-full bg-gruv-orange"></i>"svakt"</span>
                     <span class="inline-flex items-center gap-1"><i class="h-2 w-2 rounded-full bg-gruv-red"></i>"dårlig"</span>
                 </div>
             </div>

@@ -48,6 +48,21 @@ pub fn bg_class(total: u8) -> &'static str {
     }
 }
 
+/// Sub-score bar fill. Bars are monochrome (aqua) by default so colour keeps
+/// meaning — only genuinely weak axes turn orange/red. Spelled as literals so
+/// Tailwind's source scanner emits them.
+///
+/// Note: prefer `text-gruv-fg/70` over `text-gruv-gray` for meaningful body
+/// text — `gruv-gray` (#928374) on the dark backgrounds is below WCAG AA
+/// (~3.4:1 on bg0) and should be reserved for large/bold decorative eyebrows.
+pub fn bar_fill_class(val: u8) -> &'static str {
+    match val {
+        0..=44 => "bg-gruv-red",
+        45..=64 => "bg-gruv-orange",
+        _ => "bg-gruv-aqua",
+    }
+}
+
 /// Hex string for the score — used where a literal colour is needed (SVG
 /// stroke, MapLibre data-driven styling).
 pub fn hex(total: u8) -> &'static str {
