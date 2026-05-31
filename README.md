@@ -154,9 +154,11 @@ og rapporten består av:
   som splittes i to regimer — `mildest` når vinduets felt-temp ligger i
   16–22 °C-platået, og `minst kald` ellers.
 - **`--best-window [TIMER]`** — opt-in alternativ som viser dagens
-  beste sub-vindu uansett forbedring (default 2 timer). Når sub-vinduet
-  faktisk slår dagsgjennomsnittet brukes den vanlige `Beste luke`-merkingen
-  med `+N poeng`-suffiks; ellers vises det som `Beste vindu` uten suffiks.
+  beste sub-vindu uansett forbedring (default 2 timer). Når `work_hours`
+  er aktivert i config unngås disse tidene; bruk `--include-work-hours`
+  for å vise beste vindu uansett arbeidstid. Når sub-vinduet faktisk slår
+  dagsgjennomsnittet brukes den vanlige `Beste luke`-merkingen med `+N poeng`-
+  suffiks; ellers vises det som `Beste vindu` uten suffiks.
 
 Konfidens faller med horisonten: `api.met.no` publiserer
 time-for-time-data for de første ~60 timene; deretter kun 6-timers
@@ -254,6 +256,13 @@ default_place = "oslo"
 # show_rain_history = false   # skjuler "Regn 7d"-linja
 # show_window_stats = false   # skjuler "Tall"-linja
 # (Kan også overstyres per kjøring: --no-rain-history / --no-window-stats)
+
+# Valgfritt: arbeidstid som --best-window skal unngå.
+# Overstyr én kjøring med --include-work-hours.
+# [work_hours]
+# enabled = true
+# days = ["mon", "tue", "wed", "thu", "fri"]
+# window = "08:00-15:00"
 
 [frost]
 # Registrer en gratis client_id på

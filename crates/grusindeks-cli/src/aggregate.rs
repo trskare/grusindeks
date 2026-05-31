@@ -582,6 +582,7 @@ mod tests {
         let cfg = BestWindowConfig {
             length_hours: 2,
             min_improvement: 0,
+            excluded_windows: Vec::new(),
         };
 
         // Center: uniformly perfect (window total == day total at center).
@@ -604,7 +605,7 @@ mod tests {
                         Some(SurfaceState::default()),
                         now,
                         Language::Norwegian,
-                        cfg,
+                        cfg.clone(),
                     ),
                 ),
                 (

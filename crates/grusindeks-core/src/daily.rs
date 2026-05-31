@@ -145,10 +145,13 @@ pub const DEFAULT_OPTIMAL_WINDOW_HOURS: i64 = 3;
 /// mean. Callers that want to expose a window every day (e.g. the CLI's
 /// `--best-window` flag) construct one with `min_improvement: 0` and
 /// `length_hours` set to the desired sub-window size.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BestWindowConfig {
     pub length_hours: i64,
     pub min_improvement: u8,
+    /// UTC windows that candidate best-windows must not overlap. The CLI
+    /// uses this to keep work hours out of `--best-window` suggestions.
+    pub excluded_windows: Vec<RideWindow>,
 }
 
 impl Default for BestWindowConfig {
@@ -156,6 +159,7 @@ impl Default for BestWindowConfig {
         Self {
             length_hours: DEFAULT_OPTIMAL_WINDOW_HOURS,
             min_improvement: DEFAULT_OPTIMAL_IMPROVEMENT,
+            excluded_windows: Vec::new(),
         }
     }
 }
@@ -186,9 +190,15 @@ pub fn compute_day(
     let day_score = score(hours, day_window, surface, lang);
     let confidence = confidence_for(&in_window, day_window, now);
 
-    let optimal_window =
-        find_best_window(hours, day_window, best_window.length_hours, surface, lang)
-            .filter(|ow| ow.improvement >= best_window.min_improvement);
+    let optimal_window = find_best_window_excluding(
+        hours,
+        day_window,
+        best_window.length_hours,
+        surface,
+        lang,
+        &best_window.excluded_windows,
+    )
+    .filter(|ow| ow.improvement >= best_window.min_improvement);
 
     let weather_icon = weather_icon_for(&in_window);
 
@@ -272,6 +282,22 @@ pub fn find_best_window(
     if length_hours <= 0 || day_window.duration_hours() < length_hours {
         return None;
     }
+    find_best_window_excluding(hours, day_window, length_hours, surface, lang, &[])
+}
+
+/// Like [`find_best_window`], but skips candidate sub-windows that overlap
+/// any window in `excluded_windows`.
+pub fn find_best_window_excluding(
+    hours: &[HourlyConditions],
+    day_window: RideWindow,
+    length_hours: i64,
+    surface: Option<SurfaceState>,
+    lang: Language,
+    excluded_windows: &[RideWindow],
+) -> Option<OptimalWindow> {
+    if length_hours <= 0 || day_window.duration_hours() < length_hours {
+        return None;
+    }
     if !hours.iter().any(|h| day_window.contains(h.time)) {
         return None;
     }
@@ -287,6 +313,13 @@ pub fn find_best_window(
             start,
             end: start + len,
         };
+        if excluded_windows
+            .iter()
+            .any(|blocked| windows_overlap(candidate, *blocked))
+        {
+            start += Duration::hours(1);
+            continue;
+        }
         // Only score sub-windows that actually contain at least one hour
         // of data; otherwise we'd compare against the empty-window neutral
         // fallback inside `score`, which is misleading.
@@ -312,6 +345,10 @@ pub fn find_best_window(
             reason,
         }
     })
+}
+
+fn windows_overlap(a: RideWindow, b: RideWindow) -> bool {
+    a.start < b.end && b.start < a.end
 }
 
 /// Identify the single axis where the window beats the day average by the
@@ -487,6 +524,33 @@ mod tests {
             ow.improvement, 0,
             "uniform perfect day should yield zero improvement"
         );
+    }
+
+    #[test]
+    fn best_window_excludes_overlapping_windows() {
+        // Morning and afternoon are equally good. Block the morning work
+        // period, so the returned 3h window must move after 15:00.
+        let mut hours: Vec<HourlyConditions> =
+            (6..9).map(|h| nice_hour(t(2026, 4, 26, h))).collect();
+        hours.extend((9..15).map(|h| awful_hour(t(2026, 4, 26, h))));
+        hours.extend((15..20).map(|h| nice_hour(t(2026, 4, 26, h))));
+        let day = day_window(6, 14);
+        let blocked = [RideWindow {
+            start: t(2026, 4, 26, 8),
+            end: t(2026, 4, 26, 15),
+        }];
+
+        let ow = find_best_window_excluding(
+            &hours,
+            day,
+            3,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+            &blocked,
+        )
+        .expect("expected an afternoon window");
+
+        assert!(ow.window.start >= t(2026, 4, 26, 15), "got {:?}", ow.window);
     }
 
     #[test]
@@ -705,6 +769,7 @@ mod tests {
         let cfg = BestWindowConfig {
             length_hours: 2,
             min_improvement: 0,
+            excluded_windows: Vec::new(),
         };
         let ds = compute_day(
             &hours,
