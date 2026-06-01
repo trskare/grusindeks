@@ -202,8 +202,7 @@ pub async fn get_hourly(place: String) -> Result<HourlyForecast, ServerFnError> 
     use chrono::{DurationRound, Local, TimeDelta, Utc};
     use grusindeks_cli::run::{run_hourly, DayWindow, HourlyInputs};
     use grusindeks_cli::windows::{
-        build_day_windows, local_to_utc, location_frost_source, resolve_location,
-        window_starts_within_nowcast_horizon,
+        local_to_utc, location_frost_source, resolve_location, window_starts_within_nowcast_horizon,
     };
     use grusindeks_core::types::RideWindow;
 
@@ -215,23 +214,10 @@ pub async fn get_hourly(place: String) -> Result<HourlyForecast, ServerFnError> 
     let frost_source_id = location_frost_source(&cfg, &location);
 
     let now = Utc::now();
-    let today = Local::now().date_naive();
-    // Pick the day with the same roll-to-tomorrow logic as the forecast card,
-    // then widen it to the full local day (clipped to `now` for today).
-    let picked = build_day_windows(today, 1, now, cfg.daytime_window).map_err(err)?;
-    let Some(first) = picked.into_iter().next() else {
-        // No ridable day left today and none could be built — nothing to show.
-        return Ok(HourlyForecast {
-            header_hours: Vec::new(),
-            days: Vec::new(),
-            rain_history: None,
-            nowcast_alert: None,
-            sun: None,
-        });
-    };
-    let date = first.date;
-    let day_start =
-        local_to_utc(date.and_hms_opt(0, 0, 0).expect("valid midnight")).map_err(err)?;
+    // The timeline is "the rest of today" — from the current hour to local
+    // midnight — so it stays on *today* until midnight (unlike the daytime-window
+    // ride score, which rolls to tomorrow once the 10–22 window is nearly over).
+    let date = Local::now().date_naive();
     let day_end = local_to_utc(
         date.succ_opt()
             .expect("date has a successor")
@@ -239,12 +225,12 @@ pub async fn get_hourly(place: String) -> Result<HourlyForecast, ServerFnError> 
             .expect("valid midnight"),
     )
     .map_err(err)?;
-    // Floor `now` to the current hour so today's in-progress hour bucket is
-    // included — the timeline then starts at the live hour (no empty sliver
-    // before the next whole hour). A future day stays clipped to its midnight.
+    // Floor `now` to the current hour so the in-progress hour bucket is included
+    // (the timeline starts at the live hour, no empty sliver before the next
+    // whole hour).
     let now_hour = now.duration_trunc(TimeDelta::hours(1)).unwrap_or(now);
     let window = RideWindow {
-        start: day_start.max(now_hour),
+        start: now_hour,
         end: day_end,
     };
     let day_windows = vec![DayWindow { date, window }];

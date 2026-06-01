@@ -98,9 +98,9 @@ pub fn MapView(points: Vec<PointScore>) -> impl IntoView {
                 .map(|d| (d, p.score.stats.max_wind_ms))
         });
 
-    // Basemap switcher. Defaults to CyclOSM ("Grus") since gravel roads are the
-    // point; matches the glue's default tile source.
-    let basemap = RwSignal::new("cyclosm");
+    // Basemap switcher. Defaults to plain OSM ("Standard"); matches the glue's
+    // default tile source. ("Grus" = CyclOSM shows gravel/unpaved tracks.)
+    let basemap = RwSignal::new("osm");
 
     #[cfg(feature = "hydrate")]
     {
@@ -143,7 +143,7 @@ pub fn MapView(points: Vec<PointScore>) -> impl IntoView {
                     >{move || if basemap.get() == "cyclosm" { "© CyclOSM · OSM" } else { "© OSM" }}</a>
                     // Basemap switcher.
                     <div class="flex overflow-hidden rounded-lg text-xs font-semibold ring-1 ring-gruv-bg2">
-                        {[("cyclosm", "Grus"), ("osm", "Standard")].into_iter().map(|(k, label)| {
+                        {[("osm", "Standard"), ("cyclosm", "Grus")].into_iter().map(|(k, label)| {
                             let active = move || basemap.get() == k;
                             view! {
                                 <button type="button"

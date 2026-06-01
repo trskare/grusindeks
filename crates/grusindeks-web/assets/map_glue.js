@@ -30,7 +30,7 @@
       attribution: "© CyclOSM · © OpenStreetMap contributors",
     },
   };
-  const DEFAULT_BASEMAP = "cyclosm";
+  const DEFAULT_BASEMAP = "osm";
 
   function baseSource(key) {
     const bm = BASEMAPS[key] || BASEMAPS.osm;

@@ -166,8 +166,13 @@ fn DashboardPage() -> impl IntoView {
                                     let best_window = optimal
                                         .as_ref()
                                         .map(|ow| BestWindowHint::from_window(ow, now, sunset));
-                                    // Raw window for the timeline overlay (same source as the CTA).
-                                    let best_window_rw = optimal.as_ref().map(|ow| ow.window);
+                                    // Raw window for the timeline overlay — only when it's
+                                    // *today* (the timeline shows the rest of today; a window
+                                    // that rolled to tomorrow doesn't belong on it).
+                                    let best_window_rw = optimal.as_ref().map(|ow| ow.window).filter(|w| {
+                                        w.start.with_timezone(&chrono::Local).date_naive()
+                                            == now.with_timezone(&chrono::Local).date_naive()
+                                    });
                                     // Daylight hint from the centre's sunset.
                                     let daylight = sunset.map(|s| {
                                         let t = s.with_timezone(&chrono::Local).format("%H:%M");

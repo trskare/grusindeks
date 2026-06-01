@@ -45,6 +45,10 @@ pub struct BestWindowHint {
     /// `true` when the window starts before sunset (or sunset is unknown) — we
     /// don't suggest waiting for a window that lands in the dark.
     pub before_sunset: bool,
+    /// `true` when the window is on a later local date than `now` (e.g. the
+    /// forecast rolled to tomorrow once today's ride window was over) — the card
+    /// labels it "i morgen" and never offers a "vent til" today.
+    pub tomorrow: bool,
 }
 
 impl BestWindowHint {
@@ -74,6 +78,8 @@ impl BestWindowHint {
             total: ow.score.total,
             starts_in_future: ow.window.start > now,
             before_sunset: sunset.is_none_or(|s| ow.window.start < s),
+            tomorrow: ow.window.start.with_timezone(&Local).date_naive()
+                != now.with_timezone(&Local).date_naive(),
         }
     }
 }
@@ -195,7 +201,11 @@ pub fn Recommendation(
     // window today is meaningfully better — and still in daylight — suggest
     // waiting for it rather than riding now.
     let wait_for = best_window.as_ref().filter(|bw| {
-        total < 65 && bw.starts_in_future && bw.before_sunset && bw.total >= total + 10
+        total < 65
+            && bw.starts_in_future
+            && bw.before_sunset
+            && bw.total >= total + 10
+            && !bw.tomorrow
     });
     let waiting = wait_for.is_some();
     let (cta, summary) = match wait_for {
@@ -269,13 +279,14 @@ pub fn Recommendation(
                 }}
             </div>
 
-            // Better window later today.
+            // Better window — later today, or tomorrow once today's window is over.
             {best_window.map(|bw| {
                 let breathe = if waiting { "gx-breathe" } else { "" };
+                let when = if bw.tomorrow { "Bedre vindu i morgen" } else { "Bedre vindu senere" };
                 view! {
                     <div class=format!("mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl inset-well bg-gruv-aqua/10 px-4 py-2.5 text-sm ring-1 ring-inset ring-gruv-aqua/25 {breathe}")>
                         {icons::bike("h-4 w-4 text-gruv-aqua", None)}
-                        <span class="text-[11px] font-semibold uppercase tracking-wide text-gruv-aqua/90">"Bedre vindu senere"</span>
+                        <span class="text-[11px] font-semibold uppercase tracking-wide text-gruv-aqua/90">{when}</span>
                         <span class="font-semibold tabular-nums text-gruv-fg">{format!("{}–{}", bw.start, bw.end)}</span>
                         {bw.reason.map(|r| view! { <span class="text-gruv-fg/70">{r}</span> })}
                         <span class="ml-auto rounded-md bg-gruv-aqua/20 px-1.5 py-0.5 text-xs font-bold tabular-nums text-gruv-aqua">
