@@ -199,6 +199,11 @@ pub struct WindowStats {
     pub max_wind_ms: f64,
     pub max_gust_ms: Option<f64>,
     pub mean_humidity_pct: Option<f64>,
+    /// Circular-mean wind direction over the window, degrees clockwise from
+    /// north (the direction the wind blows *from*). `None` when the forecast
+    /// carried no direction for any in-window hour.
+    #[serde(default)]
+    pub wind_from_deg: Option<f64>,
 }
 
 impl WindowStats {
@@ -215,6 +220,7 @@ impl WindowStats {
             max_wind_ms: 0.0,
             max_gust_ms: None,
             mean_humidity_pct: None,
+            wind_from_deg: None,
         }
     }
 
@@ -392,6 +398,18 @@ pub fn score(
     let max_gust_opt = max_gust.is_finite().then_some(max_gust);
     let max_prob_opt = max_prob.is_finite().then_some(max_prob);
 
+    // Circular mean of wind direction over the window (handles the 0/360 wrap).
+    let wind_from_deg = {
+        let (sin_sum, cos_sum, n) = in_window.iter().filter_map(|h| h.wind_from_deg).fold(
+            (0.0_f64, 0.0_f64, 0u32),
+            |(s, c, n), d| {
+                let r = d.to_radians();
+                (s + r.sin(), c + r.cos(), n + 1)
+            },
+        );
+        (n > 0).then(|| sin_sum.atan2(cos_sum).to_degrees().rem_euclid(360.0))
+    };
+
     let ground_dry = match surface {
         Some(s) => apply_drought_penalty(
             ground_subscore(s.accumulated_mm),
@@ -530,6 +548,7 @@ pub fn score(
         max_wind_ms: if max_wind.is_finite() { max_wind } else { 0.0 },
         max_gust_ms: max_gust_opt,
         mean_humidity_pct: mean_humidity_opt,
+        wind_from_deg,
     };
 
     Grusindeks {

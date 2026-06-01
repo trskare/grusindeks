@@ -2620,6 +2620,7 @@ mod tests {
             max_wind_ms: 7.0,
             max_gust_ms: Some(11.0),
             mean_humidity_pct: None,
+            wind_from_deg: None,
         };
         let s = window_stats_chip_content(&stats, Language::Norwegian).expect("Some");
         assert!(s.contains("12–18 °C"), "got {s}");
@@ -2639,6 +2640,7 @@ mod tests {
             max_wind_ms: 5.0,
             max_gust_ms: None,
             mean_humidity_pct: None,
+            wind_from_deg: None,
         };
         let s = window_stats_chip_content(&stats, Language::Norwegian).expect("Some");
         assert!(!s.contains("kast"), "expected no gust mention: {s}");
@@ -3015,6 +3017,7 @@ mod tests {
             max_wind_ms: 4.0,
             max_gust_ms: Some(7.0),
             mean_humidity_pct: None,
+            wind_from_deg: None,
         });
         let out = render_hourly(
             "Oslo",
@@ -3048,6 +3051,7 @@ mod tests {
             max_wind_ms: 4.0,
             max_gust_ms: None,
             mean_humidity_pct: None,
+            wind_from_deg: None,
         });
         let out = render_hourly(
             "Oslo",
@@ -3076,6 +3080,7 @@ mod tests {
             max_wind_ms: 4.0,
             max_gust_ms: None,
             mean_humidity_pct: None,
+            wind_from_deg: None,
         });
         let flags = ChipFlags {
             rain_history: true,

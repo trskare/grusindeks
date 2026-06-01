@@ -7,14 +7,13 @@ use leptos_router::components::{Route, Router, Routes, A};
 use leptos_router::path;
 
 use crate::components::{
-    BestWindowHint, DayCard, NowcastBanner, Recommendation, RideTimeline, ScoreGauge, Sparkline,
-    SubscoreBars, WindowStatsRow,
+    BestWindowHint, DayCard, NowcastBanner, Recommendation, RideTimeline, ScoreGauge, SubscoreBars,
 };
 use crate::dto::{PlaceDto, PrefsDto, WorkHoursDto};
 use crate::map::MapView;
 use crate::server::{
-    get_forecast, get_history, get_hourly, get_prefs, get_score, get_work_hours, list_places,
-    remove_place, save_place, save_prefs, save_work_hours,
+    get_forecast, get_hourly, get_prefs, get_score, get_work_hours, list_places, remove_place,
+    save_place, save_prefs, save_work_hours,
 };
 
 /// The HTML document the server renders around the hydrated app.
@@ -99,18 +98,8 @@ fn DashboardPage() -> impl IntoView {
         move || selected.get(),
         |place| async move { get_hourly(place).await },
     );
-    // Refetch history once the current score has been logged server-side
-    // (reading `score` here makes this depend on its completion).
-    let history = Resource::new(
-        move || {
-            let _ = score.get();
-            selected.get()
-        },
-        |place| async move { get_history(place, "score".to_string(), 48).await },
-    );
-
     view! {
-        <section class="mx-auto max-w-5xl px-6 py-10">
+        <section class="mx-auto max-w-5xl px-6 py-10 min-[2024px]:max-w-[2200px]">
             <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                 <div>
                     // Wordmark lives in the NavBar; here we only frame the view.
@@ -212,16 +201,15 @@ fn DashboardPage() -> impl IntoView {
                                             .unwrap_or_else(|| "standardsted".to_string()),
                                     };
                                     view! {
-                                        <div class="space-y-6">
-                                            <Recommendation total=agg.mean label=c.score.label.clone() penalties=penalties breakdown=breakdown place=place best_window=best_window updated=produced_at/>
+                                        // Two columns once there's room for two full-width
+                                        // columns (~2040px+); below that it's the same single
+                                        // stack as before — nothing shrinks.
+                                        <div class="grid grid-cols-1 gap-6 min-[2024px]:grid-cols-2 min-[2024px]:items-stretch">
+                                            // LEFT — verdict + details
+                                            <div class="space-y-6">
+                                            <Recommendation total=agg.mean label=c.score.label.clone() penalties=penalties breakdown=breakdown stats=stats place=place best_window=best_window updated=produced_at/>
                                             <div class="emboss space-y-5 rounded-2xl bg-gruv-bg1 p-6">
                                                 {nowcast.map(|a| view! { <NowcastBanner alert=a/> })}
-
-                                                // ── Nå · neste 3 t ──
-                                                <div class="space-y-3">
-                                                    {section_band("Nå · neste 3 t")}
-                                                    <WindowStatsRow stats=stats/>
-                                                </div>
 
                                                 // ── Time for time ── (the timeline carries its own band header)
                                                 <Suspense fallback=move || view! {
@@ -265,7 +253,13 @@ fn DashboardPage() -> impl IntoView {
                                                     {daylight.map(|t| view! { <p class="text-xs text-gruv-fg/55">{t}</p> })}
                                                 </div>
                                             </div>
-                                            <MapView points=agg.points.clone()/>
+                                            </div>
+                                            // RIGHT — the map fills the whole column
+                                            <div class="min-[2024px]:flex min-[2024px]:flex-col">
+                                                <div class="min-[2024px]:flex-1 min-[2024px]:min-h-0">
+                                                    <MapView points=agg.points.clone()/>
+                                                </div>
+                                            </div>
                                         </div>
                                     }.into_any()
                                 }
@@ -277,26 +271,6 @@ fn DashboardPage() -> impl IntoView {
                                 {format!("Kunne ikke hente prognose: {e}")}
                             </p>
                         }.into_any(),
-                    }
-                })}
-            </Suspense>
-
-            // ---- trend sparkline (hidden entirely until there's enough history) ----
-            <Suspense>
-                {move || Suspend::new(async move {
-                    match history.await {
-                        Ok(pts) if pts.len() >= 2 => view! {
-                            <div class="rounded-2xl bg-gruv-bg1 p-6 shadow-lg ring-1 ring-gruv-bg2/60">
-                                <div class="mb-3 flex items-center justify-between">
-                                    <h2 class="text-sm font-semibold uppercase tracking-wide text-gruv-gray">
-                                        "Trend"
-                                    </h2>
-                                    <span class="text-xs text-gruv-fg/70">"snitt over tid"</span>
-                                </div>
-                                <Sparkline points=pts/>
-                            </div>
-                        }.into_any(),
-                        _ => ().into_any(),
                     }
                 })}
             </Suspense>

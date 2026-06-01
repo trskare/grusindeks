@@ -177,6 +177,9 @@ pub fn Recommendation(
     /// The window's sub-score breakdown — drives the positive note when there
     /// are no penalties.
     breakdown: ScoreBreakdown,
+    /// The next-3-hour measured numbers (°C / m/s / mm), shown as tiles right
+    /// under the verdict — same window the verdict describes.
+    stats: WindowStats,
     place: String,
     /// "Better window later today" — promoted up from the multi-day strip so
     /// a rider sees the timing decision next to the verdict. `None` when no
@@ -238,6 +241,11 @@ pub fn Recommendation(
                 <span class=format!("shrink-0 rounded-full px-3 py-1 text-xs font-semibold ring-1 ring-current/40 {}", color::text_class(total))>
                     {label}
                 </span>
+            </div>
+
+            // The next-3-hour measured numbers, same window the verdict describes.
+            <div class="mt-4">
+                <WindowStatsRow stats=stats/>
             </div>
 
             // Reason — "trekkes ned av" chips (or a positive note when clean).
@@ -531,19 +539,11 @@ pub fn Sparkline(points: Vec<HistoryPoint>) -> impl IntoView {
     };
     let min = points.iter().map(|p| p.mean).min().unwrap_or(last);
     let max = points.iter().map(|p| p.mean).max().unwrap_or(last);
+    // Compact: just the line + a single caption row, so the trend stays a small
+    // (~20%) companion to the map in the right column.
     view! {
         <div>
-            <div class="mb-3 flex items-end justify-between gap-4">
-                <div>
-                    <div class=format!("text-2xl font-bold tabular-nums {}", color::text_class(last))>{last}</div>
-                    <div class="text-xs text-gruv-fg/70">"siste måling"</div>
-                </div>
-                <div class="text-right text-xs text-gruv-fg/70">
-                    <div>{format!("min {min} · maks {max}")}</div>
-                    <div>"siste 48 timer"</div>
-                </div>
-            </div>
-            <svg width="100%" viewBox=format!("0 0 {w} {h}") preserveAspectRatio="none" class="w-full overflow-visible">
+            <svg width="100%" viewBox=format!("0 0 {w} {h}") preserveAspectRatio="none" class="h-12 w-full overflow-visible">
                 <line x1="0" y1=format!("{:.1}", h / 2.0) x2=w.to_string() y2=format!("{:.1}", h / 2.0) stroke="#504945" stroke-width="1" stroke-dasharray="3 4"/>
                 <polyline
                     points=poly fill="none" stroke=stroke stroke-width="2.5"
@@ -551,8 +551,9 @@ pub fn Sparkline(points: Vec<HistoryPoint>) -> impl IntoView {
                 />
                 <circle cx=format!("{lx:.1}") cy=format!("{ly:.1}") r="3" fill=stroke/>
             </svg>
-            <div class="mt-2 flex justify-between text-xs uppercase tracking-wide text-gruv-fg/70">
-                <span>"48t"</span>
+            <div class="mt-2 flex items-center justify-between text-[10px] uppercase tracking-wide text-gruv-fg/55">
+                <span>"14d"</span>
+                <span class="normal-case tabular-nums">{format!("min {min} · maks {max}")}</span>
                 <span>"nå"</span>
             </div>
         </div>
