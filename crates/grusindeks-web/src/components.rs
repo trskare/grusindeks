@@ -1247,6 +1247,26 @@ pub fn RideTimeline(
                             }
                         })}
 
+                        // hover marker: lightweight hit zones in 5-minute steps
+                        // so the label follows the pointer more precisely than
+                        // whole-hour buckets (the forecast values are still hourly).
+                        {cols.iter().flat_map(|c| {
+                            (0..12).map(move |m| {
+                                let a = c.l + (c.r - c.l) * (m as f64 / 12.0);
+                                let b = c.l + (c.r - c.l) * ((m + 1) as f64 / 12.0);
+                                let label = format!("{:02}:{:02}", c.hour, m * 5);
+                                let style = format!("left:{}; width:{}", pct(a), pct(b - a));
+                                view! {
+                                    <div class="group absolute inset-y-0 z-30" style=style>
+                                        <div class="pointer-events-none absolute inset-y-0 left-1/2 hidden w-[2px] -translate-x-1/2 bg-gruv-fg shadow-[0_0_4px_rgba(235,219,178,0.7)] group-hover:block"></div>
+                                        <div class="pointer-events-none absolute left-1/2 top-1 hidden -translate-x-1/2 rounded bg-gruv-fg px-1.5 py-0.5 text-[10px] font-bold leading-tight text-gruv-bg0 shadow-lg group-hover:block">
+                                            {label}
+                                        </div>
+                                    </div>
+                                }
+                            })
+                        }).collect_view()}
+
                         // unit labels (°C near temp lane, m/s near wind lane)
                         {cols.iter().enumerate().filter(|(i, _)| i % label_step == 0).map(|(_, c)| {
                             match c.s.raw {
