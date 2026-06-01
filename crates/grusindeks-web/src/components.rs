@@ -593,7 +593,10 @@ fn confidence_dot(c: Confidence) -> &'static str {
 /// best sub-window, and a confidence note. Long-range low-confidence days are
 /// dimmed.
 #[component]
-pub fn DayCard(day: DayAggregate) -> impl IntoView {
+pub fn DayCard(
+    day: DayAggregate,
+    #[prop(optional)] on_select: Option<Callback<(chrono::NaiveDate, i32, i32)>>,
+) -> impl IntoView {
     let mean = day.mean;
     let date = day.date.format("%a %d.%m").to_string();
     let icon = day.center().weather_icon.clone();
@@ -625,8 +628,17 @@ pub fn DayCard(day: DayAggregate) -> impl IntoView {
         }
     });
 
+    let selected_date = day.date;
+
     view! {
-        <div class=format!("min-w-[8.5rem] flex-1 rounded-xl bg-gruv-bg1 p-4 shadow-lg transition hover:-translate-y-0.5 {border}")>
+        <button type="button"
+            class=format!("min-w-[8.5rem] flex-1 rounded-xl bg-gruv-bg1 p-4 text-left shadow-lg transition hover:-translate-y-0.5 focus:outline-none focus:ring-2 focus:ring-gruv-aqua/70 {border}")
+            on:click=move |ev| {
+                if let Some(cb) = on_select {
+                    cb.run((selected_date, ev.client_x(), ev.client_y()));
+                }
+            }
+        >
             <div class="flex items-center justify-between">
                 <span class="text-sm text-gruv-fg/70">{date}</span>
                 <span class="text-lg">{icon}</span>
@@ -641,8 +653,126 @@ pub fn DayCard(day: DayAggregate) -> impl IntoView {
                 <span class=format!("h-1.5 w-1.5 rounded-full {}", confidence_dot(day.confidence))></span>
                 {confidence_label(day.confidence)}
             </div>
-        </div>
+        </button>
     }
+}
+
+/// Compact lane timeline for the popup opened from the multi-day strip.
+#[component]
+pub fn CompactDayTimeline(
+    day: HourlyDayAggregate,
+    best_window: Option<RideWindow>,
+) -> impl IntoView {
+    let date = day.date.format("%a %d.%m").to_string();
+    let hours = day.hours;
+    if hours.is_empty() {
+        return view! { <p class="text-sm text-gruv-fg/70">"Ingen timesdata for dagen."</p> }
+            .into_any();
+    }
+
+    let best = best_window.map(|w| {
+        (
+            w.start.with_timezone(&Local).format("%H:%M").to_string(),
+            w.end.with_timezone(&Local).format("%H:%M").to_string(),
+            w,
+        )
+    });
+    let in_best = |h: &HourScore| {
+        best.as_ref().is_some_and(|(_, _, w)| {
+            let e = h.time + Duration::hours(1);
+            h.time < w.end && e > w.start
+        })
+    };
+    let grid = format!(
+        "grid-template-columns: repeat({}, minmax(3.3rem, 1fr));",
+        hours.len()
+    );
+    let cell = "flex h-9 items-center justify-center border-l border-gruv-bg2/50 text-[11px] tabular-nums first:border-l-0";
+
+    view! {
+        <div>
+            <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                    <h3 class="text-sm font-semibold uppercase tracking-wide text-gruv-gray">"Time for time"</h3>
+                    <p class="text-xs text-gruv-fg/60">{date}</p>
+                </div>
+                {best.as_ref().map(|(s, e, _)| view! {
+                    <span class="inline-flex items-center gap-1 rounded-full bg-gruv-aqua/15 px-2 py-1 text-xs font-semibold text-gruv-aqua ring-1 ring-gruv-aqua/30">
+                        {icons::bike("h-3 w-3", None)}
+                        {format!("beste {s}–{e}")}
+                    </span>
+                })}
+            </div>
+
+            <div class="overflow-x-auto rounded-xl bg-gruv-bg0/45 inset-well">
+                <div class="min-w-max">
+                    <div class="ml-10 grid h-6 text-[10px] text-gruv-fg/50" style=grid.clone()>
+                        {hours.iter().map(|h| view! {
+                            <div class="flex items-center justify-center tabular-nums">
+                                {h.time.with_timezone(&Local).format("%H").to_string()}
+                            </div>
+                        }).collect_view()}
+                    </div>
+
+                    <div class="flex border-t border-gruv-bg2/70">
+                        <div class="flex w-10 shrink-0 items-center justify-center text-gruv-fg/55">{icons::thermometer("h-4 w-4", Some("Temperatur"))}</div>
+                        <div class="grid flex-1" style=grid.clone()>
+                            {hours.iter().map(|h| {
+                                let best_cls = if in_best(h) { " bg-gruv-aqua/15 ring-1 ring-inset ring-gruv-aqua/50" } else { "" };
+                                let bg = color::hex(h.breakdown.temperature);
+                                view! {
+                                    <div class=format!("{cell}{best_cls}") style=format!("background:linear-gradient(to top,{bg}55,{bg}18)")>
+                                        {h.raw.map(|r| format!("{:.0}°", r.temperature_c)).unwrap_or_else(|| "–".to_string())}
+                                    </div>
+                                }
+                            }).collect_view()}
+                        </div>
+                    </div>
+
+                    <div class="flex border-t border-gruv-bg2/70">
+                        <div class="flex w-10 shrink-0 items-center justify-center text-gruv-fg/55">{icons::wind("h-4 w-4", Some("Vind"))}</div>
+                        <div class="grid flex-1" style=grid.clone()>
+                            {hours.iter().map(|h| {
+                                let best_cls = if in_best(h) { " bg-gruv-aqua/15 ring-1 ring-inset ring-gruv-aqua/50" } else { "" };
+                                let bg = color::hex(h.breakdown.wind);
+                                view! {
+                                    <div class=format!("{cell}{best_cls}") style=format!("background:linear-gradient(to top,{bg}55,{bg}18)")>
+                                        {h.raw.map(|r| format!("{:.0}", r.wind_speed_ms)).unwrap_or_else(|| "–".to_string())}
+                                    </div>
+                                }
+                            }).collect_view()}
+                        </div>
+                    </div>
+
+                    <div class="flex border-t border-gruv-bg2/70">
+                        <div class="flex w-10 shrink-0 items-center justify-center text-gruv-fg/55">{icons::cloud_rain("h-4 w-4", Some("Nedbør"))}</div>
+                        <div class="grid flex-1" style=grid>
+                            {hours.iter().map(|h| {
+                                let best_cls = if in_best(h) { " bg-gruv-aqua/15 ring-1 ring-inset ring-gruv-aqua/50" } else { "" };
+                                let wet = h.raw.is_some_and(|r| r.precipitation_mm >= 0.05);
+                                let bg = color::hex(h.breakdown.precipitation);
+                                view! {
+                                    <div class=format!("{cell}{best_cls}") style=format!("background:linear-gradient(to top,{bg}55,{bg}18)")>
+                                        {if wet {
+                                            view! { <span class="text-gruv-blue">{icons::droplet("h-4 w-4", Some("Regn"))}</span> }.into_any()
+                                        } else {
+                                            view! { <span class="text-gruv-fg/35">"·"</span> }.into_any()
+                                        }}
+                                    </div>
+                                }
+                            }).collect_view()}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gruv-fg/55">
+                <span>"Vind: m/s"</span>
+                <span class="flex items-center gap-1 text-gruv-blue">{icons::droplet("h-3 w-3", None)}"nedbør"</span>
+                <span class="text-gruv-aqua">"markert felt = beste vindu"</span>
+            </div>
+        </div>
+    }.into_any()
 }
 
 // ---------------- Ride timeline ----------------

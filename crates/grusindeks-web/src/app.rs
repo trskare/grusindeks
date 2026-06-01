@@ -12,8 +12,8 @@ use crate::components::{
 use crate::dto::{PlaceDto, PrefsDto, WorkHoursDto};
 use crate::map::MapView;
 use crate::server::{
-    get_forecast, get_hourly, get_prefs, get_score, get_work_hours, list_places, remove_place,
-    save_place, save_prefs, save_work_hours,
+    get_forecast, get_hourly, get_hourly_day, get_prefs, get_score, get_work_hours, list_places,
+    remove_place, save_place, save_prefs, save_work_hours,
 };
 
 /// The HTML document the server renders around the hydrated app.
@@ -85,6 +85,9 @@ fn DashboardPage() -> impl IntoView {
     let places = Resource::new(|| (), |_| async move { list_places().await });
     let prefs = Resource::new(|| (), |_| async move { get_prefs().await });
     let selected = RwSignal::new(String::new());
+    let selected_day = RwSignal::new(None::<String>);
+    let selected_best_window = RwSignal::new(None::<grusindeks_core::types::RideWindow>);
+    let selected_day_anchor = RwSignal::new((0_i32, 0_i32));
 
     let score = Resource::new(
         move || selected.get(),
@@ -97,6 +100,15 @@ fn DashboardPage() -> impl IntoView {
     let hourly = Resource::new(
         move || selected.get(),
         |place| async move { get_hourly(place).await },
+    );
+    let hourly_day = Resource::new(
+        move || (selected.get(), selected_day.get()),
+        |(place, date)| async move {
+            match date {
+                Some(date) => Some(get_hourly_day(place, date).await),
+                None => None,
+            }
+        },
     );
     view! {
         <section class="mx-auto max-w-5xl px-6 py-10 min-[2024px]:max-w-[2200px]">
@@ -291,8 +303,76 @@ fn DashboardPage() -> impl IntoView {
                                         "Dagene fremover"
                                     </h2>
                                     <div class="flex gap-3 overflow-x-auto pb-2">
-                                        {mf.days.into_iter().map(|d| view! { <DayCard day=d/> }).collect_view()}
+                                        {mf.days.into_iter().map(|d| {
+                                            let best_window = d.optimal_window.as_ref().map(|ow| ow.window);
+                                            let on_select = Callback::new(move |(date, x, y): (chrono::NaiveDate, i32, i32)| {
+                                                selected_day.set(Some(date.format("%Y-%m-%d").to_string()));
+                                                selected_best_window.set(best_window);
+                                                selected_day_anchor.set((x, y));
+                                            });
+                                            view! { <DayCard day=d on_select=on_select/> }
+                                        }).collect_view()}
                                     </div>
+                                    {move || selected_day.get().map(|_| {
+                                        let (x, y) = selected_day_anchor.get();
+                                        let top = (y + 14).clamp(16, 620);
+                                        view! {
+                                            <div class="fixed inset-0 z-50 bg-gruv-bg0/25 backdrop-blur-[2px]" on:click=move |_| {
+                                                selected_day.set(None);
+                                                selected_best_window.set(None);
+                                            }>
+                                                <div
+                                                    class="gx-popdown fixed w-[min(58rem,calc(100vw-1rem))] rounded-2xl bg-gruv-bg1 p-4 shadow-2xl ring-1 ring-gruv-bg2/70"
+                                                    style=format!("top:{top}px; left:clamp(0.5rem, calc({x}px - min(29rem, calc((100vw - 1rem) / 2))), calc(100vw - min(58rem, calc(100vw - 1rem)) - 0.5rem)); --gx-origin-x:clamp(2rem, 50%, calc(100% - 2rem))")
+                                                    on:click=move |ev| ev.stop_propagation()
+                                                >
+                                                    <div class="mb-2 flex justify-end">
+                                                        <button type="button"
+                                                            class="rounded-lg bg-gruv-bg0/70 px-2.5 py-1 text-xs font-semibold text-gruv-fg/70 ring-1 ring-gruv-bg2 hover:text-gruv-fg"
+                                                            on:click=move |_| {
+                                                                selected_day.set(None);
+                                                                selected_best_window.set(None);
+                                                            }
+                                                        >"Lukk"</button>
+                                                    </div>
+                                                    <Suspense fallback=move || view! {
+                                                        <div class="h-[290px] animate-pulse rounded-xl bg-gruv-bg0/45 p-4 text-sm text-gruv-fg/70 inset-well">
+                                                            "Laster timesvarsel…"
+                                                        </div>
+                                                    }>
+                                                        {move || Suspend::new(async move {
+                                                            match hourly_day.await {
+                                                                Some(Ok(mut hf)) => {
+                                                                    let sun = hf.sun;
+                                                                    match hf.days.pop() {
+                                                                        Some(day) => {
+                                                                            let (sunrise, sunset) = sun.map_or((None, None), |s| (s.sunrise, s.sunset));
+                                                                            view! {
+                                                                                <RideTimeline
+                                                                                    day=day
+                                                                                    best_window=selected_best_window.get_untracked()
+                                                                                    sunrise=sunrise
+                                                                                    sunset=sunset
+                                                                                    now=chrono::Utc::now()
+                                                                                />
+                                                                            }.into_any()
+                                                                        }
+                                                                        None => ().into_any(),
+                                                                    }
+                                                                }
+                                                                Some(Err(e)) => view! {
+                                                                    <div class="rounded-xl bg-gruv-red/15 p-4 text-sm text-gruv-red ring-1 ring-gruv-red/30">
+                                                                        {format!("Kunne ikke hente timesvarsel: {e}")}
+                                                                    </div>
+                                                                }.into_any(),
+                                                                None => ().into_any(),
+                                                            }
+                                                        })}
+                                                    </Suspense>
+                                                </div>
+                                            </div>
+                                        }
+                                    })}
                                 </div>
                             }.into_any()
                         },

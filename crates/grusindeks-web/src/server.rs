@@ -264,6 +264,67 @@ pub async fn get_hourly(place: String) -> Result<HourlyForecast, ServerFnError> 
     Ok(hf)
 }
 
+/// Hour-by-hour scores for one selected local date from the multi-day strip.
+#[server]
+pub async fn get_hourly_day(place: String, date: String) -> Result<HourlyForecast, ServerFnError> {
+    use crate::db::{load_config, DEFAULT_USER_ID};
+    use crate::state::AppState;
+    use chrono::{NaiveDate, Utc};
+    use grusindeks_cli::run::{run_hourly, DayWindow, HourlyInputs};
+    use grusindeks_cli::windows::{
+        daytime_header_hours, has_forecast_hour_in_window, local_to_utc, location_frost_source,
+        resolve_location, window_starts_within_nowcast_horizon,
+    };
+    use grusindeks_core::types::RideWindow;
+
+    let state = expect_context::<AppState>();
+    let cfg = load_config(&state.db, DEFAULT_USER_ID).await.map_err(err)?;
+    let date = NaiveDate::parse_from_str(&date, "%Y-%m-%d").map_err(err)?;
+
+    let place_arg = (!place.is_empty()).then_some(place);
+    let location = resolve_location(&cfg, None, None, place_arg, None).map_err(err)?;
+    let frost_source_id = location_frost_source(&cfg, &location);
+
+    let now = Utc::now();
+    let day_start = local_to_utc(date.and_time(cfg.daytime_window.start)).map_err(err)?;
+    let day_end = local_to_utc(date.and_time(cfg.daytime_window.end)).map_err(err)?;
+    if day_end <= now {
+        return Err(ServerFnError::new("Dagen er allerede forbi."));
+    }
+    let start = day_start.max(now);
+    if !has_forecast_hour_in_window(start, day_end) {
+        return Err(ServerFnError::new("Ingen timesdata for denne dagen."));
+    }
+    let window = RideWindow {
+        start,
+        end: day_end,
+    };
+    let fetch_nowcast = window_starts_within_nowcast_horizon(window, now);
+
+    let mut hf = run_hourly(
+        &state.client(),
+        HourlyInputs {
+            center: location.center,
+            radius_km: location.radius_km,
+            days: vec![DayWindow { date, window }],
+            frost_source_id: frost_source_id.as_deref(),
+            history_hours: 168,
+            lang: cfg.language,
+            header_hours: daytime_header_hours(cfg.daytime_window),
+            fetch_nowcast,
+            progress: &NoopProgress,
+        },
+    )
+    .await
+    .map_err(err)?;
+    hf.sun = Some(grusindeks_core::sun::sun_times(
+        date,
+        location.center.lat,
+        location.center.lon,
+    ));
+    Ok(hf)
+}
+
 /// History samples for a place + kind ("score" | "forecast_day"), oldest-first.
 #[server]
 pub async fn get_history(

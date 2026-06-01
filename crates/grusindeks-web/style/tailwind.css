@@ -32,10 +32,31 @@
   0%, 100% { opacity: 0.45; }
   50%      { opacity: 0.9; }
 }
+@keyframes gx-popdown {
+  0% {
+    opacity: 0.15;
+    transform: translateY(-10px) scale(0.18, 0.08);
+    transform-origin: var(--gx-origin-x, 50%) top;
+    filter: blur(0.5px);
+  }
+  65% {
+    opacity: 1;
+    transform: translateY(3px) scale(1.015, 1.02);
+    transform-origin: var(--gx-origin-x, 50%) top;
+    filter: blur(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    transform-origin: var(--gx-origin-x, 50%) top;
+    filter: blur(0);
+  }
+}
 .gx-sweep   { animation: gx-sweep 700ms cubic-bezier(0.22, 1, 0.36, 1) both; }
 .gx-breathe { animation: gx-breathe 3s ease-in-out infinite; }
+.gx-popdown { animation: gx-popdown 220ms cubic-bezier(0.22, 1, 0.36, 1) both; }
 @media (prefers-reduced-motion: reduce) {
-  .gx-sweep, .gx-breathe { animation: none; }
+  .gx-sweep, .gx-breathe, .gx-popdown { animation: none; }
 }
 
 /* Depth system. Two recipes, deliberately: a raised plate (cards) and an
