@@ -956,16 +956,18 @@ pub fn RideTimeline(
         .iter()
         .map(|c| c.s.raw.is_some_and(|r| r.precipitation_mm >= 0.05))
         .collect();
-    let mut rain_bands: Vec<(f64, f64)> = Vec::new();
+    let mut rain_bands: Vec<(f64, f64, f64)> = Vec::new();
     let mut i = 0;
     while i < n {
         if wet[i] {
             let start = cols[i].l;
             let mut j = i;
+            let mut max_mm = cols[i].s.raw.map_or(0.0, |r| r.precipitation_mm);
             while j + 1 < n && wet[j + 1] {
                 j += 1;
+                max_mm = max_mm.max(cols[j].s.raw.map_or(0.0, |r| r.precipitation_mm));
             }
-            rain_bands.push((start, cols[j].r));
+            rain_bands.push((start, cols[j].r, max_mm));
             i = j + 1;
         } else {
             i += 1;
@@ -1195,21 +1197,33 @@ pub fn RideTimeline(
                             </div>
                         })}
 
-                        // rain bands (hatched ribbon down through the lanes) + a droplet marker
-                        {rain_bands.iter().map(|(a, b)| {
-                            let style = format!(
-                                "left:{}; width:{}; background-image:repeating-linear-gradient(45deg,rgba(131,165,152,0.30) 0,rgba(131,165,152,0.30) 2px,transparent 2px,transparent 6px)",
-                                pct(*a), pct(b - a)
-                            );
-                            let mid = (a + b) / 2.0;
+                        // animated rain drops only where the forecast says it's wet.
+                        {rain_bands.iter().map(|(a, b, mm)| {
+                            // More rain → more drops, faster fall, slightly stronger wash.
+                            // Scale against this day's max so light showers stay subtle and
+                            // heavy hours visibly pick up intensity.
+                            let intensity = (mm / pmax).clamp(0.15, 1.0);
+                            let drops = (4.0 + intensity * 12.0).round() as usize;
+                            let wash = 0.04 + intensity * 0.08;
+                            let style = format!("left:{}; width:{}; background:rgba(131,165,152,{wash:.3})", pct(*a), pct(b - a));
                             view! {
-                                <>
-                                    <div class="pointer-events-none absolute inset-y-0" style=style></div>
-                                    <div class="pointer-events-none absolute top-0.5 z-10 -translate-x-1/2 text-gruv-blue"
-                                        style=format!("left:{}", pct(mid))>
-                                        {icons::droplet("h-3 w-3", None)}
-                                    </div>
-                                </>
+                                <div class="pointer-events-none absolute inset-y-0 z-10 overflow-hidden rounded" style=style>
+                                    {(0..drops).map(|i| {
+                                        // Deterministic scatter: enough variation to feel organic,
+                                        // but no JS/timers/state beyond CSS animation.
+                                        let left = 6 + ((i * 23) % 88);
+                                        let delay = -((i as f64) * (0.16 - intensity * 0.05).max(0.07));
+                                        let speed = (1.45 - intensity * 0.55) + ((i % 4) as f64) * 0.09;
+                                        let top = -(((i * 17) % 110) as i32);
+                                        let alpha = 0.55 + intensity * 0.35;
+                                        let size = 0.85 + intensity * 0.35;
+                                        view! {
+                                            <span class="gx-rain-drop" style=format!(
+                                                "left:{left}%; top:{top}px; --gx-rain-delay:{delay:.2}s; --gx-rain-speed:{speed:.2}s; --gx-rain-alpha:{alpha:.2}; --gx-rain-size:{size:.2}"
+                                            )></span>
+                                        }
+                                    }).collect_view()}
+                                </div>
                             }
                         }).collect_view()}
 

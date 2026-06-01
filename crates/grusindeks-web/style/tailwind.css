@@ -32,6 +32,24 @@
   0%, 100% { opacity: 0.45; }
   50%      { opacity: 0.9; }
 }
+@keyframes gx-rain-fall {
+  0%   { transform: translateY(-14px); opacity: 0; }
+  12%  { opacity: 0.85; }
+  78%  { opacity: 0.85; }
+  100% { transform: translateY(220px); opacity: 0; }
+}
+.gx-rain-drop {
+  position: absolute;
+  top: 0;
+  width: calc(4px * var(--gx-rain-size, 1));
+  height: calc(9px * var(--gx-rain-size, 1));
+  border-radius: 999px;
+  background: linear-gradient(to bottom, rgba(131,165,152,var(--gx-rain-alpha, 0.85)), rgba(69,133,136,calc(var(--gx-rain-alpha, 0.85) * 0.75)));
+  box-shadow: 0 0 5px rgba(131,165,152,calc(var(--gx-rain-alpha, 0.85) * 0.40));
+  animation: gx-rain-fall var(--gx-rain-speed, 1.35s) linear infinite;
+  animation-delay: var(--gx-rain-delay, 0s);
+}
+
 @keyframes gx-popdown {
   0% {
     opacity: 0.15;
@@ -56,7 +74,7 @@
 .gx-breathe { animation: gx-breathe 3s ease-in-out infinite; }
 .gx-popdown { animation: gx-popdown 220ms cubic-bezier(0.22, 1, 0.36, 1) both; }
 @media (prefers-reduced-motion: reduce) {
-  .gx-sweep, .gx-breathe, .gx-popdown { animation: none; }
+  .gx-sweep, .gx-breathe, .gx-popdown, .gx-rain-drop { animation: none; }
 }
 
 /* Depth system. Two recipes, deliberately: a raised plate (cards) and an
