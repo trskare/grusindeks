@@ -12,6 +12,7 @@ pub mod app;
 pub mod color;
 pub mod components;
 pub mod dto;
+pub mod icons;
 pub mod map;
 pub mod server;
 

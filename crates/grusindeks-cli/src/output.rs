@@ -2838,6 +2838,7 @@ mod tests {
                 ground: mean,
             },
             confidence: Confidence::Hoy,
+            raw: None,
         }
     }
 
@@ -2868,6 +2869,7 @@ mod tests {
             days: vec![day],
             rain_history: None,
             nowcast_alert: None,
+            sun: None,
         }
     }
 
@@ -3093,6 +3095,7 @@ mod tests {
             days: vec![],
             rain_history: None,
             nowcast_alert: None,
+            sun: None,
         };
         let out = render_hourly(
             "Oslo",

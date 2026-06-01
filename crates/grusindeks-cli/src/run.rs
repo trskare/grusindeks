@@ -17,8 +17,8 @@ use grusindeks_met::locationforecast;
 use grusindeks_met::nowcast::{self, Nowcast};
 
 use crate::aggregate::{
-    AggregateScore, DayAggregate, HourScore, HourlyDayAggregate, HourlyForecast, HourlyPrecip,
-    MultiDayForecast, NowcastAlert, RainHistory,
+    AggregateScore, DayAggregate, HourRaw, HourScore, HourlyDayAggregate, HourlyForecast,
+    HourlyPrecip, MultiDayForecast, NowcastAlert, RainHistory,
 };
 
 /// Threshold for "this hour got rain on radar" — matches yr.no's
@@ -376,6 +376,19 @@ pub async fn run_hourly(client: &MetClient, inputs: HourlyInputs<'_>) -> Result<
                 ground: ((bd_ground + n / 2) / n) as u8,
             };
             let confidence = hour_confidence(start, now, six_hourly);
+            // Carry the centre point's raw values for this hour so a timeline
+            // renderer can show measured °C / m/s / mm, not just the derived
+            // sub-scores. Free — `center_hours` is already in scope.
+            let raw = center_hours
+                .iter()
+                .find(|h| h.time == start)
+                .map(|h| HourRaw {
+                    temperature_c: h.temperature_c,
+                    wind_speed_ms: h.wind_speed_ms,
+                    wind_gust_ms: h.wind_gust_ms,
+                    precipitation_mm: h.precipitation_mm,
+                    probability_of_precip: h.probability_of_precip,
+                });
             hours.push(HourScore {
                 time: start,
                 mean,
@@ -383,6 +396,7 @@ pub async fn run_hourly(client: &MetClient, inputs: HourlyInputs<'_>) -> Result<
                 max,
                 breakdown,
                 confidence,
+                raw,
             });
         }
         // Centre-point WindowStats over the *full* daytime window — the
@@ -412,6 +426,7 @@ pub async fn run_hourly(client: &MetClient, inputs: HourlyInputs<'_>) -> Result<
         days,
         rain_history,
         nowcast_alert: nowcast.as_ref().and_then(|n| build_nowcast_alert(n, now)),
+        sun: None,
     })
 }
 

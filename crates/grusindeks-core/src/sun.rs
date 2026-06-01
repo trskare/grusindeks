@@ -42,7 +42,8 @@ fn event(date: NaiveDate, lat: f64, lon: f64, sunrise: bool) -> Option<DateTime<
 
     // 2. Sun's mean anomaly and true longitude.
     let m = 0.9856 * t - 3.289;
-    let l = (m + 1.916 * (m * d2r).sin() + 0.020 * (2.0 * m * d2r).sin() + 282.634).rem_euclid(360.0);
+    let l =
+        (m + 1.916 * (m * d2r).sin() + 0.020 * (2.0 * m * d2r).sin() + 282.634).rem_euclid(360.0);
 
     // 3. Right ascension, forced into the same quadrant as the longitude.
     let mut ra = ((0.91764 * (l * d2r).tan()).atan() * r2d).rem_euclid(360.0);
@@ -92,8 +93,16 @@ mod tests {
         let daylight_h = (sunset - sunrise).num_minutes() as f64 / 60.0;
         assert!(daylight_h > 18.0, "daylight was {daylight_h:.1} h");
         // Sunrise around 02:00 UTC, sunset around 20:40 UTC (± ~30 min).
-        assert!((1..=3).contains(&sunrise.hour()), "sunrise hour {}", sunrise.hour());
-        assert!((20..=21).contains(&sunset.hour()), "sunset hour {}", sunset.hour());
+        assert!(
+            (1..=3).contains(&sunrise.hour()),
+            "sunrise hour {}",
+            sunrise.hour()
+        );
+        assert!(
+            (20..=21).contains(&sunset.hour()),
+            "sunset hour {}",
+            sunset.hour()
+        );
     }
 
     /// Far north of the Arctic Circle in midsummer: the sun never sets.

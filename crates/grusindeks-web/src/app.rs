@@ -7,14 +7,14 @@ use leptos_router::components::{Route, Router, Routes, A};
 use leptos_router::path;
 
 use crate::components::{
-    score_reason, BestWindowHint, DayCard, HourlyPrecipStrip, NowcastBanner, PenaltyChips,
-    Recommendation, ScoreGauge, Sparkline, SubscoreBars, WindowStatsRow,
+    BestWindowHint, DayCard, NowcastBanner, Recommendation, RideTimeline, ScoreGauge, Sparkline,
+    SubscoreBars, WindowStatsRow,
 };
 use crate::dto::{PlaceDto, PrefsDto, WorkHoursDto};
 use crate::map::MapView;
 use crate::server::{
-    get_forecast, get_history, get_prefs, get_score, get_work_hours, list_places, remove_place,
-    save_place, save_prefs, save_work_hours,
+    get_forecast, get_history, get_hourly, get_prefs, get_score, get_work_hours, list_places,
+    remove_place, save_place, save_prefs, save_work_hours,
 };
 
 /// The HTML document the server renders around the hydrated app.
@@ -95,6 +95,10 @@ fn DashboardPage() -> impl IntoView {
         move || selected.get(),
         |place| async move { get_forecast(place, 6).await },
     );
+    let hourly = Resource::new(
+        move || selected.get(),
+        |place| async move { get_hourly(place).await },
+    );
     // Refetch history once the current score has been logged server-side
     // (reading `score` here makes this depend on its completion).
     let history = Resource::new(
@@ -109,8 +113,8 @@ fn DashboardPage() -> impl IntoView {
         <section class="mx-auto max-w-5xl px-6 py-10">
             <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                 <div>
-                    <h1 class="text-3xl font-bold tracking-tight">"Grusindeks"</h1>
-                    <p class="mt-1 text-gruv-fg/70">"Neste 3 timer"</p>
+                    // Wordmark lives in the NavBar; here we only frame the view.
+                    <p class="text-gruv-fg/70">"Forholdene i dag"</p>
                 </div>
                 <Suspense>
                     {move || Suspend::new(async move {
@@ -153,24 +157,28 @@ fn DashboardPage() -> impl IntoView {
                             match center {
                                 Some(c) => {
                                     let nowcast = agg.nowcast_alert.clone();
+                                    // All penalties drive the recommendation card's "trekkes ned av"
+                                    // chips, so the details card no longer repeats them.
                                     let penalties = c.score.penalties.clone();
-                                    let reason = score_reason(c.score.breakdown, &penalties);
-                                    // `score_reason` leads with the top penalty, so don't repeat it
-                                    // as a chip — show only the *additional* penalties.
-                                    let chips = penalties.iter().skip(1).cloned().collect::<Vec<_>>();
+                                    let breakdown = c.score.breakdown;
                                     let highlights = c.score.highlights.clone();
                                     let stats = c.score.stats;
                                     let sunset = agg.sun.and_then(|s| s.sunset);
                                     // Today's stand-out window, promoted from the multi-day strip.
                                     // Only surface it while it's still relevant (not fully past).
                                     let now = chrono::Utc::now();
-                                    let best_window = forecast.await.ok().and_then(|mf| {
+                                    let optimal = forecast.await.ok().and_then(|mf| {
                                         mf.days
                                             .first()
                                             .and_then(|d| d.optimal_window.as_ref())
                                             .filter(|ow| ow.window.end > now)
-                                            .map(|ow| BestWindowHint::from_window(ow, now, sunset))
+                                            .cloned()
                                     });
+                                    let best_window = optimal
+                                        .as_ref()
+                                        .map(|ow| BestWindowHint::from_window(ow, now, sunset));
+                                    // Raw window for the timeline overlay (same source as the CTA).
+                                    let best_window_rw = optimal.as_ref().map(|ow| ow.window);
                                     // Daylight hint from the centre's sunset.
                                     let daylight = sunset.map(|s| {
                                         let t = s.with_timezone(&chrono::Local).format("%H:%M");
@@ -180,7 +188,6 @@ fn DashboardPage() -> impl IntoView {
                                             format!("Dagslys til {t}")
                                         }
                                     });
-                                    let hourly_precip = agg.hourly_precip.clone();
                                     let produced_at = agg.produced_at;
                                     // Plain-language surface history, only when the pref is on.
                                     let show_rain = prefs.await.map(|p| p.show_rain_history).unwrap_or(false);
@@ -206,28 +213,57 @@ fn DashboardPage() -> impl IntoView {
                                     };
                                     view! {
                                         <div class="space-y-6">
-                                            <Recommendation total=agg.mean label=c.score.label.clone() reason=reason place=place best_window=best_window updated=produced_at/>
-                                            <div class="space-y-6 rounded-2xl bg-gruv-bg1 p-6 shadow-lg ring-1 ring-gruv-bg2/60">
+                                            <Recommendation total=agg.mean label=c.score.label.clone() penalties=penalties breakdown=breakdown place=place best_window=best_window updated=produced_at/>
+                                            <div class="emboss space-y-5 rounded-2xl bg-gruv-bg1 p-6">
                                                 {nowcast.map(|a| view! { <NowcastBanner alert=a/> })}
-                                                <WindowStatsRow stats=stats/>
-                                                <HourlyPrecipStrip hours=hourly_precip/>
-                                                <div class="flex items-center gap-6">
-                                                    <ScoreGauge total=agg.mean/>
-                                                    <div class="flex-1">
-                                                        <SubscoreBars breakdown=c.score.breakdown/>
-                                                        <p class="mt-3 text-sm text-gruv-fg/70">
-                                                            {format!("spenn {}–{} over {} punkter", agg.min, agg.max, agg.points.len())}
-                                                        </p>
-                                                    </div>
+
+                                                // ── Nå · neste 3 t ──
+                                                <div class="space-y-3">
+                                                    {section_band("Nå · neste 3 t")}
+                                                    <WindowStatsRow stats=stats/>
                                                 </div>
-                                                {(!highlights.is_empty()).then(|| view! {
-                                                    <div class="space-y-1 rounded-xl bg-gruv-bg0/45 p-3 text-sm text-gruv-blue">
-                                                        {highlights.into_iter().map(|h| view! { <p>{h}</p> }).collect_view()}
+
+                                                // ── Time for time ── (the timeline carries its own band header)
+                                                <Suspense fallback=move || view! {
+                                                    <div class="h-[290px] animate-pulse rounded-lg bg-gruv-bg0/40"></div>
+                                                }>
+                                                    {move || Suspend::new(async move {
+                                                        match hourly.await {
+                                                            Ok(mut hf) if !hf.days.is_empty() => {
+                                                                // Sun for the *shown* day (today or tomorrow),
+                                                                // stamped by get_hourly — not the score window's.
+                                                                let (sunrise, sunset) = hf.sun
+                                                                    .map_or((None, None), |s| (s.sunrise, s.sunset));
+                                                                let day = hf.days.remove(0);
+                                                                view! {
+                                                                    <RideTimeline day=day best_window=best_window_rw sunrise=sunrise sunset=sunset now=now/>
+                                                                }.into_any()
+                                                            }
+                                                            _ => ().into_any(),
+                                                        }
+                                                    })}
+                                                </Suspense>
+
+                                                // ── Indeks ──
+                                                <div class="space-y-3">
+                                                    {section_band("Indeks")}
+                                                    <div class="flex items-center gap-6">
+                                                        <ScoreGauge total=agg.mean/>
+                                                        <div class="flex-1">
+                                                            <SubscoreBars breakdown=c.score.breakdown/>
+                                                            <p class="mt-3 text-sm text-gruv-fg/70">
+                                                                {format!("spenn {}–{} over {} punkter", agg.min, agg.max, agg.points.len())}
+                                                            </p>
+                                                        </div>
                                                     </div>
-                                                })}
-                                                {rain_line.map(|t| view! { <p class="text-sm text-gruv-fg/70">{t}</p> })}
-                                                {daylight.map(|t| view! { <p class="text-sm text-gruv-fg/70">{t}</p> })}
-                                                {(!chips.is_empty()).then(|| view! { <PenaltyChips penalties=chips/> })}
+                                                    {(!highlights.is_empty()).then(|| view! {
+                                                        <div class="space-y-1 rounded-xl inset-well bg-gruv-bg0/45 p-3 text-sm text-gruv-blue">
+                                                            {highlights.into_iter().map(|h| view! { <p>{h}</p> }).collect_view()}
+                                                        </div>
+                                                    })}
+                                                    {rain_line.map(|t| view! { <p class="text-xs text-gruv-fg/55">{t}</p> })}
+                                                    {daylight.map(|t| view! { <p class="text-xs text-gruv-fg/55">{t}</p> })}
+                                                </div>
                                             </div>
                                             <MapView points=agg.points.clone()/>
                                         </div>
@@ -288,6 +324,17 @@ fn DashboardPage() -> impl IntoView {
 
             </div>
         </section>
+    }
+}
+
+/// A section header for the details card: an uppercase eyebrow label followed
+/// by a fading "groove" hairline, so the card reads as distinct stacked bands.
+fn section_band(label: &'static str) -> impl IntoView {
+    view! {
+        <div class="flex items-center gap-2">
+            <span class="text-[11px] font-semibold uppercase tracking-[0.12em] text-gruv-fg/45">{label}</span>
+            <span class="h-px flex-1 bg-gradient-to-r from-gruv-bg2/70 to-transparent shadow-[0_1px_0_rgba(235,219,178,0.08)]"></span>
+        </div>
     }
 }
 

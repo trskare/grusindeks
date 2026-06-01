@@ -382,6 +382,27 @@ pub struct HourScore {
     /// Per-axis mean across the sample points.
     pub breakdown: ScoreBreakdown,
     pub confidence: Confidence,
+    /// Centre-point *raw* values for this hour (real units, not scores), so a
+    /// renderer can show actual °C / m/s / mm alongside the 0–100 breakdown.
+    /// `None` when the centre point had no forecast bucket at `time`, or for
+    /// serialized blobs predating this field.
+    #[serde(default)]
+    pub raw: Option<HourRaw>,
+}
+
+/// Centre-point raw forecast values for one hour, in real units. Mirrors the
+/// subset of [`crate::types::HourlyConditions`] a timeline view needs; carried
+/// on [`HourScore`] so the renderer can label lanes with measured numbers
+/// (°C, m/s, mm, %) rather than only the derived 0–100 sub-scores.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct HourRaw {
+    pub temperature_c: f64,
+    pub wind_speed_ms: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wind_gust_ms: Option<f64>,
+    pub precipitation_mm: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probability_of_precip: Option<f64>,
 }
 
 /// One day worth of hourly scores. `daytime_window` is the user's
@@ -418,6 +439,11 @@ pub struct HourlyForecast {
     /// See [`AggregateScore::nowcast_alert`].
     #[serde(default)]
     pub nowcast_alert: Option<NowcastAlert>,
+    /// Sunrise/sunset for the day this forecast covers, at the centre point.
+    /// Lets a renderer draw the daylight arc across a full-day timeline.
+    /// `None` for consumers (e.g. the CLI) that don't stamp it.
+    #[serde(default)]
+    pub sun: Option<crate::sun::SunTimes>,
 }
 
 #[cfg(test)]

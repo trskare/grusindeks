@@ -3,7 +3,7 @@
 //! together with the SQLite layer; the macro generates client stubs that fetch
 //! and deserialize the wasm-safe response types.
 
-use grusindeks_core::aggregate::{AggregateScore, MultiDayForecast};
+use grusindeks_core::aggregate::{AggregateScore, HourlyForecast, MultiDayForecast};
 use leptos::prelude::*;
 
 use crate::dto::{HistoryPoint, PlaceDto, PrefsDto, WorkHoursDto};
@@ -184,6 +184,98 @@ pub async fn get_forecast(place: String, days: u8) -> Result<MultiDayForecast, S
     }
 
     Ok(mf)
+}
+
+/// Hour-by-hour scores for a *full local day* (00:00–24:00) at a place (empty
+/// `place` → default), carrying each hour's raw centre-point values
+/// (°C / m/s / mm / %) plus the day's sunrise/sunset so the dashboard can draw a
+/// whole-day timeline with a daylight arc. The *day* is picked the same way as
+/// the multi-day view (today, or tomorrow once today's ride window is over) so
+/// the timeline and the recommendation card agree; lane data only fills from
+/// `now` onward (MET publishes no past hours), while the time axis and daylight
+/// arc span the whole day. Best-window/history are owned by
+/// `get_forecast`/`get_score`, so this does no extra logging.
+#[server]
+pub async fn get_hourly(place: String) -> Result<HourlyForecast, ServerFnError> {
+    use crate::db::{load_config, DEFAULT_USER_ID};
+    use crate::state::AppState;
+    use chrono::{DurationRound, Local, TimeDelta, Utc};
+    use grusindeks_cli::run::{run_hourly, DayWindow, HourlyInputs};
+    use grusindeks_cli::windows::{
+        build_day_windows, local_to_utc, location_frost_source, resolve_location,
+        window_starts_within_nowcast_horizon,
+    };
+    use grusindeks_core::types::RideWindow;
+
+    let state = expect_context::<AppState>();
+    let cfg = load_config(&state.db, DEFAULT_USER_ID).await.map_err(err)?;
+
+    let place_arg = (!place.is_empty()).then_some(place);
+    let location = resolve_location(&cfg, None, None, place_arg, None).map_err(err)?;
+    let frost_source_id = location_frost_source(&cfg, &location);
+
+    let now = Utc::now();
+    let today = Local::now().date_naive();
+    // Pick the day with the same roll-to-tomorrow logic as the forecast card,
+    // then widen it to the full local day (clipped to `now` for today).
+    let picked = build_day_windows(today, 1, now, cfg.daytime_window).map_err(err)?;
+    let Some(first) = picked.into_iter().next() else {
+        // No ridable day left today and none could be built — nothing to show.
+        return Ok(HourlyForecast {
+            header_hours: Vec::new(),
+            days: Vec::new(),
+            rain_history: None,
+            nowcast_alert: None,
+            sun: None,
+        });
+    };
+    let date = first.date;
+    let day_start =
+        local_to_utc(date.and_hms_opt(0, 0, 0).expect("valid midnight")).map_err(err)?;
+    let day_end = local_to_utc(
+        date.succ_opt()
+            .expect("date has a successor")
+            .and_hms_opt(0, 0, 0)
+            .expect("valid midnight"),
+    )
+    .map_err(err)?;
+    // Floor `now` to the current hour so today's in-progress hour bucket is
+    // included — the timeline then starts at the live hour (no empty sliver
+    // before the next whole hour). A future day stays clipped to its midnight.
+    let now_hour = now.duration_trunc(TimeDelta::hours(1)).unwrap_or(now);
+    let window = RideWindow {
+        start: day_start.max(now_hour),
+        end: day_end,
+    };
+    let day_windows = vec![DayWindow { date, window }];
+    let header_hours: Vec<u8> = (0..24).collect();
+    let fetch_nowcast = window_starts_within_nowcast_horizon(window, now);
+
+    let mut hf = run_hourly(
+        &state.client(),
+        HourlyInputs {
+            center: location.center,
+            radius_km: location.radius_km,
+            days: day_windows,
+            frost_source_id: frost_source_id.as_deref(),
+            history_hours: 168,
+            lang: cfg.language,
+            header_hours,
+            fetch_nowcast,
+            progress: &NoopProgress,
+        },
+    )
+    .await
+    .map_err(err)?;
+
+    // Stamp the shown day's sunrise/sunset at the centre so the timeline can
+    // draw the daylight arc for the *correct* day (today or tomorrow).
+    hf.sun = Some(grusindeks_core::sun::sun_times(
+        date,
+        location.center.lat,
+        location.center.lon,
+    ));
+    Ok(hf)
 }
 
 /// History samples for a place + kind ("score" | "forecast_day"), oldest-first.
