@@ -3,6 +3,7 @@
 //   gi_map_init(containerId, lng, lat, zoom)
 //   gi_map_set_points(geojsonString)   -- 9 sample points, coloured by score
 //   gi_map_set_ring(geojsonString)     -- the sampling-radius ring
+//   gi_map_set_radar(enabled)          -- approximate MET radar/2.0 Nordic overlay
 // Tiles come from OpenStreetMap raster (no API key); attribution is shown.
 //
 // Points are a GeoJSON circle layer (rendered in the same WebGL canvas as the
@@ -13,6 +14,56 @@
   let map = null;
   let ready = false;
   let pending = { points: null, ring: null };
+  let radarEnabled = false;
+
+  // MET radar/2.0 Nordic PNG is Lambert Conformal Conic, while MapLibre is
+  // Web Mercator. This first-pass overlay uses the known Nordic LCC grid extent
+  // and lets MapLibre warp the four image corners. It is useful for checking
+  // MET data visually; pixel-accurate placement requires server-side
+  // reprojection tile-by-tile.
+  const RADAR_URL = "https://api.met.no/weatherapi/radar/2.0/5level_reflectivity.png?area=nordic";
+  let radarUrlPromise = null;
+  let radarObjectUrl = null;
+  const RADAR_GRID = {
+    xfirst: -897442,
+    yfirst: -1104322,
+    width: 719,
+    height: 929,
+    dx: 2500,
+    dy: 2500,
+  };
+
+  function lccToLonLat(x, y) {
+    const deg = Math.PI / 180;
+    const R = 6371000;
+    const lat0 = 63 * deg;
+    const lon0 = 15 * deg;
+    const lat1 = 63 * deg;
+    const n = Math.sin(lat1);
+    const F = (Math.cos(lat1) * Math.pow(Math.tan(Math.PI / 4 + lat1 / 2), n)) / n;
+    const rho0 = (R * F) / Math.pow(Math.tan(Math.PI / 4 + lat0 / 2), n);
+    const rho = Math.sqrt(x * x + (rho0 - y) * (rho0 - y));
+    const theta = Math.atan2(x, rho0 - y);
+    const lat = 2 * Math.atan(Math.pow((R * F) / rho, 1 / n)) - Math.PI / 2;
+    const lon = lon0 + theta / n;
+    return [lon / deg, lat / deg];
+  }
+
+  function radarCoordinates() {
+    const g = RADAR_GRID;
+    // Treat xfirst/yfirst as the centre of the lower-left grid cell and expand
+    // by half a cell to get outer image edges.
+    const minX = g.xfirst - g.dx / 2;
+    const maxX = g.xfirst + (g.width - 1) * g.dx + g.dx / 2;
+    const minY = g.yfirst - g.dy / 2;
+    const maxY = g.yfirst + (g.height - 1) * g.dy + g.dy / 2;
+    return [
+      lccToLonLat(minX, maxY),
+      lccToLonLat(maxX, maxY),
+      lccToLonLat(maxX, minY),
+      lccToLonLat(minX, minY),
+    ];
+  }
 
   // Selectable basemaps (all CORS-enabled raster XYZ; no API key). CyclOSM
   // renders gravel/unpaved tracks distinctly — the default for a gravel app.
@@ -43,14 +94,95 @@
     layers: [{ id: "base", type: "raster", source: "base" }],
   };
 
-  // Swap the basemap tiles, keeping the base layer below the ring/points.
+  // Swap the basemap tiles, keeping the base layer below radar/ring/points.
   function setBasemap(key) {
     if (!map || !BASEMAPS[key]) return;
     if (map.getLayer("base")) map.removeLayer("base");
     if (map.getSource("base")) map.removeSource("base");
     map.addSource("base", baseSource(key));
-    const before = map.getLayer("gi-ring-fill") ? "gi-ring-fill" : undefined;
+    const before = map.getLayer("gi-radar") ? "gi-radar" : (map.getLayer("gi-ring-fill") ? "gi-ring-fill" : undefined);
     map.addLayer({ id: "base", type: "raster", source: "base" }, before);
+  }
+
+  function filteredRadarUrl() {
+    if (radarUrlPromise) return radarUrlPromise;
+    radarUrlPromise = new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = function () {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0);
+        const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        for (let i = 0; i < data.data.length; i += 4) {
+          const r = data.data[i], g = data.data[i + 1], b = data.data[i + 2];
+          const max = Math.max(r, g, b), min = Math.min(r, g, b);
+          const sat = max === 0 ? 0 : (max - min) / max;
+          const hue = (() => {
+            if (max === min) return 0;
+            if (max === r) return (60 * ((g - b) / (max - min)) + 360) % 360;
+            if (max === g) return 60 * ((b - r) / (max - min)) + 120;
+            return 60 * ((r - g) / (max - min)) + 240;
+          })();
+          // MET's public PNG is a finished web map with coastlines, labels and
+          // grey land/sea background. Keep only the saturated precipitation
+          // palette (green/yellow/orange/red), and make labels/background fully
+          // transparent so MapLibre's own basemap remains visible.
+          const precip = sat > 0.24 && max > 120 && (hue < 45 || (hue > 50 && hue < 110));
+          if (!precip) data.data[i + 3] = 0;
+          else data.data[i + 3] = 185;
+        }
+        ctx.putImageData(data, 0, 0);
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            reject(new Error("Could not encode filtered radar image"));
+            return;
+          }
+          if (radarObjectUrl) URL.revokeObjectURL(radarObjectUrl);
+          radarObjectUrl = URL.createObjectURL(blob);
+          resolve(radarObjectUrl);
+        }, "image/png");
+      };
+      img.onerror = reject;
+      img.src = RADAR_URL;
+    });
+    return radarUrlPromise;
+  }
+
+  function removeRadar() {
+    if (map.getLayer("gi-radar")) map.removeLayer("gi-radar");
+    if (map.getSource("gi-radar")) map.removeSource("gi-radar");
+  }
+
+  function addRadar(url) {
+    if (!radarEnabled || !ready || !map) return;
+    removeRadar();
+    map.addSource("gi-radar", {
+      type: "image",
+      url: url,
+      coordinates: radarCoordinates(),
+    });
+    const before = map.getLayer("gi-ring-fill") ? "gi-ring-fill" : undefined;
+    map.addLayer({
+      id: "gi-radar",
+      type: "raster",
+      source: "gi-radar",
+      paint: { "raster-opacity": 0.75, "raster-fade-duration": 0 },
+    }, before);
+  }
+
+  function setRadar(enabled) {
+    radarEnabled = !!enabled;
+    if (!ready || !map) return;
+    if (!radarEnabled) {
+      removeRadar();
+      return;
+    }
+    filteredRadarUrl()
+      .then(addRadar)
+      .catch((e) => console.error("Could not load MET radar", e));
   }
 
   function emptyFC() {
@@ -169,6 +301,7 @@
   function applyPending() {
     if (!ready || !map) return;
     ensureLayers();
+    setRadar(radarEnabled);
     if (pending.ring) {
       map.getSource("gi-ring").setData(pending.ring);
       fitRing(pending.ring, false);
@@ -228,5 +361,9 @@
 
   window.gi_map_set_basemap = function (key) {
     if (ready) setBasemap(key);
+  };
+
+  window.gi_map_set_radar = function (enabled) {
+    setRadar(enabled);
   };
 })();

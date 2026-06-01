@@ -24,6 +24,8 @@ mod glue {
         pub fn set_ring(geojson: &str);
         #[wasm_bindgen(js_name = gi_map_set_basemap)]
         pub fn set_basemap(key: &str);
+        #[wasm_bindgen(js_name = gi_map_set_radar)]
+        pub fn set_radar(enabled: bool);
     }
 }
 
@@ -34,6 +36,14 @@ fn set_basemap_js(key: &str) {
 }
 #[cfg(not(feature = "hydrate"))]
 fn set_basemap_js(_key: &str) {}
+
+/// Toggle the MET radar image overlay (client-only; no-op during SSR).
+#[cfg(feature = "hydrate")]
+fn set_radar_js(enabled: bool) {
+    glue::set_radar(enabled);
+}
+#[cfg(not(feature = "hydrate"))]
+fn set_radar_js(_enabled: bool) {}
 
 #[cfg(feature = "hydrate")]
 fn points_geojson(points: &[PointScore]) -> String {
@@ -101,6 +111,7 @@ pub fn MapView(points: Vec<PointScore>) -> impl IntoView {
     // Basemap switcher. Defaults to plain OSM ("Standard"); matches the glue's
     // default tile source. ("Grus" = CyclOSM shows gravel/unpaved tracks.)
     let basemap = RwSignal::new("osm");
+    let radar = RwSignal::new(false);
 
     #[cfg(feature = "hydrate")]
     {
@@ -157,6 +168,19 @@ pub fn MapView(points: Vec<PointScore>) -> impl IntoView {
                             }
                         }).collect_view()}
                     </div>
+                    <button type="button"
+                        title="Viser MET radar/2.0 Nordic som omtrentlig bilde-overlegg (ikke pikselnøyaktig reprojisert)."
+                        class=move || if radar.get() {
+                            "rounded-lg bg-gruv-blue px-2.5 py-1 text-xs font-semibold text-gruv-bg0 ring-1 ring-gruv-blue"
+                        } else {
+                            "rounded-lg bg-gruv-bg0/60 px-2.5 py-1 text-xs font-semibold text-gruv-fg/80 ring-1 ring-gruv-bg2 hover:bg-gruv-bg2/60 hover:text-gruv-fg"
+                        }
+                        on:click=move |_| {
+                            let next = !radar.get_untracked();
+                            radar.set(next);
+                            set_radar_js(next);
+                        }
+                    >"MET-radar"</button>
                 </div>
                 // Legend mirrors the five score buckets the dots are coloured by.
                 <div class="flex flex-wrap justify-end gap-x-2 gap-y-1 text-xs uppercase tracking-wide text-gruv-fg/70">
@@ -172,6 +196,11 @@ pub fn MapView(points: Vec<PointScore>) -> impl IntoView {
                 // grows to absorb the slack above the compact trend); fixed h-80
                 // on narrow screens. MapLibre tracks the container and resizes.
                 <div id="gi-map" class="h-80 w-full min-[2024px]:h-full"></div>
+                {move || radar.get().then(|| view! {
+                    <div class="pointer-events-none absolute bottom-3 right-3 z-[1] rounded-lg bg-gruv-bg0/85 px-2.5 py-1.5 text-xs font-semibold text-gruv-fg shadow-lg ring-1 ring-gruv-bg2/70 backdrop-blur">
+                        "MET-radar på · kun nedbør vises"
+                    </div>
+                })}
                 // Area wind: arrow points the way the wind blows (from-dir + 180°).
                 {wind.map(|(deg, speed)| {
                     let rot = deg + 180.0;
