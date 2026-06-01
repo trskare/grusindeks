@@ -1090,11 +1090,11 @@ pub fn RideTimeline(
                 // matches the plot height so icons stay centred on their lanes) ----
                 <div class="flex w-5 shrink-0 flex-col pt-[18px] text-gruv-fg/45">
                     <div class="flex h-52 flex-col">
-                        <div class=glyph>{icons::thermometer("h-3.5 w-3.5", Some("Temperatur"))}</div>
-                        <div class=glyph>{icons::wind("h-3.5 w-3.5", Some("Vind"))}</div>
-                        <div class=glyph>{icons::cloud_rain("h-3.5 w-3.5", Some("Nedbør"))}</div>
-                        <div class=glyph>{icons::umbrella("h-3.5 w-3.5", Some("Nedbørssjanse"))}</div>
-                        <div class=glyph>{icons::mountain("h-3.5 w-3.5", Some("Underlag"))}</div>
+                        <div class=glyph>{icons::thermometer("h-[18px] w-[18px]", Some("Temperatur"))}</div>
+                        <div class=glyph>{icons::wind("h-[18px] w-[18px]", Some("Vind"))}</div>
+                        <div class=glyph>{icons::cloud_rain("h-[18px] w-[18px]", Some("Nedbør"))}</div>
+                        <div class=glyph>{icons::umbrella("h-[18px] w-[18px]", Some("Nedbørssjanse"))}</div>
+                        <div class=glyph>{icons::mountain("h-[18px] w-[18px]", Some("Underlag"))}</div>
                     </div>
                 </div>
 
@@ -1284,12 +1284,6 @@ pub fn RideTimeline(
                 <span class="flex items-center gap-1 text-gruv-aqua/90">{icons::bike("h-3 w-3", None)}"beste vindu"</span>
                 <span class="flex items-center gap-1 text-gruv-blue">{icons::droplet("h-3 w-3", None)}"regn"</span>
                 <span class="flex items-center gap-1 text-gruv-orange/80">{icons::sunset("h-3 w-3", None)}"solnedgang"</span>
-                <span class="mx-1 h-3 w-px bg-gruv-bg2"></span>
-                <span class="flex items-center gap-1">{icons::thermometer("h-3 w-3", None)}"temp"</span>
-                <span class="flex items-center gap-1">{icons::wind("h-3 w-3", None)}"vind"</span>
-                <span class="flex items-center gap-1">{icons::cloud_rain("h-3 w-3", None)}"nedbør"</span>
-                <span class="flex items-center gap-1">{icons::umbrella("h-3 w-3", None)}"sjanse"</span>
-                <span class="flex items-center gap-1">{icons::mountain("h-3 w-3", None)}"bakke"</span>
             </div>
         </div>
     }
