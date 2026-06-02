@@ -11,6 +11,7 @@ use crate::components::{
     SubscoreBars,
 };
 use crate::dto::{PlaceDto, PrefsDto, WorkHoursDto};
+use crate::icons;
 use crate::map::MapView;
 use crate::server::{
     get_forecast, get_hourly, get_hourly_day, get_prefs, get_score, get_work_hours, list_places,
@@ -68,13 +69,21 @@ pub fn App() -> impl IntoView {
 fn NavBar() -> impl IntoView {
     view! {
         <header class="sticky top-0 z-30 border-b border-gruv-bg2 bg-gruv-bg0/80 backdrop-blur-sm">
-            <nav class="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
+            <nav class="mx-auto flex max-w-5xl items-center justify-between px-6 py-5">
                 <A href="/">
-                    <span class="text-lg font-bold tracking-tight">"Grusindeks"</span>
+                    // The whole lockup is the home link; `group` drives the
+                    // logo's needle-swing + the wordmark tint on hover.
+                    <span class="group -mx-2 flex items-center gap-2.5 rounded-lg px-2 py-1 transition-colors hover:bg-gruv-bg1/50">
+                        {icons::logo("h-7 w-7 text-gruv-fg gx-logo", Some("Grusindeks"))}
+                        <span class="hidden text-lg font-bold tracking-tight text-gruv-fg transition-colors group-hover:text-gruv-aqua sm:inline">
+                            "Grus"<span class="font-semibold text-gruv-gray">"indeks"</span>
+                        </span>
+                    </span>
                 </A>
                 <A href="/settings">
-                    <span class="text-sm text-gruv-gray transition-colors hover:text-gruv-fg">
-                        "Innstillinger"
+                    <span class="flex items-center gap-1.5 text-sm text-gruv-gray transition-colors hover:text-gruv-fg">
+                        {icons::settings("h-[18px] w-[18px]", None)}
+                        <span class="hidden sm:inline">"Innstillinger"</span>
                     </span>
                 </A>
             </nav>

@@ -166,3 +166,45 @@ pub fn arrow_right(class: &'static str, title: Option<&'static str>) -> impl Int
         .into_any(),
     )
 }
+
+/// Settings gear — the "Innstillinger" nav link.
+pub fn settings(class: &'static str, title: Option<&'static str>) -> impl IntoView {
+    base(
+        class,
+        title,
+        view! {
+            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+            <circle cx="12" cy="12" r="3"/>
+        }
+        .into_any(),
+    )
+}
+
+/// The Grusindeks wordmark logo: a gravel-road wedge (the favicon's road,
+/// distilled) with a dashed centre line and a yellow apex dot standing in for
+/// the bike — it reads at once as "gravel road" and "gauge/index". Multi-tone
+/// (a faded centre line + a yellow dot), so it builds its own `<svg>` rather
+/// than going through [`base`], but keeps the same house conventions.
+pub fn logo(class: &'static str, title: Option<&'static str>) -> impl IntoView {
+    view! {
+        <svg
+            class=class
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            role=title.map(|_| "img")
+            aria-hidden=title.is_none().then_some("true")
+        >
+            {title.map(|t| view! { <title>{t}</title> })}
+            // gravel-road wedge — the body of the mark
+            <path d="M12 3.5 19 18 5 18 Z"/>
+            // dashed centre line, echoing the favicon's road marking
+            <path d="M12 7 12 18" stroke-width="1.5" stroke-dasharray="2 2.5" class="text-gruv-fg/55"/>
+            // apex dot — the bike, in yellow
+            <circle cx="12" cy="4.8" r="1.25" fill="currentColor" stroke="none" class="text-gruv-yellow"/>
+        </svg>
+    }
+}
