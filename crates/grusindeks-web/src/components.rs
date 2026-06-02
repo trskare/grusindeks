@@ -245,6 +245,10 @@ pub fn Recommendation(
     /// clock when the server didn't stamp it. Also anchors the "neste 3 timer"
     /// horizon badge (start → start + 3 h).
     updated: Option<DateTime<Utc>>,
+    /// Recent ground wetness for the "underlag" stats tile: cumulative
+    /// precipitation (mm) over the rain-history lookback, and that lookback in
+    /// hours. `None` hides the tile (Frost not configured / no data).
+    ground: Option<(f64, i64)>,
 ) -> impl IntoView {
     let (default_cta, default_summary) = cta_for(total);
     // Window-aware CTA: when the next 3 h aren't already good but a later
@@ -306,7 +310,7 @@ pub fn Recommendation(
 
             // The next-3-hour measured numbers, same window the verdict describes.
             <div class="mt-4">
-                <WindowStatsRow stats=stats/>
+                <WindowStatsRow stats=stats ground=ground/>
             </div>
 
             // Reason — "trekkes ned av" chips (or a positive note when clean).
@@ -401,10 +405,35 @@ pub fn ScoreGauge(total: u8) -> impl IntoView {
     }
 }
 
+/// Full-bar point for the "underlag" (recent ground water) tile, in mm of
+/// cumulative precipitation over `rain_history`'s lookback window (~7 days).
+/// This is the raw weekly *input*, NOT the drying model's surface accumulator
+/// (which saturates at `GROUND_SATURATED` = 5 mm of post-drying standing
+/// water) — so the scale is larger: ~25 mm reads as a thoroughly soaked week.
+const GROUND_BAR_MAX_MM: f64 = 25.0;
+
+/// Bar fill colour for the "underlag" tile — interpolates from muted gruv-blue
+/// (barely wet) toward the deeper, more saturated gruv-aqua (soaked), so a
+/// wetter surface reads as a more intense blue. Both endpoints are gruvbox
+/// tokens; `frac` is the bar's 0–1 fill level.
+fn ground_fill_color(frac: f64) -> String {
+    let t = frac.clamp(0.0, 1.0);
+    // gruv-blue #83a598 → gruv-aqua #458588
+    let lerp = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * t).round() as u8;
+    format!(
+        "rgb({},{},{})",
+        lerp(0x83, 0x45),
+        lerp(0xa5, 0x85),
+        lerp(0x98, 0x88)
+    )
+}
+
 /// Compact real-world numbers (°C / m/s / mm) for the current window. Renders
-/// nothing on the empty-window (NaN) path so we never print "NaN°C".
+/// nothing on the empty-window (NaN) path so we never print "NaN°C". When
+/// `ground` is `Some`, a fourth "underlag" tile (recent ground water + a fill
+/// bar) joins the row and it widens to four columns.
 #[component]
-pub fn WindowStatsRow(stats: WindowStats) -> impl IntoView {
+pub fn WindowStatsRow(stats: WindowStats, ground: Option<(f64, i64)>) -> impl IntoView {
     if stats.is_empty() {
         return ().into_any();
     }
@@ -436,8 +465,14 @@ pub fn WindowStatsRow(stats: WindowStats) -> impl IntoView {
     let metric = "text-2xl font-bold leading-none tabular-nums text-gruv-fg";
     let cap = "text-xs text-gruv-fg/55";
     let icon = "h-4 w-4 text-gruv-fg/45";
+    // The optional "underlag" tile widens the row to four columns.
+    let grid = if ground.is_some() {
+        "grid grid-cols-4 gap-2.5"
+    } else {
+        "grid grid-cols-3 gap-2.5"
+    };
     view! {
-        <div class="grid grid-cols-3 gap-2.5">
+        <div class=grid>
             <div class=cell>
                 {icons::thermometer(icon, Some("Temperatur"))}
                 <span class=metric>{temp}</span>
@@ -452,6 +487,23 @@ pub fn WindowStatsRow(stats: WindowStats) -> impl IntoView {
                 {icons::cloud_rain(icon, Some("Nedbør"))}
                 <span class=metric>{rain}</span>
             </div>
+            // Recent ground water: mm fallen over the lookback window, with a
+            // bar that fills toward GROUND_BAR_MAX_MM (a soaked week).
+            {ground.map(|(mm, hours)| {
+                let days = (hours as f64 / 24.0).round().max(1.0) as i64;
+                let pct = ((mm / GROUND_BAR_MAX_MM) * 100.0).clamp(0.0, 100.0);
+                view! {
+                    <div class=cell>
+                        {icons::mountain(icon, Some("Underlag"))}
+                        <span class=metric>{format!("{mm:.0} mm")}</span>
+                        <span class="block h-1.5 w-full overflow-hidden rounded-full bg-gruv-bg2/60">
+                            <span class="block h-full rounded-full"
+                                style=format!("width:{pct:.0}%; background-color:{}; transition: width 700ms cubic-bezier(0.22,1,0.36,1)", ground_fill_color(pct / 100.0))></span>
+                        </span>
+                        <span class=cap>{format!("underlag · {days} d")}</span>
+                    </div>
+                }
+            })}
         </div>
     }
     .into_any()

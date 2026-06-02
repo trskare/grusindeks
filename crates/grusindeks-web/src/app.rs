@@ -215,6 +215,10 @@ fn DashboardPage() -> impl IntoView {
                                         }
                                     });
                                     let produced_at = agg.produced_at;
+                                    // Recent ground water for the "underlag" stats tile —
+                                    // always shown when Frost data exists (independent of the
+                                    // rain-history footer pref below).
+                                    let ground = agg.rain_history.as_ref().map(|rh| (rh.total_mm, rh.lookback_hours));
                                     // Plain-language surface history, only when the pref is on.
                                     let show_rain = prefs.await.map(|p| p.show_rain_history).unwrap_or(false);
                                     let rain_line = show_rain
@@ -244,7 +248,7 @@ fn DashboardPage() -> impl IntoView {
                                         <div class="grid grid-cols-1 gap-6 min-[2024px]:grid-cols-2 min-[2024px]:items-stretch">
                                             // LEFT — verdict + details
                                             <div class="space-y-6">
-                                            <Recommendation total=agg.mean label=c.score.label.clone() penalties=penalties breakdown=breakdown stats=stats place=place best_window=best_window updated=produced_at/>
+                                            <Recommendation total=agg.mean label=c.score.label.clone() penalties=penalties breakdown=breakdown stats=stats place=place best_window=best_window updated=produced_at ground=ground/>
                                             <div class="emboss space-y-5 rounded-2xl bg-gruv-bg1 p-6">
                                                 {nowcast.map(|a| view! { <NowcastBanner alert=a/> })}
 
