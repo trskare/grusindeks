@@ -249,6 +249,9 @@ pub fn Recommendation(
     /// precipitation (mm) over the rain-history lookback, and that lookback in
     /// hours. `None` hides the tile (Frost not configured / no data).
     ground: Option<(f64, i64)>,
+    /// Daylight-left for the "dagslys" stats tile: `(value, bar_pct, caption)`.
+    /// `None` hides the tile (no sun data).
+    daylight: Option<(String, Option<f64>, String)>,
 ) -> impl IntoView {
     let (default_cta, default_summary) = cta_for(total);
     // Window-aware CTA: when the next 3 h aren't already good but a later
@@ -310,7 +313,7 @@ pub fn Recommendation(
 
             // The next-3-hour measured numbers, same window the verdict describes.
             <div class="mt-4">
-                <WindowStatsRow stats=stats ground=ground/>
+                <WindowStatsRow stats=stats ground=ground daylight=daylight/>
             </div>
 
             // Reason — "trekkes ned av" chips (or a positive note when clean).
@@ -375,63 +378,6 @@ pub fn Recommendation(
     }
 }
 
-/// A slim card under the recommendation: how much daylight is left today, with
-/// a bar that drains toward sunset. Renders nothing without sun data; after
-/// sunset it shows a muted "Mørkt nå" state instead of a negative duration.
-#[component]
-pub fn DaylightBox(
-    sunrise: Option<DateTime<Utc>>,
-    sunset: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
-) -> impl IntoView {
-    let Some(sunset) = sunset else {
-        return ().into_any();
-    };
-    let set_hhmm = sunset.with_timezone(&Local).format("%H:%M").to_string();
-    if now >= sunset {
-        return view! {
-            <div class="emboss flex items-center gap-3 rounded-2xl bg-gruv-bg1 px-5 py-3">
-                {icons::sunset("h-5 w-5 shrink-0 text-gruv-fg/45", Some("Solnedgang"))}
-                <span class="text-base font-semibold text-gruv-fg/80">"Mørkt nå"</span>
-                <span class="text-xs text-gruv-fg/55">{format!("solnedgang var {set_hhmm}")}</span>
-            </div>
-        }
-        .into_any();
-    }
-    let rem = sunset - now;
-    let h = rem.num_hours();
-    let m = (rem.num_minutes() - h * 60).max(0);
-    let main = if h > 0 {
-        format!("{h} t {m} min")
-    } else {
-        format!("{m} min")
-    };
-    // Bar drains as the day burns down; needs sunrise to know the full span.
-    let frac = sunrise.map(|sr| {
-        let total = (sunset - sr).num_minutes().max(1) as f64;
-        let left = (sunset - now).num_minutes().clamp(0, total as i64) as f64;
-        (left / total).clamp(0.0, 1.0) * 100.0
-    });
-    view! {
-        <div class="emboss flex items-center gap-4 rounded-2xl bg-gruv-bg1 px-5 py-3.5">
-            {icons::sunset("h-6 w-6 shrink-0 text-gruv-orange", Some("Dagslys"))}
-            <div class="min-w-0 flex-1">
-                <div class="flex items-baseline gap-2">
-                    <span class="text-xl font-bold tabular-nums text-gruv-fg">{main}</span>
-                    <span class="text-sm text-gruv-fg/70">"dagslys igjen"</span>
-                </div>
-                {frac.map(|pct| view! {
-                    <span class="mt-1.5 block h-1 w-full overflow-hidden rounded-full bg-gruv-bg2/60">
-                        <span class="block h-full rounded-full bg-gruv-orange/70" style=format!("width:{pct:.0}%; transition: width 700ms cubic-bezier(0.22,1,0.36,1)")></span>
-                    </span>
-                })}
-                <div class="mt-1 text-xs text-gruv-fg/55">{format!("solnedgang {set_hhmm}")}</div>
-            </div>
-        </div>
-    }
-    .into_any()
-}
-
 /// Radial score gauge: a ring filled to `total`% in the score colour, with the
 /// number and a verdict label in the middle.
 #[component]
@@ -486,11 +432,16 @@ fn ground_fill_color(frac: f64) -> String {
 }
 
 /// Compact real-world numbers (°C / m/s / mm) for the current window. Renders
-/// nothing on the empty-window (NaN) path so we never print "NaN°C". When
-/// `ground` is `Some`, a fourth "underlag" tile (recent ground water + a fill
-/// bar) joins the row and it widens to four columns.
+/// nothing on the empty-window (NaN) path so we never print "NaN°C". Optional
+/// trailing tiles join the row (and widen the grid) when present: `ground` =
+/// recent ground water; `daylight` = `(value, bar_pct, caption)` for daylight
+/// left today.
 #[component]
-pub fn WindowStatsRow(stats: WindowStats, ground: Option<(f64, i64)>) -> impl IntoView {
+pub fn WindowStatsRow(
+    stats: WindowStats,
+    ground: Option<(f64, i64)>,
+    daylight: Option<(String, Option<f64>, String)>,
+) -> impl IntoView {
     if stats.is_empty() {
         return ().into_any();
     }
@@ -522,11 +473,11 @@ pub fn WindowStatsRow(stats: WindowStats, ground: Option<(f64, i64)>) -> impl In
     let metric = "text-2xl font-bold leading-none tabular-nums text-gruv-fg";
     let cap = "text-xs text-gruv-fg/55";
     let icon = "h-4 w-4 text-gruv-fg/45";
-    // The optional "underlag" tile widens the row to four columns.
-    let grid = if ground.is_some() {
-        "grid grid-cols-4 gap-2.5"
-    } else {
-        "grid grid-cols-3 gap-2.5"
+    // Three base tiles plus whichever optional tiles are present.
+    let grid = match ground.is_some() as usize + daylight.is_some() as usize {
+        2 => "grid grid-cols-5 gap-2.5",
+        1 => "grid grid-cols-4 gap-2.5",
+        _ => "grid grid-cols-3 gap-2.5",
     };
     view! {
         <div class=grid>
@@ -558,6 +509,23 @@ pub fn WindowStatsRow(stats: WindowStats, ground: Option<(f64, i64)>) -> impl In
                                 style=format!("width:{pct:.0}%; background-color:{}; transition: width 700ms cubic-bezier(0.22,1,0.36,1)", ground_fill_color(pct / 100.0))></span>
                         </span>
                         <span class=cap>{format!("underlag · {days} d")}</span>
+                    </div>
+                }
+            })}
+            // Daylight left today: hours/min, an orange bar draining toward
+            // sunset (none after dark), and the sunset time.
+            {daylight.map(|(main, frac, cap_txt)| {
+                view! {
+                    <div class=cell>
+                        {icons::sunset(icon, Some("Dagslys"))}
+                        <span class=metric>{main}</span>
+                        {frac.map(|pct| view! {
+                            <span class="block h-1.5 w-full overflow-hidden rounded-full bg-gruv-bg2/60">
+                                <span class="block h-full rounded-full bg-gruv-orange/70"
+                                    style=format!("width:{pct:.0}%; transition: width 700ms cubic-bezier(0.22,1,0.36,1)")></span>
+                            </span>
+                        })}
+                        <span class=cap>{cap_txt}</span>
                     </div>
                 }
             })}

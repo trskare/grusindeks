@@ -7,8 +7,7 @@ use leptos_router::components::{Route, Router, Routes, A};
 use leptos_router::path;
 
 use crate::components::{
-    BestWindowHint, DayCard, DaylightBox, NowcastBanner, Recommendation, RideTimeline, ScoreGauge,
-    SubscoreBars,
+    BestWindowHint, DayCard, NowcastBanner, Recommendation, RideTimeline, ScoreGauge, SubscoreBars,
 };
 use crate::dto::{PlaceDto, PrefsDto, WorkHoursDto};
 use crate::map::MapView;
@@ -210,6 +209,26 @@ fn DashboardPage() -> impl IntoView {
                                     // Recent ground water for the "underlag" stats tile —
                                     // shown whenever Frost data exists.
                                     let ground = agg.rain_history.as_ref().map(|rh| (rh.total_mm, rh.lookback_hours));
+                                    // Daylight-left for the "dagslys" stats tile: (value, bar
+                                    // fraction 0–100, caption). After sunset it's a muted
+                                    // "Mørkt" with no bar. `None` (no sun data) hides the tile.
+                                    let daylight = sunset.map(|ss| {
+                                        let set_hhmm = ss.with_timezone(&chrono::Local).format("%H:%M").to_string();
+                                        if now >= ss {
+                                            ("Mørkt".to_string(), None, format!("sol ned {set_hhmm}"))
+                                        } else {
+                                            let rem = ss - now;
+                                            let h = rem.num_hours();
+                                            let m = (rem.num_minutes() - h * 60).max(0);
+                                            let main = if h > 0 { format!("{h}t {m}m") } else { format!("{m}m") };
+                                            let frac = sunrise.map(|sr| {
+                                                let total = (ss - sr).num_minutes().max(1) as f64;
+                                                let left = (ss - now).num_minutes().clamp(0, total as i64) as f64;
+                                                (left / total).clamp(0.0, 1.0) * 100.0
+                                            });
+                                            (main, frac, format!("sol ned {set_hhmm}"))
+                                        }
+                                    });
                                     let place = match selected.get_untracked() {
                                         p if !p.trim().is_empty() => p,
                                         _ => prefs
@@ -226,8 +245,7 @@ fn DashboardPage() -> impl IntoView {
                                         <div class="grid grid-cols-1 gap-6 min-[2024px]:grid-cols-2 min-[2024px]:items-stretch">
                                             // LEFT — verdict + details
                                             <div class="space-y-6">
-                                            <Recommendation total=agg.mean label=c.score.label.clone() penalties=penalties breakdown=breakdown stats=stats place=place best_window=best_window updated=produced_at ground=ground/>
-                                            <DaylightBox sunrise=sunrise sunset=sunset now=now/>
+                                            <Recommendation total=agg.mean label=c.score.label.clone() penalties=penalties breakdown=breakdown stats=stats place=place best_window=best_window updated=produced_at ground=ground daylight=daylight/>
                                             <div class="emboss space-y-5 rounded-2xl bg-gruv-bg1 p-6">
                                                 {nowcast.map(|a| view! { <NowcastBanner alert=a/> })}
 
