@@ -1562,6 +1562,7 @@ mod tests {
 
     fn perfect(time_h: u32) -> HourlyConditions {
         HourlyConditions {
+            thunder: false,
             probability_of_precip: Some(5.0),
             ..HourlyConditions::minimal(t(time_h), 17.0, 2.0, 0.0)
         }
@@ -1846,6 +1847,7 @@ mod tests {
 
         fn awful(time_h: u32) -> HourlyConditions {
             HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(95.0),
                 ..HourlyConditions::minimal(t(time_h), 5.0, 11.0, 3.0)
             }
@@ -1904,6 +1906,7 @@ mod tests {
 
         fn rainy(time_h: u32) -> HourlyConditions {
             HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(95.0),
                 ..HourlyConditions::minimal(t(time_h), 12.0, 3.0, 1.0)
             }
@@ -2025,6 +2028,7 @@ mod tests {
 
         fn awful(time_h: u32) -> HourlyConditions {
             HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(95.0),
                 ..HourlyConditions::minimal(t(time_h), 5.0, 11.0, 3.0)
             }
@@ -2156,6 +2160,7 @@ mod tests {
         let win = RideWindow::from_hours(t(14), 3);
         let hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions {
+                thunder: false,
                 wind_gust_ms: Some(22.0),
                 cloud_area_fraction: Some(95.0),
                 probability_of_precip: Some(40.0),
@@ -2211,6 +2216,7 @@ mod tests {
         }
         fn windy(time_h: u32, day_offset: i64) -> HourlyConditions {
             HourlyConditions {
+                thunder: false,
                 wind_gust_ms: Some(13.0),
                 cloud_area_fraction: Some(80.0),
                 ..HourlyConditions::minimal(at(time_h, day_offset), 6.0, 9.0, 0.0)
@@ -2218,6 +2224,7 @@ mod tests {
         }
         fn rainy(time_h: u32, day_offset: i64) -> HourlyConditions {
             HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(85.0),
                 cloud_area_fraction: Some(95.0),
                 ..HourlyConditions::minimal(at(time_h, day_offset), 8.0, 4.0, 1.5)
@@ -2225,6 +2232,7 @@ mod tests {
         }
         fn nice(time_h: u32, day_offset: i64) -> HourlyConditions {
             HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(10.0),
                 cloud_area_fraction: Some(30.0),
                 ..HourlyConditions::minimal(at(time_h, day_offset), 17.0, 3.0, 0.0)
@@ -2305,6 +2313,7 @@ mod tests {
         let center = Point::new(59.9139, 10.7522);
         let hours: Vec<HourlyConditions> = (6..18)
             .map(|h| HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(80.0),
                 ..HourlyConditions::minimal(t(h), 0.0, 9.0, 0.6)
             })

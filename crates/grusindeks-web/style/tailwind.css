@@ -81,8 +81,25 @@
 .gx-breathe     { animation: gx-breathe 3.2s cubic-bezier(0.25, 0.46, 0.45, 0.94) infinite; }
 .gx-popdown     { animation: gx-popdown 180ms cubic-bezier(0.22, 1, 0.36, 1) both; }
 .gx-pulse-error { animation: gx-pulse-error 2s ease-in-out infinite; }
+/* Lightning: an occasional double-flash that brightens a thunder rain band.
+   `screen` blend lifts the lanes underneath like a real flash. Mostly off. */
+@keyframes gx-lightning {
+  0%, 88%, 100% { opacity: 0; }
+  89% { opacity: 0.9; }
+  90% { opacity: 0.1; }
+  91% { opacity: 0.85; }
+  93% { opacity: 0; }
+}
+.gx-lightning {
+  opacity: 0;
+  background: linear-gradient(to bottom, rgba(235, 219, 178, 0.95), rgba(131, 165, 152, 0.25));
+  mix-blend-mode: screen;
+  animation: gx-lightning 4.2s ease-out infinite;
+}
 @media (prefers-reduced-motion: reduce) {
-  .gx-sweep, .gx-breathe, .gx-popdown, .gx-rain-drop, .gx-pulse-error { animation: none; }
+  .gx-sweep, .gx-breathe, .gx-popdown, .gx-rain-drop, .gx-pulse-error, .gx-lightning { animation: none; }
+  /* No blinking — keep a faint static wash so the thunder cue still reads. */
+  .gx-lightning { opacity: 0.22; }
 }
 
 /* Depth system. Two recipes, deliberately: a raised plate (cards) and an

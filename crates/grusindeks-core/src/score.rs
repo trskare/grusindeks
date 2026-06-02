@@ -1253,6 +1253,7 @@ mod tests {
     fn nice_hour(time_h: u32) -> HourlyConditions {
         // 17°C, 2 m/s wind, no rain, low prob — should yield a perfect score.
         HourlyConditions {
+            thunder: false,
             probability_of_precip: Some(5.0),
             ..HourlyConditions::minimal(t(time_h), 17.0, 2.0, 0.0)
         }
@@ -1585,6 +1586,7 @@ mod tests {
         // Calm mean (4 m/s) but strong gusts (8 m/s = 2× mean).
         let hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions {
+                thunder: false,
                 wind_gust_ms: Some(8.0),
                 ..HourlyConditions::minimal(t(h), 17.0, 4.0, 0.0)
             })
@@ -1638,6 +1640,7 @@ mod tests {
         // probability sub-score drops independently.
         let hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(90.0),
                 ..HourlyConditions::minimal(t(h), 17.0, 2.0, 0.0)
             })
@@ -2029,6 +2032,7 @@ mod tests {
         // must be ignored, leaving a perfectly-scoring window.
         let mut hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(5.0),
                 ..HourlyConditions::minimal(t(h), 17.0, 2.0, 0.0)
             })
@@ -2182,12 +2186,14 @@ mod tests {
         // the temperature subscore vs the same air temp at low RH.
         let humid: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions {
+                thunder: false,
                 relative_humidity: Some(85.0),
                 ..HourlyConditions::minimal(t(h), 28.0, 2.0, 0.0)
             })
             .collect();
         let dry: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions {
+                thunder: false,
                 relative_humidity: Some(30.0),
                 ..HourlyConditions::minimal(t(h), 28.0, 2.0, 0.0)
             })
@@ -2233,6 +2239,7 @@ mod tests {
     ) -> Vec<HourlyConditions> {
         (14..17)
             .map(|h| HourlyConditions {
+                thunder: false,
                 cloud_area_fraction: cloud_pct,
                 uv_index_clear_sky: uv,
                 relative_humidity: Some(60.0),

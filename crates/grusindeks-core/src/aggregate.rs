@@ -403,6 +403,10 @@ pub struct HourRaw {
     pub precipitation_mm: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probability_of_precip: Option<f64>,
+    /// `true` when MET's symbol code for this hour denotes thunder — drives the
+    /// timeline's lightning flash. Defaults to `false` for older blobs.
+    #[serde(default)]
+    pub thunder: bool,
 }
 
 /// One day worth of hourly scores. `daytime_window` is the user's
@@ -461,6 +465,7 @@ mod tests {
 
     fn perfect(time_h: u32) -> HourlyConditions {
         HourlyConditions {
+            thunder: false,
             probability_of_precip: Some(5.0),
             ..HourlyConditions::minimal(t(time_h), 17.0, 2.0, 0.0)
         }
@@ -468,6 +473,7 @@ mod tests {
 
     fn awful(time_h: u32) -> HourlyConditions {
         HourlyConditions {
+            thunder: false,
             probability_of_precip: Some(95.0),
             ..HourlyConditions::minimal(t(time_h), 5.0, 12.0, 4.0)
         }

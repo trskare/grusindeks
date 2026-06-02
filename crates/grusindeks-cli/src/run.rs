@@ -388,6 +388,7 @@ pub async fn run_hourly(client: &MetClient, inputs: HourlyInputs<'_>) -> Result<
                     wind_gust_ms: h.wind_gust_ms,
                     precipitation_mm: h.precipitation_mm,
                     probability_of_precip: h.probability_of_precip,
+                    thunder: h.thunder,
                 });
             hours.push(HourScore {
                 time: start,
@@ -878,6 +879,7 @@ where
                 let filler_count = gap_hours.round() as i64 - 1;
                 for i in 1..=filler_count {
                     let filler = HourlyConditions {
+                        thunder: false,
                         time: prev + Duration::hours(i),
                         temperature_c: 10.0,
                         wind_speed_ms: 3.0,
@@ -896,6 +898,7 @@ where
             }
         }
         let synth = HourlyConditions {
+            thunder: false,
             time: h.time,
             temperature_c: h.temp_c.unwrap_or(10.0),
             wind_speed_ms: h.wind_ms.unwrap_or(3.0),
@@ -1238,6 +1241,7 @@ mod tests {
         let mut per_point = vec![(
             point_oslo(),
             vec![HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(80.0),
                 ..HourlyConditions::minimal(h_start, 12.0, 3.0, 1.5)
             }],

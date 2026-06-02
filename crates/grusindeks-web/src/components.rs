@@ -1080,18 +1080,22 @@ pub fn RideTimeline(
         .iter()
         .map(|c| c.s.raw.is_some_and(|r| r.precipitation_mm >= 0.05))
         .collect();
-    let mut rain_bands: Vec<(f64, f64, f64)> = Vec::new();
+    // (start, end, max_mm, thunder) — `thunder` is true when any hour in the
+    // merged wet run has MET's thunder symbol, which lights the band up.
+    let mut rain_bands: Vec<(f64, f64, f64, bool)> = Vec::new();
     let mut i = 0;
     while i < n {
         if wet[i] {
             let start = cols[i].l;
             let mut j = i;
             let mut max_mm = cols[i].s.raw.map_or(0.0, |r| r.precipitation_mm);
+            let mut thunder = cols[i].s.raw.is_some_and(|r| r.thunder);
             while j + 1 < n && wet[j + 1] {
                 j += 1;
                 max_mm = max_mm.max(cols[j].s.raw.map_or(0.0, |r| r.precipitation_mm));
+                thunder |= cols[j].s.raw.is_some_and(|r| r.thunder);
             }
-            rain_bands.push((start, cols[j].r, max_mm));
+            rain_bands.push((start, cols[j].r, max_mm, thunder));
             i = j + 1;
         } else {
             i += 1;
@@ -1338,7 +1342,7 @@ pub fn RideTimeline(
                         })}
 
                         // animated rain drops only where the forecast says it's wet.
-                        {rain_bands.iter().map(|(a, b, mm)| {
+                        {rain_bands.iter().map(|(a, b, mm, thunder)| {
                             // More rain → more drops, faster fall, slightly stronger wash.
                             // Scale against this day's max so light showers stay subtle and
                             // heavy hours visibly pick up intensity.
@@ -1348,6 +1352,11 @@ pub fn RideTimeline(
                             let style = format!("left:{}; width:{}; background:rgba(131,165,152,{wash:.3})", pct(*a), pct(b - a));
                             view! {
                                 <div class="pointer-events-none absolute inset-y-0 z-10 overflow-hidden rounded" style=style>
+                                    // Thunder forecast in this band → an occasional
+                                    // lightning flash washes the band (CSS-only, gated).
+                                    {(*thunder).then(|| view! {
+                                        <span class="gx-lightning pointer-events-none absolute inset-0"></span>
+                                    })}
                                     {(0..drops).map(|i| {
                                         // Deterministic scatter: enough variation to feel organic,
                                         // but no JS/timers/state beyond CSS animation.

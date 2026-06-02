@@ -455,6 +455,7 @@ mod tests {
 
     fn nice_hour(time: DateTime<Utc>) -> HourlyConditions {
         HourlyConditions {
+            thunder: false,
             probability_of_precip: Some(5.0),
             ..HourlyConditions::minimal(time, 17.0, 2.0, 0.0)
         }
@@ -462,6 +463,7 @@ mod tests {
 
     fn awful_hour(time: DateTime<Utc>) -> HourlyConditions {
         HourlyConditions {
+            thunder: false,
             probability_of_precip: Some(95.0),
             ..HourlyConditions::minimal(time, 5.0, 11.0, 3.0)
         }
@@ -469,6 +471,7 @@ mod tests {
 
     fn sixhourly(time: DateTime<Utc>) -> HourlyConditions {
         HourlyConditions {
+            thunder: false,
             resolution: Resolution::SixHourly,
             ..nice_hour(time)
         }
@@ -680,6 +683,7 @@ mod tests {
         // Mildest, which would oversell a cold day.
         let mut hours: Vec<HourlyConditions> = (6..18)
             .map(|h| HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(5.0),
                 ..HourlyConditions::minimal(t(2026, 4, 26, h), 4.0, 2.0, 0.0)
             })
@@ -713,6 +717,7 @@ mod tests {
         // we want flagged as Mildest, not the hot spike.
         let mut hours: Vec<HourlyConditions> = (6..18)
             .map(|h| HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(5.0),
                 relative_humidity: Some(70.0),
                 ..HourlyConditions::minimal(t(2026, 4, 26, h), 17.0, 2.0, 0.0)
@@ -880,6 +885,7 @@ mod tests {
 
     fn with_clouds(time: DateTime<Utc>, cloud_pct: f64) -> HourlyConditions {
         HourlyConditions {
+            thunder: false,
             cloud_area_fraction: Some(cloud_pct),
             ..nice_hour(time)
         }
@@ -918,6 +924,7 @@ mod tests {
         // day as 🌧, even though the total is small.
         let mut hs: Vec<_> = (6..18)
             .map(|h| HourlyConditions {
+                thunder: false,
                 cloud_area_fraction: Some(90.0),
                 ..HourlyConditions::minimal(t(2026, 4, 26, h), 8.0, 2.0, 0.0)
             })
@@ -932,6 +939,7 @@ mod tests {
         // Wet all day at low intensity (0.3 mm/h × 12 h = 3.6 mm total).
         let hs: Vec<_> = (6..18)
             .map(|h| HourlyConditions {
+                thunder: false,
                 cloud_area_fraction: Some(90.0),
                 ..HourlyConditions::minimal(t(2026, 4, 26, h), 8.0, 2.0, 0.3)
             })
@@ -946,6 +954,7 @@ mod tests {
         // a non-event. Score sits in the 90s so the icon must agree.
         let mut hs: Vec<_> = (6..18)
             .map(|h| HourlyConditions {
+                thunder: false,
                 cloud_area_fraction: Some(60.0),
                 ..HourlyConditions::minimal(t(2026, 4, 26, h), 12.0, 2.0, 0.0)
             })
@@ -963,6 +972,7 @@ mod tests {
     fn weather_icon_snow_when_precip_and_freezing() {
         let mut hs: Vec<_> = (6..18)
             .map(|h| HourlyConditions {
+                thunder: false,
                 cloud_area_fraction: Some(90.0),
                 ..HourlyConditions::minimal(t(2026, 4, 26, h), -3.0, 2.0, 0.0)
             })
@@ -976,6 +986,7 @@ mod tests {
     fn weather_icon_wind_dominates_when_max_wind_above_10() {
         let hs: Vec<_> = (6..18)
             .map(|h| HourlyConditions {
+                thunder: false,
                 cloud_area_fraction: Some(20.0),
                 ..HourlyConditions::minimal(t(2026, 4, 26, h), 12.0, 11.0, 0.0)
             })
