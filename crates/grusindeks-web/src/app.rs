@@ -7,7 +7,8 @@ use leptos_router::components::{Route, Router, Routes, A};
 use leptos_router::path;
 
 use crate::components::{
-    BestWindowHint, DayCard, NowcastBanner, Recommendation, RideTimeline, ScoreGauge, SubscoreBars,
+    BestWindowHint, DayCard, DaySelect, NowcastBanner, Recommendation, RideTimeline, ScoreGauge,
+    SubscoreBars,
 };
 use crate::dto::{PlaceDto, PrefsDto, WorkHoursDto};
 use crate::map::MapView;
@@ -88,7 +89,8 @@ fn DashboardPage() -> impl IntoView {
     let selected = RwSignal::new(String::new());
     let selected_day = RwSignal::new(None::<String>);
     let selected_best_window = RwSignal::new(None::<grusindeks_core::types::RideWindow>);
-    let selected_day_anchor = RwSignal::new((0_i32, 0_i32));
+    // The clicked day card's box in viewport coords: (left, top, width, height).
+    let selected_day_anchor = RwSignal::new((0_i32, 0_i32, 0_i32, 0_i32));
 
     let score = Resource::new(
         move || selected.get(),
@@ -329,17 +331,41 @@ fn DashboardPage() -> impl IntoView {
                                     <div class="flex gap-3 overflow-x-auto pb-2">
                                         {mf.days.into_iter().map(|d| {
                                             let best_window = d.optimal_window.as_ref().map(|ow| ow.window);
-                                            let on_select = Callback::new(move |(date, x, y): (chrono::NaiveDate, i32, i32)| {
+                                            let on_select = Callback::new(move |(date, l, t, w, h): DaySelect| {
                                                 selected_day.set(Some(date.format("%Y-%m-%d").to_string()));
                                                 selected_best_window.set(best_window);
-                                                selected_day_anchor.set((x, y));
+                                                selected_day_anchor.set((l, t, w, h));
                                             });
                                             view! { <DayCard day=d on_select=on_select/> }
                                         }).collect_view()}
                                     </div>
                                     {move || selected_day.get().map(|_| {
-                                        let (x, y) = selected_day_anchor.get();
-                                        let top = (y + 14).clamp(16, 620);
+                                        let (left, top_c, width, _h) = selected_day_anchor.get();
+                                        // Bloom UP out of the clicked card: park the popup just
+                                        // above the card's top edge and aim the morph origin at the
+                                        // card's centre-x. The strip sits near the page bottom, so
+                                        // open upward by default; only when there's no room above
+                                        // does `top` clamp down and the origin flips to point up.
+                                        let popup_h = 330;
+                                        let cx = left + width / 2;
+                                        let raw_top = top_c - popup_h - 12;
+                                        let opened_up = raw_top >= 8;
+                                        let top = raw_top.max(8);
+                                        // Popup left, clamped into the viewport (width kept in CSS
+                                        // so a resize can never desync it).
+                                        let left_expr = format!(
+                                            "clamp(0.5rem, calc({cx}px - min(29rem, calc((100vw - 1rem) / 2))), calc(100vw - min(58rem, calc(100vw - 1rem)) - 0.5rem))"
+                                        );
+                                        // Morph origin, in the popup's own box: x = card centre
+                                        // minus the popup's left; y points at the card edge.
+                                        let origin_y = if opened_up {
+                                            "calc(100% + 12px)".to_string()
+                                        } else {
+                                            format!("{}px", (top_c - top).clamp(8, popup_h - 8))
+                                        };
+                                        let style = format!(
+                                            "top:{top}px; left:{left_expr}; --gx-origin-x:calc({cx}px - {left_expr}); --gx-origin-y:{origin_y}"
+                                        );
                                         view! {
                                             <div class="fixed inset-0 z-50 bg-gruv-bg0/25 backdrop-blur-[2px]" on:click=move |_| {
                                                 selected_day.set(None);
@@ -347,7 +373,7 @@ fn DashboardPage() -> impl IntoView {
                                             }>
                                                 <div
                                                     class="gx-popdown fixed w-[min(58rem,calc(100vw-1rem))] rounded-2xl bg-gruv-bg1 p-4 shadow-2xl ring-1 ring-gruv-bg2/70"
-                                                    style=format!("top:{top}px; left:clamp(0.5rem, calc({x}px - min(29rem, calc((100vw - 1rem) / 2))), calc(100vw - min(58rem, calc(100vw - 1rem)) - 0.5rem)); --gx-origin-x:clamp(2rem, 50%, calc(100% - 2rem))")
+                                                    style=style
                                                     on:click=move |ev| ev.stop_propagation()
                                                 >
                                                     <div class="mb-2 flex justify-end">

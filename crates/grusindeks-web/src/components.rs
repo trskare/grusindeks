@@ -738,13 +738,17 @@ fn confidence_dot(c: Confidence) -> &'static str {
     }
 }
 
+/// Payload for a day-card click: the date plus the card's viewport box
+/// (left, top, width, height), so the popup can anchor to and bloom from it.
+pub type DaySelect = (chrono::NaiveDate, i32, i32, i32, i32);
+
 /// One day in the multi-day strip: weather icon, coloured mean, spread, the
 /// best sub-window, and a confidence note. Long-range low-confidence days are
 /// dimmed.
 #[component]
 pub fn DayCard(
     day: DayAggregate,
-    #[prop(optional)] on_select: Option<Callback<(chrono::NaiveDate, i32, i32)>>,
+    #[prop(optional)] on_select: Option<Callback<DaySelect>>,
 ) -> impl IntoView {
     let mean = day.mean;
     let date = day.date.format("%a %d.%m").to_string();
@@ -784,7 +788,20 @@ pub fn DayCard(
             class=format!("min-w-[8.5rem] flex-1 cursor-pointer rounded-xl bg-gruv-bg1 p-4 text-left shadow-lg transition-all duration-200 hover:-translate-y-0.5 hover:scale-[1.02] hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-gruv-aqua/70 {border}")
             on:click=move |ev| {
                 if let Some(cb) = on_select {
-                    cb.run((selected_date, ev.client_x(), ev.client_y()));
+                    // Anchor the popup to the card's box (viewport coords, same
+                    // space as the fixed-positioned popup), not the click point,
+                    // so it can morph up out of the tab. currentTarget is always
+                    // the <button>, even when the click lands on a child span.
+                    use leptos::wasm_bindgen::JsCast;
+                    let (l, t, w, h) = ev
+                        .current_target()
+                        .and_then(|tgt| tgt.dyn_into::<leptos::web_sys::HtmlElement>().ok())
+                        .map(|el| {
+                            let r = el.get_bounding_client_rect();
+                            (r.left() as i32, r.top() as i32, r.width() as i32, r.height() as i32)
+                        })
+                        .unwrap_or((0, 0, 0, 0));
+                    cb.run((selected_date, l, t, w, h));
                 }
             }
         >

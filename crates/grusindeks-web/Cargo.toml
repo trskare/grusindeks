@@ -30,6 +30,11 @@ chrono = { workspace = true }
 # Client (wasm) only.
 console_error_panic_hook = { version = "0.1", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
+# DayCard reads its own bounding box to anchor the hourly popup; the call is
+# compiled in both builds (the handler just never fires under SSR). `Element` /
+# `HtmlElement` come from leptos's web-sys, but `get_bounding_client_rect` needs
+# the DomRect features explicitly. Feature-unifies with leptos's web-sys.
+web-sys = { version = "0.3", features = ["DomRect", "DomRectReadOnly"] }
 
 # Server (ssr) only: orchestration, HTTP clients, the web server.
 axum = { version = "0.8", optional = true }
