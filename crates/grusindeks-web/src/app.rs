@@ -7,7 +7,8 @@ use leptos_router::components::{Route, Router, Routes, A};
 use leptos_router::path;
 
 use crate::components::{
-    BestWindowHint, DayCard, NowcastBanner, Recommendation, RideTimeline, ScoreGauge, SubscoreBars,
+    BestWindowHint, DayCard, DaylightBox, NowcastBanner, Recommendation, RideTimeline, ScoreGauge,
+    SubscoreBars,
 };
 use crate::dto::{PlaceDto, PrefsDto, WorkHoursDto};
 use crate::map::MapView;
@@ -184,7 +185,7 @@ fn DashboardPage() -> impl IntoView {
                                     let breakdown = c.score.breakdown;
                                     let highlights = c.score.highlights.clone();
                                     let stats = c.score.stats;
-                                    let sunset = agg.sun.and_then(|s| s.sunset);
+                                    let (sunrise, sunset) = agg.sun.map_or((None, None), |s| (s.sunrise, s.sunset));
                                     // Today's stand-out window, promoted from the multi-day strip.
                                     // Only surface it while it's still relevant (not fully past).
                                     let now = chrono::Utc::now();
@@ -205,33 +206,10 @@ fn DashboardPage() -> impl IntoView {
                                         w.start.with_timezone(&chrono::Local).date_naive()
                                             == now.with_timezone(&chrono::Local).date_naive()
                                     });
-                                    // Daylight hint from the centre's sunset.
-                                    let daylight = sunset.map(|s| {
-                                        let t = s.with_timezone(&chrono::Local).format("%H:%M");
-                                        if now > s {
-                                            format!("Mørkt nå — solnedgang var {t}")
-                                        } else {
-                                            format!("Dagslys til {t}")
-                                        }
-                                    });
                                     let produced_at = agg.produced_at;
                                     // Recent ground water for the "underlag" stats tile —
-                                    // always shown when Frost data exists (independent of the
-                                    // rain-history footer pref below).
+                                    // shown whenever Frost data exists.
                                     let ground = agg.rain_history.as_ref().map(|rh| (rh.total_mm, rh.lookback_hours));
-                                    // Plain-language surface history, only when the pref is on.
-                                    let show_rain = prefs.await.map(|p| p.show_rain_history).unwrap_or(false);
-                                    let rain_line = show_rain
-                                        .then(|| agg.rain_history.as_ref().map(|rh| {
-                                            format!(
-                                                "Underlag · siste {}t: {:.0} mm over {} regndag{}",
-                                                rh.lookback_hours,
-                                                rh.total_mm,
-                                                rh.rain_days,
-                                                if rh.rain_days == 1 { "" } else { "er" },
-                                            )
-                                        }))
-                                        .flatten();
                                     let place = match selected.get_untracked() {
                                         p if !p.trim().is_empty() => p,
                                         _ => prefs
@@ -249,6 +227,7 @@ fn DashboardPage() -> impl IntoView {
                                             // LEFT — verdict + details
                                             <div class="space-y-6">
                                             <Recommendation total=agg.mean label=c.score.label.clone() penalties=penalties breakdown=breakdown stats=stats place=place best_window=best_window updated=produced_at ground=ground/>
+                                            <DaylightBox sunrise=sunrise sunset=sunset now=now/>
                                             <div class="emboss space-y-5 rounded-2xl bg-gruv-bg1 p-6">
                                                 {nowcast.map(|a| view! { <NowcastBanner alert=a/> })}
 
@@ -290,8 +269,6 @@ fn DashboardPage() -> impl IntoView {
                                                             {highlights.into_iter().map(|h| view! { <p>{h}</p> }).collect_view()}
                                                         </div>
                                                     })}
-                                                    {rain_line.map(|t| view! { <p class="text-xs text-gruv-fg/55">{t}</p> })}
-                                                    {daylight.map(|t| view! { <p class="text-xs text-gruv-fg/55">{t}</p> })}
                                                 </div>
                                             </div>
                                             </div>
