@@ -7,6 +7,10 @@
 //! Pass `Some(label)` when the icon stands in for text (it gets an accessible
 //! name via `<title>` + `role="img"`); pass `None` for decorative icons that sit
 //! next to a visible text label (they're hidden from assistive tech).
+//!
+//! Size scale (keep call sites on these rungs so icon rows read as intentional):
+//! `h-[18px]` lane gutters · `h-4` stat tiles / timeline lane keys · `h-3.5`
+//! inline chips · `h-3` legends & decorative. Stroke stays `2` at every size.
 
 use leptos::prelude::*;
 

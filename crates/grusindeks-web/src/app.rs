@@ -66,7 +66,7 @@ pub fn App() -> impl IntoView {
 #[component]
 fn NavBar() -> impl IntoView {
     view! {
-        <header class="border-b border-gruv-bg2 bg-gruv-bg0/80 backdrop-blur">
+        <header class="sticky top-0 z-30 border-b border-gruv-bg2 bg-gruv-bg0/80 backdrop-blur-sm">
             <nav class="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
                 <A href="/">
                     <span class="text-lg font-bold tracking-tight">"Grusindeks"</span>
@@ -130,7 +130,7 @@ fn DashboardPage() -> impl IntoView {
                             <label class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-gruv-fg/70 sm:items-end">
                                 "Sted"
                                 <select
-                                    class="min-h-[44px] w-full rounded-lg border border-gruv-bg2 bg-gruv-bg1 px-3 py-2.5 text-sm normal-case tracking-normal text-gruv-fg sm:w-auto"
+                                    class="min-h-[44px] w-full cursor-pointer rounded-lg border border-gruv-bg2 bg-gruv-bg1 px-3 py-2.5 text-sm normal-case tracking-normal text-gruv-fg outline-none transition-colors hover:border-gruv-bg2/40 focus:border-gruv-aqua focus:ring-2 focus:ring-gruv-aqua/70 sm:w-auto"
                                     on:change=move |ev| selected.set(event_target_value(&ev))
                                 >
                                     <option value="">{default_label}</option>
@@ -149,7 +149,26 @@ fn DashboardPage() -> impl IntoView {
 
             // ---- current window card ----
             <Suspense fallback=move || {
-                view! { <p class="animate-pulse text-gruv-fg/70">"Laster prognose…"</p> }
+                // Skeleton that mirrors the Recommendation card's shape, so the
+                // layout doesn't jump when the real verdict arrives.
+                view! {
+                    <div class="emboss rounded-2xl bg-gruv-bg1 p-6" aria-hidden="true">
+                        <div class="flex items-start justify-between gap-4">
+                            <div class="min-w-0 flex-1 space-y-3">
+                                <div class="h-6 w-44 animate-pulse rounded-full bg-gruv-bg2/40"></div>
+                                <div class="h-8 w-48 animate-pulse rounded bg-gruv-bg2/40"></div>
+                                <div class="h-4 w-64 animate-pulse rounded bg-gruv-bg2/30"></div>
+                            </div>
+                            <div class="h-6 w-20 animate-pulse rounded-full bg-gruv-bg2/40"></div>
+                        </div>
+                        <div class="mt-4 grid grid-cols-3 gap-2.5">
+                            <div class="h-16 animate-pulse rounded-xl inset-well bg-gruv-bg0/40"></div>
+                            <div class="h-16 animate-pulse rounded-xl inset-well bg-gruv-bg0/40"></div>
+                            <div class="h-16 animate-pulse rounded-xl inset-well bg-gruv-bg0/40"></div>
+                        </div>
+                        <span class="sr-only">"Laster prognose…"</span>
+                    </div>
+                }
             }>
                 {move || Suspend::new(async move {
                     match score.await {
@@ -281,11 +300,16 @@ fn DashboardPage() -> impl IntoView {
                                         </div>
                                     }.into_any()
                                 }
-                                None => view! { <p class="mt-8 text-gruv-gray">"Ingen data."</p> }.into_any(),
+                                None => view! {
+                                    <div class="mt-8 rounded-xl inset-well bg-gruv-bg1 p-6">
+                                        <p class="text-gruv-fg/70">"Ingen data for valgt sted."</p>
+                                        <p class="mt-2 text-sm text-gruv-fg/60">"Velg et annet sted fra listen, eller kontakt meg om stedet mangler."</p>
+                                    </div>
+                                }.into_any(),
                             }
                         }
                         Err(e) => view! {
-                            <p class="mt-8 rounded-xl bg-gruv-red/20 p-4 text-gruv-red">
+                            <p class="gx-pulse-error mt-8 rounded-xl bg-gruv-red/20 p-4 text-gruv-red ring-1 ring-gruv-red/30">
                                 {format!("Kunne ikke hente prognose: {e}")}
                             </p>
                         }.into_any(),
@@ -329,7 +353,7 @@ fn DashboardPage() -> impl IntoView {
                                                 >
                                                     <div class="mb-2 flex justify-end">
                                                         <button type="button"
-                                                            class="rounded-lg bg-gruv-bg0/70 px-2.5 py-1 text-xs font-semibold text-gruv-fg/70 ring-1 ring-gruv-bg2 hover:text-gruv-fg"
+                                                            class="cursor-pointer rounded-lg bg-gruv-bg0/70 px-2.5 py-1 text-xs font-semibold text-gruv-fg/70 ring-1 ring-gruv-bg2 transition-colors hover:bg-gruv-bg2/60 hover:text-gruv-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gruv-aqua"
                                                             on:click=move |_| {
                                                                 selected_day.set(None);
                                                                 selected_best_window.set(None);
@@ -362,7 +386,7 @@ fn DashboardPage() -> impl IntoView {
                                                                     }
                                                                 }
                                                                 Some(Err(e)) => view! {
-                                                                    <div class="rounded-xl bg-gruv-red/15 p-4 text-sm text-gruv-red ring-1 ring-gruv-red/30">
+                                                                    <div class="gx-pulse-error rounded-xl bg-gruv-red/15 p-4 text-sm text-gruv-red ring-1 ring-gruv-red/30">
                                                                         {format!("Kunne ikke hente timesvarsel: {e}")}
                                                                     </div>
                                                                 }.into_any(),
@@ -392,8 +416,8 @@ fn DashboardPage() -> impl IntoView {
 fn section_band(label: &'static str) -> impl IntoView {
     view! {
         <div class="flex items-center gap-2">
-            <span class="text-[11px] font-semibold uppercase tracking-[0.12em] text-gruv-fg/45">{label}</span>
-            <span class="h-px flex-1 bg-gradient-to-r from-gruv-bg2/70 to-transparent shadow-[0_1px_0_rgba(235,219,178,0.08)]"></span>
+            <span class="text-[11px] font-semibold uppercase tracking-[0.12em] text-gruv-fg/60">{label}</span>
+            <span class="h-px flex-1 bg-gradient-to-r from-gruv-aqua/40 via-gruv-aqua/15 to-transparent shadow-[0_0_8px_rgba(69,133,136,0.15)]"></span>
         </div>
     }
 }
@@ -419,10 +443,15 @@ fn label_cls() -> &'static str {
     "block text-sm text-gruv-gray"
 }
 fn input_cls() -> &'static str {
-    "mt-1 w-full rounded-lg border border-gruv-bg2 bg-gruv-bg0 px-3 py-2 text-sm outline-none focus:border-gruv-aqua"
+    "mt-1 w-full rounded-lg border border-gruv-bg2 bg-gruv-bg0 px-3 py-2 text-sm outline-none focus:border-gruv-aqua focus:ring-2 focus:ring-gruv-aqua/70"
 }
 fn btn_cls() -> &'static str {
-    "rounded-lg bg-gruv-aqua px-4 py-2 text-sm font-semibold text-gruv-bg0 transition hover:brightness-110 disabled:opacity-50"
+    "rounded-lg bg-gruv-aqua px-4 py-2 text-sm font-semibold text-gruv-bg0 transition-all duration-150 hover:brightness-110 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-gruv-bg0 focus-visible:ring-gruv-aqua"
+}
+/// Destructive action in a list row: text-weight, not a heavy solid fill, but a
+/// real hit target with a hover wash and a keyboard focus ring.
+fn btn_danger_cls() -> &'static str {
+    "rounded-md px-2 py-1 text-sm font-medium text-gruv-red transition-colors hover:bg-gruv-red/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gruv-red"
 }
 
 #[component]
@@ -608,7 +637,7 @@ fn PlacesSection() -> impl IntoView {
                                                 {format!("{:.4}, {:.4} · {} km", p.lat, p.lon, p.radius_km)}
                                             </span>
                                         </span>
-                                        <button class="text-gruv-red hover:underline"
+                                        <button class=btn_danger_cls()
                                             on:click=move |_| { if let Some(id) = id { del.dispatch(id); } }>
                                             "Slett"
                                         </button>

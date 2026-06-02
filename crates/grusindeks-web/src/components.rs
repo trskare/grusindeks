@@ -164,11 +164,61 @@ fn penalty_icon(c: Component, class: &'static str) -> AnyView {
     }
 }
 
-fn severity_chip_class(s: Severity) -> &'static str {
-    match s {
-        Severity::Critical => "bg-gruv-red/20 text-gruv-red",
-        Severity::Major => "bg-gruv-orange/20 text-gruv-orange",
-        Severity::Minor => "bg-gruv-yellow/20 text-gruv-yellow",
+/// Verdict-chip class — a quiet bucket-tinted background instead of a ring,
+/// mirroring `color::text_class`'s arms so it can't disagree with the score.
+fn chip_class(total: u8) -> &'static str {
+    match color::bucket(total) {
+        color::Bucket::Bad => {
+            "rounded-full bg-gruv-red/15 px-3 py-1 text-xs font-semibold text-gruv-red"
+        }
+        color::Bucket::Marginal => {
+            "rounded-full bg-gruv-orange/15 px-3 py-1 text-xs font-semibold text-gruv-orange"
+        }
+        color::Bucket::Ok => {
+            "rounded-full bg-gruv-yellow/15 px-3 py-1 text-xs font-semibold text-gruv-yellow"
+        }
+        color::Bucket::Good => {
+            "rounded-full bg-gruv-lime/15 px-3 py-1 text-xs font-semibold text-gruv-lime"
+        }
+        color::Bucket::Great => {
+            "rounded-full bg-gruv-green/15 px-3 py-1 text-xs font-semibold text-gruv-green"
+        }
+    }
+}
+
+/// How many of the five condition pips are lit — keyed to the score *bucket*
+/// (never the raw score), so the dots can never disagree with the label or
+/// colour. Bad shows 0 lit (five hollow rings); Great shows all five.
+fn pip_count(total: u8) -> usize {
+    match color::bucket(total) {
+        color::Bucket::Bad => 0,
+        color::Bucket::Marginal => 1,
+        color::Bucket::Ok => 2,
+        color::Bucket::Good => 4,
+        color::Bucket::Great => 5,
+    }
+}
+
+/// A five-dot "condition" readout for the card header: lit dots fill
+/// left-to-right by [`pip_count`], in the bucket colour; the rest stay as faint
+/// hollow rings of the same colour. Decorative — the verdict label chip beside
+/// it carries the words — so it's `aria-hidden`.
+fn condition_pips(total: u8) -> impl IntoView {
+    let hex = color::hex(total);
+    let lit = pip_count(total);
+    view! {
+        <svg viewBox="0 0 56 12" class="h-3 w-14 shrink-0" aria-hidden="true">
+            {(0..5usize).map(|i| {
+                let cx = 6 + i * 11;
+                let on = i < lit;
+                view! {
+                    <circle cx=cx.to_string() cy="6" r="4"
+                        fill=if on { hex } else { "none" }
+                        stroke=hex stroke-width="1.6"
+                        opacity=if on { "1" } else { "0.5" }/>
+                }
+            }).collect_view()}
+        </svg>
     }
 }
 
@@ -236,7 +286,7 @@ pub fn Recommendation(
             <div class="flex items-start justify-between gap-4">
                 <div class="min-w-0">
                     // Horizon badge — makes the (otherwise invisible) 3-hour scope explicit.
-                    <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                         <span class="inline-flex items-center gap-1 rounded-full bg-gruv-bg0/60 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-gruv-fg/80">
                             {icons::clock("h-3 w-3", None)}
                             {format!("neste 3 timer · {horizon}")}
@@ -245,12 +295,13 @@ pub fn Recommendation(
                             {format!("· {place} · oppdatert {updated_str}")}
                         </span>
                     </div>
-                    <h2 class="mt-2 text-3xl font-bold tracking-tight">{cta}</h2>
-                    <p class="mt-1 text-sm text-gruv-fg/90">{summary}</p>
+                    <h2 class="mt-1.5 text-3xl font-semibold leading-tight tracking-tight">{cta}</h2>
+                    <p class="mt-1 text-sm text-gruv-fg/80">{summary}</p>
                 </div>
-                <span class=format!("shrink-0 rounded-full px-3 py-1 text-xs font-semibold ring-1 ring-current/40 {}", color::text_class(total))>
-                    {label}
-                </span>
+                <div class="flex shrink-0 items-center gap-2.5">
+                    {condition_pips(total)}
+                    <span class=chip_class(total)>{label}</span>
+                </div>
             </div>
 
             // The next-3-hour measured numbers, same window the verdict describes.
@@ -264,14 +315,29 @@ pub fn Recommendation(
                     Some(note) => view! { <p class="text-sm text-gruv-fg/90">{note}</p> }.into_any(),
                     None => view! {
                         <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-gruv-fg/55">"Trekkes ned av"</p>
-                        <div class="flex flex-wrap gap-2">
+                        // One row per limiting factor (worst first): domain icon +
+                        // message + a tiny severity meter whose width is a hard match
+                        // on Severity, so the bar can never disagree with the colour.
+                        <div class="flex flex-col gap-1.5">
                             {penalties.into_iter().map(|p| {
-                                let cls = severity_chip_class(p.severity);
+                                let (fill, w) = match p.severity {
+                                    Severity::Critical => ("bg-gruv-red/80", "w-full"),
+                                    Severity::Major => ("bg-gruv-orange/70", "w-2/3"),
+                                    Severity::Minor => ("bg-gruv-yellow/60", "w-2/5"),
+                                };
+                                let ic = match p.severity {
+                                    Severity::Critical => "h-4 w-4 shrink-0 text-gruv-red",
+                                    Severity::Major => "h-4 w-4 shrink-0 text-gruv-orange",
+                                    Severity::Minor => "h-4 w-4 shrink-0 text-gruv-yellow",
+                                };
                                 view! {
-                                    <span class=format!("inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-sm {cls}")>
-                                        {penalty_icon(p.component, "h-3.5 w-3.5")}
-                                        {p.message}
-                                    </span>
+                                    <div class="flex items-center gap-2.5">
+                                        {penalty_icon(p.component, ic)}
+                                        <span class="min-w-0 flex-1 text-sm text-gruv-fg/85">{p.message}</span>
+                                        <span class="h-1.5 w-6 shrink-0 overflow-hidden rounded-full bg-gruv-bg2/50">
+                                            <span class=format!("block h-full rounded-full {fill} {w}")></span>
+                                        </span>
+                                    </div>
                                 }
                             }).collect_view()}
                         </div>
@@ -284,14 +350,20 @@ pub fn Recommendation(
                 let breathe = if waiting { "gx-breathe" } else { "" };
                 let when = if bw.tomorrow { "Bedre vindu i morgen" } else { "Bedre vindu senere" };
                 view! {
-                    <div class=format!("mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl inset-well bg-gruv-aqua/10 px-4 py-2.5 text-sm ring-1 ring-inset ring-gruv-aqua/25 {breathe}")>
-                        {icons::bike("h-4 w-4 text-gruv-aqua", None)}
-                        <span class="text-[11px] font-semibold uppercase tracking-wide text-gruv-aqua/90">{when}</span>
-                        <span class="font-semibold tabular-nums text-gruv-fg">{format!("{}–{}", bw.start, bw.end)}</span>
-                        {bw.reason.map(|r| view! { <span class="text-gruv-fg/70">{r}</span> })}
-                        <span class="ml-auto rounded-md bg-gruv-aqua/20 px-1.5 py-0.5 text-xs font-bold tabular-nums text-gruv-aqua">
-                            {format!("+{}", bw.improvement)}
-                        </span>
+                    <div class=format!("mt-2 flex flex-col gap-1 rounded-xl inset-well bg-gruv-aqua/10 px-4 py-2.5 ring-1 ring-inset ring-gruv-aqua/25 {breathe}")>
+                        <div class="flex items-center justify-between gap-2">
+                            <span class="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-gruv-aqua/90">
+                                {icons::bike("h-3.5 w-3.5 text-gruv-aqua", None)}
+                                {when}
+                            </span>
+                            <span class="text-sm font-bold tabular-nums text-gruv-fg">{format!("{}–{}", bw.start, bw.end)}</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            {bw.reason.map(|r| view! { <span class="text-xs text-gruv-fg/75">{r}</span> })}
+                            <span class="ml-auto rounded-md bg-gruv-aqua/20 px-1.5 py-0.5 text-xs font-bold tabular-nums text-gruv-aqua">
+                                {format!("+{}", bw.improvement)}
+                            </span>
+                        </div>
                     </div>
                 }
             })}
@@ -310,13 +382,13 @@ pub fn ScoreGauge(total: u8) -> impl IntoView {
     view! {
         <div class="relative inline-grid place-items-center">
             <svg width="150" height="150" viewBox="0 0 150 150" class="-rotate-90">
-                <circle cx="75" cy="75" r=r.to_string() fill="none" stroke="#504945" stroke-width="12"/>
+                <circle cx="75" cy="75" r=r.to_string() fill="none" stroke="#504945" stroke-width="13"/>
                 <circle
                     cx="75" cy="75" r=r.to_string() fill="none"
-                    stroke=hex stroke-width="12" stroke-linecap="round"
+                    stroke=hex stroke-width="13" stroke-linecap="round"
                     stroke-dasharray=circ.to_string()
                     stroke-dashoffset=offset.to_string()
-                    style=format!("transition: stroke-dashoffset 900ms cubic-bezier(0.22,1,0.36,1); filter: drop-shadow(0 0 6px {hex}40);")
+                    style=format!("transition: stroke-dashoffset 750ms cubic-bezier(0.23,1,0.32,1); filter: drop-shadow(0 4px 12px {hex}60) drop-shadow(0 0 8px {hex}45);")
                 />
             </svg>
             <div class="absolute text-center">
@@ -464,7 +536,7 @@ pub fn SubscoreBars(breakdown: ScoreBreakdown) -> impl IntoView {
                         <div class="relative h-2.5 flex-1 overflow-hidden rounded-full bg-gruv-bg2">
                             <div
                                 class="h-full rounded-full"
-                                style=format!("width:{width}%; background-color:{hex}; transition: width 700ms cubic-bezier(0.22,1,0.36,1);")
+                                style=format!("width:{width}%; background-color:{hex}; transition: width 550ms cubic-bezier(0.23,1,0.32,1);")
                             ></div>
                             {(!is_prob).then(|| view! {
                                 <div class="absolute inset-y-0 w-px bg-gruv-bg0/70" style="left:65%"></div>
@@ -632,7 +704,7 @@ pub fn DayCard(
 
     view! {
         <button type="button"
-            class=format!("min-w-[8.5rem] flex-1 rounded-xl bg-gruv-bg1 p-4 text-left shadow-lg transition hover:-translate-y-0.5 focus:outline-none focus:ring-2 focus:ring-gruv-aqua/70 {border}")
+            class=format!("min-w-[8.5rem] flex-1 cursor-pointer rounded-xl bg-gruv-bg1 p-4 text-left shadow-lg transition-all duration-200 hover:-translate-y-0.5 hover:scale-[1.02] hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-gruv-aqua/70 {border}")
             on:click=move |ev| {
                 if let Some(cb) = on_select {
                     cb.run((selected_date, ev.client_x(), ev.client_y()));
@@ -650,7 +722,7 @@ pub fn DayCard(
             {weather.map(|w| view! { <div class="mt-1 text-xs text-gruv-fg/70">{w}</div> })}
             {best.map(|b| view! { <div class="mt-1 text-xs text-gruv-aqua">{b}</div> })}
             <div class="mt-2 flex items-center gap-1.5 text-xs text-gruv-fg/70">
-                <span class=format!("h-1.5 w-1.5 rounded-full {}", confidence_dot(day.confidence))></span>
+                <span class=format!("h-2 w-2 rounded-full ring-1 ring-offset-1 ring-current ring-offset-gruv-bg1 {}", confidence_dot(day.confidence))></span>
                 {confidence_label(day.confidence)}
             </div>
         </button>
@@ -1070,8 +1142,8 @@ pub fn RideTimeline(
     view! {
         <div>
             <div class="mb-2 flex items-center gap-2">
-                <span class="text-[11px] font-semibold uppercase tracking-[0.12em] text-gruv-fg/45">"Time for time"</span>
-                <span class="h-px flex-1 bg-gradient-to-r from-gruv-bg2/70 to-transparent shadow-[0_1px_0_rgba(235,219,178,0.08)]"></span>
+                <span class="text-[11px] font-semibold uppercase tracking-[0.12em] text-gruv-fg/60">"Time for time"</span>
+                <span class="h-px flex-1 bg-gradient-to-r from-gruv-aqua/40 via-gruv-aqua/15 to-transparent shadow-[0_0_8px_rgba(69,133,136,0.15)]"></span>
                 // Day badge — a bold aqua chip when the timeline isn't today, so a
                 // tomorrow view can never be mistaken for the current evening.
                 {if day_label == "i dag" {
@@ -1246,7 +1318,7 @@ pub fn RideTimeline(
                         // low-confidence columns: faint hatch overlay
                         {cols.iter().filter(|c| c.low).map(|c| {
                             let style = format!(
-                                "left:{}; width:{}; background-image:repeating-linear-gradient(-45deg,rgba(40,40,40,0.45) 0,rgba(40,40,40,0.45) 2px,transparent 2px,transparent 5px)",
+                                "left:{}; width:{}; background-image:repeating-linear-gradient(-45deg,rgba(235,219,178,0.06) 0,rgba(235,219,178,0.06) 2px,transparent 2px,transparent 6px)",
                                 pct(c.l), pct(c.r - c.l)
                             );
                             view! { <div class="pointer-events-none absolute inset-y-0" style=style></div> }
@@ -1288,7 +1360,7 @@ pub fn RideTimeline(
                                 let style = format!("left:{}; width:{}", pct(a), pct(b - a));
                                 view! {
                                     <div class="group absolute inset-y-0 z-30" style=style>
-                                        <div class="pointer-events-none absolute inset-y-0 left-1/2 hidden w-[2px] -translate-x-1/2 bg-gruv-fg shadow-[0_0_4px_rgba(235,219,178,0.7)] group-hover:block"></div>
+                                        <div class="pointer-events-none absolute inset-y-0 left-1/2 hidden w-[2px] -translate-x-1/2 bg-gruv-aqua shadow-[0_0_8px_rgba(69,133,136,0.9)] group-hover:block"></div>
                                         <div class="pointer-events-none absolute left-1/2 top-1 hidden -translate-x-1/2 rounded bg-gruv-fg px-1.5 py-0.5 text-[10px] font-bold leading-tight text-gruv-bg0 shadow-lg group-hover:block">
                                             {label}
                                         </div>
