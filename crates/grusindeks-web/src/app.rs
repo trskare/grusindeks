@@ -26,6 +26,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <meta name="viewport" content="width=device-width, initial-scale=1"/>
                 // Vendored MapLibre (no CDN) + the thin map glue, as classic
                 // scripts so their globals exist before the wasm module runs.
+                <link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
                 <link rel="stylesheet" href="/maplibre-gl.css"/>
                 <script src="/maplibre-gl.js"></script>
                 <script src="/map_glue.js"></script>

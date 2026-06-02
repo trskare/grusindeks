@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Grusindeks">
+  <defs>
+    <linearGradient id="sky" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#83a598"/>
+      <stop offset="0.58" stop-color="#458588"/>
+      <stop offset="1" stop-color="#282828"/>
+    </linearGradient>
+    <linearGradient id="road" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#bdae93"/>
+      <stop offset="1" stop-color="#665c54"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="64" height="64" rx="14" fill="#282828"/>
+  <rect x="5" y="5" width="54" height="54" rx="11" fill="url(#sky)"/>
+
+  <!-- distant gravel landscape -->
+  <path d="M7 39 19 27l9 9 8-12 21 21v14H7Z" fill="#3c3836" opacity="0.95"/>
+  <path d="M7 42c9-5 17-6 25-3 9 3 17 1 25-5v25H7Z" fill="#689d6a"/>
+  <path d="M25 59c2-9 5-16 7-20 2 4 5 11 7 20Z" fill="url(#road)"/>
+  <path d="M32 40v17" stroke="#ebdbb2" stroke-width="1.2" stroke-dasharray="2 3" opacity="0.7"/>
+
+  <!-- gravel specks -->
+  <circle cx="27" cy="51" r="1" fill="#282828" opacity="0.45"/>
+  <circle cx="38" cy="54" r="0.8" fill="#282828" opacity="0.4"/>
+  <circle cx="31" cy="56" r="0.7" fill="#282828" opacity="0.45"/>
+
+  <!-- bike -->
+  <g fill="none" stroke="#fabd2f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="21" cy="43" r="7"/>
+    <circle cx="44" cy="43" r="7"/>
+    <path d="M21 43h9l5-10 5 10h-10l-6-13"/>
+    <path d="M35 33h6"/>
+    <path d="M24 30h6"/>
+  </g>
+</svg>

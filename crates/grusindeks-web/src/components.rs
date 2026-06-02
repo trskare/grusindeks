@@ -1065,7 +1065,8 @@ pub fn RideTimeline(
             .collect_view()
     };
 
-    let glyph = "flex flex-1 items-center justify-center";
+    let glyph = "group relative flex flex-1 items-center justify-center";
+    let tip = "pointer-events-none absolute left-7 z-40 hidden whitespace-nowrap rounded bg-gruv-fg px-1.5 py-0.5 text-[10px] font-bold text-gruv-bg0 shadow-lg group-hover:block";
     view! {
         <div>
             <div class="mb-2 flex items-center gap-2">
@@ -1092,11 +1093,26 @@ pub fn RideTimeline(
                 // matches the plot height so icons stay centred on their lanes) ----
                 <div class="flex w-5 shrink-0 flex-col pt-[18px] text-gruv-fg/45">
                     <div class="flex h-52 flex-col">
-                        <div class=glyph>{icons::thermometer("h-[18px] w-[18px]", Some("Temperatur"))}</div>
-                        <div class=glyph>{icons::wind("h-[18px] w-[18px]", Some("Vind"))}</div>
-                        <div class=glyph>{icons::cloud_rain("h-[18px] w-[18px]", Some("Nedbør"))}</div>
-                        <div class=glyph>{icons::umbrella("h-[18px] w-[18px]", Some("Nedbørssjanse"))}</div>
-                        <div class=glyph>{icons::mountain("h-[18px] w-[18px]", Some("Underlag"))}</div>
+                        <div class=glyph>
+                            {icons::thermometer("h-[18px] w-[18px]", Some("Temperatur"))}
+                            <span class=tip>"temperatur"</span>
+                        </div>
+                        <div class=glyph>
+                            {icons::wind("h-[18px] w-[18px]", Some("Vind"))}
+                            <span class=tip>"vind"</span>
+                        </div>
+                        <div class=glyph>
+                            {icons::cloud_rain("h-[18px] w-[18px]", Some("Nedbør"))}
+                            <span class=tip>"nedbør"</span>
+                        </div>
+                        <div class=glyph>
+                            {icons::umbrella("h-[18px] w-[18px]", Some("Nedbørssjanse"))}
+                            <span class=tip>"sjanse"</span>
+                        </div>
+                        <div class=glyph>
+                            {icons::mountain("h-[18px] w-[18px]", Some("Underlag"))}
+                            <span class=tip>"bakke"</span>
+                        </div>
                     </div>
                 </div>
 
