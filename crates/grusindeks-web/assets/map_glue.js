@@ -3,7 +3,7 @@
 //   gi_map_init(containerId, lng, lat, zoom)
 //   gi_map_set_points(geojsonString)   -- 9 sample points, coloured by score
 //   gi_map_set_ring(geojsonString)     -- the sampling-radius ring
-//   gi_map_set_radar(enabled)          -- approximate MET radar/2.0 Nordic overlay
+//   gi_map_set_radar(enabled)          -- MET/Yr precipitation-nowcast XYZ tiles
 // Tiles come from OpenStreetMap raster (no API key); attribution is shown.
 //
 // Points are a GeoJSON circle layer (rendered in the same WebGL canvas as the
@@ -16,54 +16,12 @@
   let pending = { points: null, ring: null };
   let radarEnabled = false;
 
-  // MET radar/2.0 Nordic PNG is Lambert Conformal Conic, while MapLibre is
-  // Web Mercator. This first-pass overlay uses the known Nordic LCC grid extent
-  // and lets MapLibre warp the four image corners. It is useful for checking
-  // MET data visually; pixel-accurate placement requires server-side
-  // reprojection tile-by-tile.
-  const RADAR_URL = "https://api.met.no/weatherapi/radar/2.0/5level_reflectivity.png?area=nordic";
-  let radarUrlPromise = null;
-  let radarObjectUrl = null;
-  const RADAR_GRID = {
-    xfirst: -897442,
-    yfirst: -1104322,
-    width: 719,
-    height: 929,
-    dx: 2500,
-    dy: 2500,
-  };
-
-  function lccToLonLat(x, y) {
-    const deg = Math.PI / 180;
-    const R = 6371000;
-    const lat0 = 63 * deg;
-    const lon0 = 15 * deg;
-    const lat1 = 63 * deg;
-    const n = Math.sin(lat1);
-    const F = (Math.cos(lat1) * Math.pow(Math.tan(Math.PI / 4 + lat1 / 2), n)) / n;
-    const rho0 = (R * F) / Math.pow(Math.tan(Math.PI / 4 + lat0 / 2), n);
-    const rho = Math.sqrt(x * x + (rho0 - y) * (rho0 - y));
-    const theta = Math.atan2(x, rho0 - y);
-    const lat = 2 * Math.atan(Math.pow((R * F) / rho, 1 / n)) - Math.PI / 2;
-    const lon = lon0 + theta / n;
-    return [lon / deg, lat / deg];
-  }
-
-  function radarCoordinates() {
-    const g = RADAR_GRID;
-    // Treat xfirst/yfirst as the centre of the lower-left grid cell and expand
-    // by half a cell to get outer image edges.
-    const minX = g.xfirst - g.dx / 2;
-    const maxX = g.xfirst + (g.width - 1) * g.dx + g.dx / 2;
-    const minY = g.yfirst - g.dy / 2;
-    const maxY = g.yfirst + (g.height - 1) * g.dy + g.dy / 2;
-    return [
-      lccToLonLat(minX, maxY),
-      lccToLonLat(maxX, maxY),
-      lccToLonLat(maxX, minY),
-      lccToLonLat(minX, minY),
-    ];
-  }
+  // Radar overlay = MET Norway's precipitation-nowcast, served by Yr as plain
+  // Web-Mercator XYZ tiles (the exact source yr.no's own radar map uses).
+  // MapLibre consumes them natively — correct projection, no warp, no
+  // colour-keying. `available.json` lists the frames (latest observation + a
+  // ~2 h nowcast) with ready-made {z}/{x}/{y} URL templates and the zoom range.
+  const RADAR_AVAILABLE = "https://tiles.yr.no/api/precipitation-nowcast/available.json";
 
   // Selectable basemaps (all CORS-enabled raster XYZ; no API key). CyclOSM
   // renders gravel/unpaved tracks distinctly — the default for a gravel app.
@@ -104,73 +62,126 @@
     map.addLayer({ id: "base", type: "raster", source: "base" }, before);
   }
 
-  function filteredRadarUrl() {
-    if (radarUrlPromise) return radarUrlPromise;
-    radarUrlPromise = new Promise((resolve, reject) => {
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      img.onload = function () {
-        const canvas = document.createElement("canvas");
-        canvas.width = img.naturalWidth;
-        canvas.height = img.naturalHeight;
-        const ctx = canvas.getContext("2d", { willReadFrequently: true });
-        ctx.drawImage(img, 0, 0);
-        const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        for (let i = 0; i < data.data.length; i += 4) {
-          const r = data.data[i], g = data.data[i + 1], b = data.data[i + 2];
-          const max = Math.max(r, g, b), min = Math.min(r, g, b);
-          const sat = max === 0 ? 0 : (max - min) / max;
-          const hue = (() => {
-            if (max === min) return 0;
-            if (max === r) return (60 * ((g - b) / (max - min)) + 360) % 360;
-            if (max === g) return 60 * ((b - r) / (max - min)) + 120;
-            return 60 * ((r - g) / (max - min)) + 240;
-          })();
-          // MET's public PNG is a finished web map with coastlines, labels and
-          // grey land/sea background. Keep only the saturated precipitation
-          // palette (green/yellow/orange/red), and make labels/background fully
-          // transparent so MapLibre's own basemap remains visible.
-          const precip = sat > 0.24 && max > 120 && (hue < 45 || (hue > 50 && hue < 110));
-          if (!precip) data.data[i + 3] = 0;
-          else data.data[i + 3] = 185;
-        }
-        ctx.putImageData(data, 0, 0);
-        canvas.toBlob((blob) => {
-          if (!blob) {
-            reject(new Error("Could not encode filtered radar image"));
-            return;
-          }
-          if (radarObjectUrl) URL.revokeObjectURL(radarObjectUrl);
-          radarObjectUrl = URL.createObjectURL(blob);
-          resolve(radarObjectUrl);
-        }, "image/png");
-      };
-      img.onerror = reject;
-      img.src = RADAR_URL;
-    });
-    return radarUrlPromise;
+  // Radar animation state: the frames (each a {z}/{x}/{y} template + its time),
+  // the current index, and the playback timer. The manifest runs from the
+  // latest observation forward through the ~2 h nowcast — we loop over it like
+  // yr.no, swapping the source's tiles per frame (setTiles, no layer rebuild).
+  let radarFrames = [];
+  let radarIdx = 0;
+  let radarTimer = null;
+
+  function stopRadarAnim() {
+    if (radarTimer) {
+      clearTimeout(radarTimer);
+      radarTimer = null;
+    }
   }
 
   function removeRadar() {
+    stopRadarAnim();
     if (map.getLayer("gi-radar")) map.removeLayer("gi-radar");
     if (map.getSource("gi-radar")) map.removeSource("gi-radar");
+    const clk = document.getElementById("gi-radar-clock");
+    if (clk) clk.remove();
   }
 
-  function addRadar(url) {
+  // A small frame-time chip in the map's top-left, managed entirely here.
+  function radarClock() {
+    let el = document.getElementById("gi-radar-clock");
+    if (!el) {
+      const host = document.getElementById("gi-map");
+      if (!host) return null;
+      if (!host.style.position) host.style.position = "relative";
+      el = document.createElement("div");
+      el.id = "gi-radar-clock";
+      el.style.cssText =
+        "position:absolute;top:10px;left:10px;z-index:2;pointer-events:none;" +
+        "background:rgba(40,40,40,0.85);color:#ebdbb2;" +
+        "font:600 12px/1.2 system-ui,-apple-system,sans-serif;" +
+        "padding:5px 9px;border-radius:8px;border:1px solid rgba(80,73,69,0.7);" +
+        "box-shadow:0 1px 4px rgba(0,0,0,0.4);backdrop-filter:blur(4px);";
+      host.appendChild(el);
+    }
+    return el;
+  }
+
+  function showRadarFrame(i) {
+    if (!radarFrames.length) return;
+    const n = radarFrames.length;
+    radarIdx = ((i % n) + n) % n;
+    const f = radarFrames[radarIdx];
+    const src = map.getSource("gi-radar");
+    if (src && src.setTiles) src.setTiles([f.url]);
+    const el = radarClock();
+    if (el) {
+      const d = new Date(f.time);
+      const hhmm =
+        String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+      // Mark the frame nearest "now" as the live observation; later frames are
+      // the nowcast (a short forecast of where the rain is heading).
+      const ahead = d.getTime() - Date.now();
+      const tag = Math.abs(ahead) < 4 * 60 * 1000 ? "nå " : ahead > 0 ? "+ " : "";
+      el.textContent = "☔ " + tag + hhmm;
+    }
+  }
+
+  // Recursive setTimeout (not setInterval) so we can pause a beat at the end of
+  // the loop before restarting, like a radar timeline.
+  function scheduleRadarFrame() {
+    const atEnd = radarIdx === radarFrames.length - 1;
+    radarTimer = setTimeout(
+      () => {
+        if (!radarEnabled || !map.getSource("gi-radar")) {
+          stopRadarAnim();
+          return;
+        }
+        showRadarFrame(atEnd ? 0 : radarIdx + 1);
+        scheduleRadarFrame();
+      },
+      atEnd ? 1300 : 600,
+    );
+  }
+
+  function startRadar(meta) {
     if (!radarEnabled || !ready || !map) return;
+    radarFrames = (meta.times || [])
+      .map((t) => ({ url: t.tiles && (t.tiles.webp || t.tiles.png), time: t.time }))
+      .filter((f) => f.url)
+      .sort((a, b) => new Date(a.time) - new Date(b.time));
+    if (!radarFrames.length) throw new Error("no radar frames in manifest");
     removeRadar();
     map.addSource("gi-radar", {
-      type: "image",
-      url: url,
-      coordinates: radarCoordinates(),
+      type: "raster",
+      tiles: [radarFrames[0].url],
+      tileSize: 256,
+      minzoom: meta.minzoom || 0,
+      maxzoom: meta.maxzoom || 6, // data's native max; MapLibre overzooms past it
+      bounds: meta.bounds,
+      attribution: "© MET Norway / Yr",
     });
     const before = map.getLayer("gi-ring-fill") ? "gi-ring-fill" : undefined;
-    map.addLayer({
-      id: "gi-radar",
-      type: "raster",
-      source: "gi-radar",
-      paint: { "raster-opacity": 0.75, "raster-fade-duration": 0 },
-    }, before);
+    map.addLayer(
+      {
+        id: "gi-radar",
+        type: "raster",
+        source: "gi-radar",
+        // A short fade gives a smooth crossfade between animation frames.
+        paint: { "raster-opacity": 0.7, "raster-fade-duration": 200 },
+      },
+      before,
+    );
+    // Begin at the frame nearest "now", then play forward and loop.
+    let startIdx = 0;
+    let best = Infinity;
+    radarFrames.forEach((f, i) => {
+      const diff = Math.abs(new Date(f.time).getTime() - Date.now());
+      if (diff < best) {
+        best = diff;
+        startIdx = i;
+      }
+    });
+    showRadarFrame(startIdx);
+    scheduleRadarFrame();
   }
 
   function setRadar(enabled) {
@@ -180,8 +191,9 @@
       removeRadar();
       return;
     }
-    filteredRadarUrl()
-      .then(addRadar)
+    fetch(RADAR_AVAILABLE)
+      .then((r) => r.json())
+      .then(startRadar)
       .catch((e) => console.error("Could not load MET radar", e));
   }
 

@@ -169,7 +169,7 @@ pub fn MapView(points: Vec<PointScore>) -> impl IntoView {
                         }).collect_view()}
                     </div>
                     <button type="button"
-                        title="Viser MET radar/2.0 Nordic som omtrentlig bilde-overlegg (ikke pikselnøyaktig reprojisert)."
+                        title="Viser MET/Yr nedbør-nowcast (samme kilde som yr.no sitt radarkart). Siste observasjon."
                         class=move || if radar.get() {
                             "rounded-lg bg-gruv-blue px-2.5 py-1 text-xs font-semibold text-gruv-bg0 ring-1 ring-gruv-blue"
                         } else {
