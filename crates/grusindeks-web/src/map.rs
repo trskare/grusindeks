@@ -37,13 +37,12 @@ fn set_basemap_js(key: &str) {
 #[cfg(not(feature = "hydrate"))]
 fn set_basemap_js(_key: &str) {}
 
-/// Toggle the MET radar image overlay (client-only; no-op during SSR).
+/// Toggle the MET radar overlay (client-only; only ever called from a
+/// `hydrate`-gated effect, so there's no SSR stub).
 #[cfg(feature = "hydrate")]
 fn set_radar_js(enabled: bool) {
     glue::set_radar(enabled);
 }
-#[cfg(not(feature = "hydrate"))]
-fn set_radar_js(_enabled: bool) {}
 
 #[cfg(feature = "hydrate")]
 fn points_geojson(points: &[PointScore]) -> String {
@@ -112,6 +111,11 @@ pub fn MapView(points: Vec<PointScore>) -> impl IntoView {
     // default tile source. ("Grus" = CyclOSM shows gravel/unpaved tracks.)
     let basemap = RwSignal::new("osm");
     let radar = RwSignal::new(false);
+    // Auto mode (on by default): when rain is forecast for the area, the radar
+    // turns on by itself. A manual click on "MET-radar" takes over (turns Auto
+    // off). `rain_forecast` is true when any sample point expects ≥0.1 mm in the
+    // scored window.
+    let auto = RwSignal::new(true);
 
     #[cfg(feature = "hydrate")]
     {
@@ -134,6 +138,25 @@ pub fn MapView(points: Vec<PointScore>) -> impl IntoView {
                 glue::set_ring(&ring_geojson(center_pt, radius));
                 glue::set_points(&points_geojson(&points));
             }
+        });
+    }
+
+    #[cfg(feature = "hydrate")]
+    {
+        let rain_forecast = points.iter().any(|p| {
+            let s = &p.score.stats;
+            !s.is_empty() && s.total_precip_mm >= 0.1
+        });
+        // Auto mode keeps the radar synced to the forecast.
+        Effect::new(move |_| {
+            if auto.get() {
+                radar.set(rain_forecast);
+            }
+        });
+        // Single sink: whatever moves `radar` (auto or a manual click) is
+        // reflected onto the map here.
+        Effect::new(move |_| {
+            set_radar_js(radar.get());
         });
     }
     #[cfg(not(feature = "hydrate"))]
@@ -168,19 +191,31 @@ pub fn MapView(points: Vec<PointScore>) -> impl IntoView {
                             }
                         }).collect_view()}
                     </div>
-                    <button type="button"
-                        title="Viser MET/Yr nedbør-nowcast (samme kilde som yr.no sitt radarkart). Siste observasjon."
-                        class=move || if radar.get() {
-                            "rounded-lg bg-gruv-blue px-2.5 py-1 text-xs font-semibold text-gruv-bg0 ring-1 ring-gruv-blue"
-                        } else {
-                            "rounded-lg bg-gruv-bg0/60 px-2.5 py-1 text-xs font-semibold text-gruv-fg/80 ring-1 ring-gruv-bg2 hover:bg-gruv-bg2/60 hover:text-gruv-fg"
-                        }
-                        on:click=move |_| {
-                            let next = !radar.get_untracked();
-                            radar.set(next);
-                            set_radar_js(next);
-                        }
-                    >"MET-radar"</button>
+                    // MET-radar + Auto sit together. Manual click takes over (Auto off).
+                    <div class="flex overflow-hidden rounded-lg ring-1 ring-gruv-bg2">
+                        <button type="button"
+                            title="Viser MET/Yr nedbør-nowcast (samme kilde som yr.no sitt radarkart), animert."
+                            class=move || if radar.get() {
+                                "px-2.5 py-1 text-xs font-semibold bg-gruv-blue text-gruv-bg0"
+                            } else {
+                                "px-2.5 py-1 text-xs font-semibold bg-gruv-bg0/60 text-gruv-fg/80 hover:bg-gruv-bg2/60 hover:text-gruv-fg"
+                            }
+                            on:click=move |_| {
+                                // Manual override: stop following the forecast.
+                                auto.set(false);
+                                radar.set(!radar.get_untracked());
+                            }
+                        >"MET-radar"</button>
+                        <button type="button"
+                            title="Auto: skrur radaren på av seg selv når det er meldt regn i området."
+                            class=move || if auto.get() {
+                                "border-l border-gruv-bg2 px-2.5 py-1 text-xs font-semibold bg-gruv-aqua text-gruv-bg0"
+                            } else {
+                                "border-l border-gruv-bg2 px-2.5 py-1 text-xs font-semibold bg-gruv-bg0/60 text-gruv-fg/80 hover:bg-gruv-bg2/60 hover:text-gruv-fg"
+                            }
+                            on:click=move |_| { auto.set(!auto.get_untracked()); }
+                        >"Auto"</button>
+                    </div>
                 </div>
                 // Legend mirrors the five score buckets the dots are coloured by.
                 <div class="flex flex-wrap justify-end gap-x-2 gap-y-1 text-xs uppercase tracking-wide text-gruv-fg/70">

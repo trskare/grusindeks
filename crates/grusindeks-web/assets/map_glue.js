@@ -344,6 +344,9 @@
       ready = true;
       ensureLayers();
       applyPending();
+      // Auto mode may have requested the radar before the map finished loading;
+      // setRadar stored the flag but couldn't act. Apply it now.
+      if (radarEnabled) setRadar(true);
     });
     // The map container grows after init (the timeline loads → the right column
     // stretches taller). MapLibre keeps centre+zoom on resize, which would leave
