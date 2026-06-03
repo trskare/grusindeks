@@ -188,6 +188,10 @@ pub struct Penalty {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct WindowStats {
     pub mean_temp_c: f64,
+    /// Apparent ("feels like") temperature over the window — the value the
+    /// temperature sub-score is actually computed from (wind chill / heat
+    /// index, with a clear-sky solar bump). `NaN` on the empty-window path.
+    pub felt_temp_c: f64,
     pub min_temp_c: f64,
     pub max_temp_c: f64,
     pub total_precip_mm: f64,
@@ -195,6 +199,11 @@ pub struct WindowStats {
     pub max_wind_ms: f64,
     pub max_gust_ms: Option<f64>,
     pub mean_humidity_pct: Option<f64>,
+    /// Circular-mean wind direction over the window, degrees clockwise from
+    /// north (the direction the wind blows *from*). `None` when the forecast
+    /// carried no direction for any in-window hour.
+    #[serde(default)]
+    pub wind_from_deg: Option<f64>,
 }
 
 impl WindowStats {
@@ -203,6 +212,7 @@ impl WindowStats {
     pub fn empty() -> Self {
         Self {
             mean_temp_c: f64::NAN,
+            felt_temp_c: f64::NAN,
             min_temp_c: f64::NAN,
             max_temp_c: f64::NAN,
             total_precip_mm: 0.0,
@@ -210,6 +220,7 @@ impl WindowStats {
             max_wind_ms: 0.0,
             max_gust_ms: None,
             mean_humidity_pct: None,
+            wind_from_deg: None,
         }
     }
 
@@ -224,7 +235,10 @@ impl WindowStats {
 pub struct Grusindeks {
     pub total: u8,
     pub breakdown: ScoreBreakdown,
-    pub label: &'static str,
+    /// Localized one-word verdict ("Strålende"/"Bra"/…). Owned so the type
+    /// round-trips through serde (JSON API / web client); the value is the
+    /// same string [`label_for`] returns.
+    pub label: String,
     /// `true` when a hard cap (heavy rain or storm wind) clamped the total.
     pub hard_capped: bool,
     /// Explanations for the sub-scores that got reduced. Sorted by
@@ -309,7 +323,7 @@ pub fn score(
                 precip_probability: 0,
                 ground: 0,
             },
-            label,
+            label: label.to_string(),
             hard_capped: false,
             penalties: vec![Penalty {
                 component: Component::NoData,
@@ -383,6 +397,18 @@ pub fn score(
 
     let max_gust_opt = max_gust.is_finite().then_some(max_gust);
     let max_prob_opt = max_prob.is_finite().then_some(max_prob);
+
+    // Circular mean of wind direction over the window (handles the 0/360 wrap).
+    let wind_from_deg = {
+        let (sin_sum, cos_sum, n) = in_window.iter().filter_map(|h| h.wind_from_deg).fold(
+            (0.0_f64, 0.0_f64, 0u32),
+            |(s, c, n), d| {
+                let r = d.to_radians();
+                (s + r.sin(), c + r.cos(), n + 1)
+            },
+        );
+        (n > 0).then(|| sin_sum.atan2(cos_sum).to_degrees().rem_euclid(360.0))
+    };
 
     let ground_dry = match surface {
         Some(s) => apply_drought_penalty(
@@ -510,6 +536,7 @@ pub fn score(
 
     let stats = WindowStats {
         mean_temp_c: mean_temp,
+        felt_temp_c: felt_temp,
         min_temp_c: min_temp,
         max_temp_c: max_temp,
         total_precip_mm: total_precip,
@@ -521,12 +548,13 @@ pub fn score(
         max_wind_ms: if max_wind.is_finite() { max_wind } else { 0.0 },
         max_gust_ms: max_gust_opt,
         mean_humidity_pct: mean_humidity_opt,
+        wind_from_deg,
     };
 
     Grusindeks {
         total,
         breakdown,
-        label: label_for(total, lang),
+        label: label_for(total, lang).to_string(),
         hard_capped,
         penalties,
         highlights,
@@ -1225,6 +1253,7 @@ mod tests {
     fn nice_hour(time_h: u32) -> HourlyConditions {
         // 17°C, 2 m/s wind, no rain, low prob — should yield a perfect score.
         HourlyConditions {
+            thunder: false,
             probability_of_precip: Some(5.0),
             ..HourlyConditions::minimal(t(time_h), 17.0, 2.0, 0.0)
         }
@@ -1557,6 +1586,7 @@ mod tests {
         // Calm mean (4 m/s) but strong gusts (8 m/s = 2× mean).
         let hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions {
+                thunder: false,
                 wind_gust_ms: Some(8.0),
                 ..HourlyConditions::minimal(t(h), 17.0, 4.0, 0.0)
             })
@@ -1610,6 +1640,7 @@ mod tests {
         // probability sub-score drops independently.
         let hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(90.0),
                 ..HourlyConditions::minimal(t(h), 17.0, 2.0, 0.0)
             })
@@ -2001,6 +2032,7 @@ mod tests {
         // must be ignored, leaving a perfectly-scoring window.
         let mut hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(5.0),
                 ..HourlyConditions::minimal(t(h), 17.0, 2.0, 0.0)
             })
@@ -2154,12 +2186,14 @@ mod tests {
         // the temperature subscore vs the same air temp at low RH.
         let humid: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions {
+                thunder: false,
                 relative_humidity: Some(85.0),
                 ..HourlyConditions::minimal(t(h), 28.0, 2.0, 0.0)
             })
             .collect();
         let dry: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions {
+                thunder: false,
                 relative_humidity: Some(30.0),
                 ..HourlyConditions::minimal(t(h), 28.0, 2.0, 0.0)
             })
@@ -2205,6 +2239,7 @@ mod tests {
     ) -> Vec<HourlyConditions> {
         (14..17)
             .map(|h| HourlyConditions {
+                thunder: false,
                 cloud_area_fraction: cloud_pct,
                 uv_index_clear_sky: uv,
                 relative_humidity: Some(60.0),

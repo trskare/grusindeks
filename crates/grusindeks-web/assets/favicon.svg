@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Grusindeks">
+  <defs>
+    <linearGradient id="sky" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#83a598"/>
+      <stop offset="0.58" stop-color="#458588"/>
+      <stop offset="1" stop-color="#282828"/>
+    </linearGradient>
+    <linearGradient id="road" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#bdae93"/>
+      <stop offset="1" stop-color="#665c54"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="64" height="64" rx="14" fill="#282828"/>
+  <rect x="5" y="5" width="54" height="54" rx="11" fill="url(#sky)"/>
+
+  <!-- The wordmark mark, scaled into the badge: a gravel-road wedge that reads
+       as both road and gauge/index — matches the in-app logo (icons::logo). -->
+  <path d="M32 14 50 50 14 50 Z" fill="url(#road)" stroke="#ebdbb2" stroke-width="2" stroke-linejoin="round"/>
+  <!-- dashed centre line (road marking) -->
+  <path d="M32 20V49" stroke="#ebdbb2" stroke-width="2" stroke-dasharray="3 4" stroke-linecap="round" opacity="0.75"/>
+  <!-- apex dot — the bike, in yellow -->
+  <circle cx="32" cy="13" r="3.4" fill="#fabd2f"/>
+</svg>

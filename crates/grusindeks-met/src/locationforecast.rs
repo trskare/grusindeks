@@ -65,12 +65,29 @@ struct CompactInstantDetails {
 struct CompactInterval {
     #[serde(default)]
     details: CompactIntervalDetails,
+    #[serde(default)]
+    summary: Option<CompactSummary>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct CompactIntervalDetails {
     precipitation_amount: Option<f64>,
     probability_of_precipitation: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CompactSummary {
+    symbol_code: Option<String>,
+}
+
+/// `true` when an interval's MET symbol code denotes thunder. MET names every
+/// thunder variant `*thunder*` (e.g. `rainandthunder`,
+/// `heavyrainshowersandthunder_day`), so a substring test covers them all.
+fn is_thunder(iv: &CompactInterval) -> bool {
+    iv.summary
+        .as_ref()
+        .and_then(|s| s.symbol_code.as_deref())
+        .is_some_and(|c| c.contains("thunder"))
 }
 
 /// Convert the upstream JSON into a `Forecast`.
@@ -101,9 +118,11 @@ fn into_forecast(point: Point, raw: CompactResponse) -> Forecast {
 
         if let Some(next1) = s.data.next_1_hours {
             let precip = next1.details.precipitation_amount.unwrap_or(0.0);
+            let thunder = is_thunder(&next1);
             by_time.insert(
                 s.time,
                 HourlyConditions {
+                    thunder,
                     time: s.time,
                     temperature_c: temp,
                     wind_speed_ms: wind,
@@ -123,10 +142,12 @@ fn into_forecast(point: Point, raw: CompactResponse) -> Forecast {
         if let Some(next6) = s.data.next_6_hours {
             let bucket_total = next6.details.precipitation_amount.unwrap_or(0.0);
             let per_hour_mm = bucket_total / 6.0;
+            let thunder = is_thunder(&next6);
             for offset in 0..6 {
                 let t = s.time + chrono::Duration::hours(offset);
                 // Hourly entries already emitted win — never overwrite them.
                 by_time.entry(t).or_insert(HourlyConditions {
+                    thunder,
                     time: t,
                     temperature_c: temp,
                     wind_speed_ms: wind,

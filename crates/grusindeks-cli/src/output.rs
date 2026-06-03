@@ -825,7 +825,7 @@ fn write_day_row(
 ) {
     let center = day.center();
     let day_label = day_label(day.date, today_local, lang);
-    let icon = center.weather_icon;
+    let icon = center.weather_icon.as_str();
 
     let dim = theme::dim_for_confidence(day.confidence);
 
@@ -1562,6 +1562,7 @@ mod tests {
 
     fn perfect(time_h: u32) -> HourlyConditions {
         HourlyConditions {
+            thunder: false,
             probability_of_precip: Some(5.0),
             ..HourlyConditions::minimal(t(time_h), 17.0, 2.0, 0.0)
         }
@@ -1846,6 +1847,7 @@ mod tests {
 
         fn awful(time_h: u32) -> HourlyConditions {
             HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(95.0),
                 ..HourlyConditions::minimal(t(time_h), 5.0, 11.0, 3.0)
             }
@@ -1904,6 +1906,7 @@ mod tests {
 
         fn rainy(time_h: u32) -> HourlyConditions {
             HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(95.0),
                 ..HourlyConditions::minimal(t(time_h), 12.0, 3.0, 1.0)
             }
@@ -2025,6 +2028,7 @@ mod tests {
 
         fn awful(time_h: u32) -> HourlyConditions {
             HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(95.0),
                 ..HourlyConditions::minimal(t(time_h), 5.0, 11.0, 3.0)
             }
@@ -2156,6 +2160,7 @@ mod tests {
         let win = RideWindow::from_hours(t(14), 3);
         let hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions {
+                thunder: false,
                 wind_gust_ms: Some(22.0),
                 cloud_area_fraction: Some(95.0),
                 probability_of_precip: Some(40.0),
@@ -2211,6 +2216,7 @@ mod tests {
         }
         fn windy(time_h: u32, day_offset: i64) -> HourlyConditions {
             HourlyConditions {
+                thunder: false,
                 wind_gust_ms: Some(13.0),
                 cloud_area_fraction: Some(80.0),
                 ..HourlyConditions::minimal(at(time_h, day_offset), 6.0, 9.0, 0.0)
@@ -2218,6 +2224,7 @@ mod tests {
         }
         fn rainy(time_h: u32, day_offset: i64) -> HourlyConditions {
             HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(85.0),
                 cloud_area_fraction: Some(95.0),
                 ..HourlyConditions::minimal(at(time_h, day_offset), 8.0, 4.0, 1.5)
@@ -2225,6 +2232,7 @@ mod tests {
         }
         fn nice(time_h: u32, day_offset: i64) -> HourlyConditions {
             HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(10.0),
                 cloud_area_fraction: Some(30.0),
                 ..HourlyConditions::minimal(at(time_h, day_offset), 17.0, 3.0, 0.0)
@@ -2305,6 +2313,7 @@ mod tests {
         let center = Point::new(59.9139, 10.7522);
         let hours: Vec<HourlyConditions> = (6..18)
             .map(|h| HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(80.0),
                 ..HourlyConditions::minimal(t(h), 0.0, 9.0, 0.6)
             })
@@ -2431,7 +2440,7 @@ mod tests {
             confidence,
             hours_with_data: 12,
             optimal_window: None,
-            weather_icon: "☀",
+            weather_icon: "☀".to_string(),
         };
         DayAggregate {
             date,
@@ -2444,7 +2453,7 @@ mod tests {
             points: vec![DayPointScore {
                 point: center,
                 bearing_deg: 0.0,
-                bearing_label: "senter",
+                bearing_label: "senter".to_string(),
                 is_center: true,
                 day_score,
             }],
@@ -2612,6 +2621,7 @@ mod tests {
     fn window_stats_chip_renders_temp_range() {
         let stats = WindowStats {
             mean_temp_c: 15.0,
+            felt_temp_c: 15.0,
             min_temp_c: 12.0,
             max_temp_c: 18.0,
             total_precip_mm: 0.4,
@@ -2619,6 +2629,7 @@ mod tests {
             max_wind_ms: 7.0,
             max_gust_ms: Some(11.0),
             mean_humidity_pct: None,
+            wind_from_deg: None,
         };
         let s = window_stats_chip_content(&stats, Language::Norwegian).expect("Some");
         assert!(s.contains("12–18 °C"), "got {s}");
@@ -2630,6 +2641,7 @@ mod tests {
     fn window_stats_chip_omits_gust_when_none() {
         let stats = WindowStats {
             mean_temp_c: 15.0,
+            felt_temp_c: 15.0,
             min_temp_c: 15.0,
             max_temp_c: 15.0,
             total_precip_mm: 0.0,
@@ -2637,6 +2649,7 @@ mod tests {
             max_wind_ms: 5.0,
             max_gust_ms: None,
             mean_humidity_pct: None,
+            wind_from_deg: None,
         };
         let s = window_stats_chip_content(&stats, Language::Norwegian).expect("Some");
         assert!(!s.contains("kast"), "expected no gust mention: {s}");
@@ -2836,6 +2849,7 @@ mod tests {
                 ground: mean,
             },
             confidence: Confidence::Hoy,
+            raw: None,
         }
     }
 
@@ -2866,6 +2880,7 @@ mod tests {
             days: vec![day],
             rain_history: None,
             nowcast_alert: None,
+            sun: None,
         }
     }
 
@@ -3003,6 +3018,7 @@ mod tests {
         let mut forecast = hourly_fixture(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
         forecast.days[0].stats = Some(WindowStats {
             mean_temp_c: 14.0,
+            felt_temp_c: 14.0,
             min_temp_c: 12.0,
             max_temp_c: 18.0,
             total_precip_mm: 0.0,
@@ -3010,6 +3026,7 @@ mod tests {
             max_wind_ms: 4.0,
             max_gust_ms: Some(7.0),
             mean_humidity_pct: None,
+            wind_from_deg: None,
         });
         let out = render_hourly(
             "Oslo",
@@ -3035,6 +3052,7 @@ mod tests {
         let mut forecast = hourly_fixture(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
         forecast.days[0].stats = Some(WindowStats {
             mean_temp_c: 14.0,
+            felt_temp_c: 14.0,
             min_temp_c: 12.0,
             max_temp_c: 18.0,
             total_precip_mm: 0.0,
@@ -3042,6 +3060,7 @@ mod tests {
             max_wind_ms: 4.0,
             max_gust_ms: None,
             mean_humidity_pct: None,
+            wind_from_deg: None,
         });
         let out = render_hourly(
             "Oslo",
@@ -3062,6 +3081,7 @@ mod tests {
         let mut forecast = hourly_fixture(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
         forecast.days[0].stats = Some(WindowStats {
             mean_temp_c: 14.0,
+            felt_temp_c: 14.0,
             min_temp_c: 12.0,
             max_temp_c: 18.0,
             total_precip_mm: 0.0,
@@ -3069,6 +3089,7 @@ mod tests {
             max_wind_ms: 4.0,
             max_gust_ms: None,
             mean_humidity_pct: None,
+            wind_from_deg: None,
         });
         let flags = ChipFlags {
             rain_history: true,
@@ -3088,6 +3109,7 @@ mod tests {
             days: vec![],
             rain_history: None,
             nowcast_alert: None,
+            sun: None,
         };
         let out = render_hourly(
             "Oslo",

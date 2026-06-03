@@ -1,0 +1,116 @@
+@import "tailwindcss";
+
+/* Scan the Leptos `view!` macros for class names (Tailwind v4 doesn't read
+   tailwind.config.js; sources and theme are declared here). */
+@source "../src";
+
+/* Gruvbox dark — mirrors crates/grusindeks-cli/src/theme.rs so the web UI and
+   the CLI share one palette. `--color-<name>` makes `bg-<name>`, `text-<name>`,
+   `border-<name>`, etc. available. */
+@theme {
+  --color-gruv-bg0: #282828;
+  --color-gruv-bg1: #3c3836;
+  --color-gruv-bg2: #504945;
+  --color-gruv-fg: #ebdbb2;
+  --color-gruv-gray: #928374;
+  --color-gruv-red: #cc241d;
+  --color-gruv-orange: #fe8019;
+  --color-gruv-yellow: #fabd2f;
+  --color-gruv-lime: #b8bb26;
+  --color-gruv-green: #689d6a;
+  --color-gruv-aqua: #458588;
+  --color-gruv-blue: #83a598;
+}
+
+/* RideTimeline animations. Kept tiny and CSS-only (no JS/wasm cost), and all
+   gated behind prefers-reduced-motion. */
+@keyframes gx-sweep {
+  from { clip-path: inset(0 100% 0 0); }
+  to   { clip-path: inset(0 0 0 0); }
+}
+@keyframes gx-breathe {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 0.9; }
+}
+@keyframes gx-rain-fall {
+  0%   { transform: translateY(-14px); opacity: 0; }
+  12%  { opacity: 0.85; }
+  78%  { opacity: 0.85; }
+  100% { transform: translateY(220px); opacity: 0; }
+}
+.gx-rain-drop {
+  position: absolute;
+  top: 0;
+  width: calc(4px * var(--gx-rain-size, 1));
+  height: calc(9px * var(--gx-rain-size, 1));
+  border-radius: 999px;
+  background: linear-gradient(to bottom, rgba(131,165,152,var(--gx-rain-alpha, 0.85)), rgba(69,133,136,calc(var(--gx-rain-alpha, 0.85) * 0.75)));
+  box-shadow: 0 0 5px rgba(131,165,152,calc(var(--gx-rain-alpha, 0.85) * 0.40));
+  animation: gx-rain-fall var(--gx-rain-speed, 1.35s) linear infinite;
+  animation-delay: var(--gx-rain-delay, 0s);
+}
+
+/* The day popup blooms out of the clicked card: a pure scale from the card-
+   anchored origin (both axes set inline via --gx-origin-x/-y), with a hair of
+   overshoot. No translate — the origin does the spatial work. */
+@keyframes gx-popdown {
+  0%   { opacity: 0.15; transform: scale(0.22, 0.10); filter: blur(0.5px); }
+  65%  { opacity: 1;    transform: scale(1.015, 1.02); filter: blur(0); }
+  100% { opacity: 1;    transform: scale(1);          filter: blur(0); }
+}
+/* A gentle 2s halo on error banners — draws the eye in the dark UI without
+   layout shift. gruv-red rgba only; gated below like the rest. */
+@keyframes gx-pulse-error {
+  0%, 100% { box-shadow: 0 0 0 rgba(204, 36, 29, 0.30); }
+  50%      { box-shadow: 0 0 12px rgba(204, 36, 29, 0.50); }
+}
+.gx-sweep       { animation: gx-sweep 700ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+/* Edge-accelerating curve + a touch longer reads as a human breath, not a blink. */
+.gx-breathe     { animation: gx-breathe 3.2s cubic-bezier(0.25, 0.46, 0.45, 0.94) infinite; }
+.gx-popdown     { transform-origin: var(--gx-origin-x, 50%) var(--gx-origin-y, top); animation: gx-popdown 200ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+.gx-pulse-error { animation: gx-pulse-error 2s ease-in-out infinite; }
+/* Lightning: an occasional double-flash that brightens a thunder rain band.
+   `screen` blend lifts the lanes underneath like a real flash. Mostly off. */
+@keyframes gx-lightning {
+  0%, 88%, 100% { opacity: 0; }
+  89% { opacity: 0.9; }
+  90% { opacity: 0.1; }
+  91% { opacity: 0.85; }
+  93% { opacity: 0; }
+}
+.gx-lightning {
+  opacity: 0;
+  background: linear-gradient(to bottom, rgba(235, 219, 178, 0.95), rgba(131, 165, 152, 0.25));
+  mix-blend-mode: screen;
+  animation: gx-lightning 4.2s ease-out infinite;
+}
+/* Top-bar logo mark: a small needle-swing when its link (the `group`) is
+   hovered. Pivot near the base so the wedge tilts like a gauge needle. */
+.gx-logo { transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1); transform-origin: 50% 62%; transform-box: fill-box; }
+.group:hover .gx-logo { transform: rotate(6deg) scale(1.04); }
+@media (prefers-reduced-motion: reduce) {
+  .gx-sweep, .gx-breathe, .gx-popdown, .gx-rain-drop, .gx-pulse-error, .gx-lightning { animation: none; }
+  .gx-logo { transition: none; }
+  .group:hover .gx-logo { transform: none; }
+  /* Without an explicit reset, animation:none + fill `both` can freeze the
+     popup at its 0% (scaled-down) frame. Pin it to its resting state. */
+  .gx-popdown { opacity: 1; transform: scale(1); }
+  /* No blinking — keep a faint static wash so the thunder cue still reads. */
+  .gx-lightning { opacity: 0.22; }
+}
+
+/* Depth system. Two recipes, deliberately: a raised plate (cards) and an
+   inset well (sub-panels / tiles / the timeline plot). Depth is meaningful,
+   not decorative — only these two roles get a shadow. */
+@utility emboss {
+  box-shadow:
+    inset 0 1px 0 0 rgba(235, 219, 178, 0.11),
+    inset 0 0 0 1px rgba(80, 73, 69, 0.55),
+    0 1px 2px rgba(0, 0, 0, 0.30),
+    0 8px 24px -6px rgba(0, 0, 0, 0.55);
+}
+@utility inset-well {
+  box-shadow:
+    inset 0 2px 4px rgba(0, 0, 0, 0.45),
+    inset 0 -1px 0 0 rgba(235, 219, 178, 0.05);
+}

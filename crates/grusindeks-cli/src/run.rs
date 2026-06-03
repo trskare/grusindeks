@@ -17,8 +17,8 @@ use grusindeks_met::locationforecast;
 use grusindeks_met::nowcast::{self, Nowcast};
 
 use crate::aggregate::{
-    AggregateScore, DayAggregate, HourScore, HourlyDayAggregate, HourlyForecast, MultiDayForecast,
-    NowcastAlert, RainHistory,
+    AggregateScore, DayAggregate, HourRaw, HourScore, HourlyDayAggregate, HourlyForecast,
+    HourlyPrecip, MultiDayForecast, NowcastAlert, RainHistory,
 };
 
 /// Threshold for "this hour got rain on radar" — matches yr.no's
@@ -102,6 +102,26 @@ pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<Ag
     if let Some(nc) = &nowcast {
         apply_nowcast_overrides(&mut per_point_hours, nc);
     }
+    // Per-hour precipitation for the centre point inside the scored window —
+    // captured after any nowcast override so it reflects the radar. Lets the
+    // renderer show *when* the rain falls, not just the window total.
+    let center_truncated = inputs.center.truncated();
+    let hourly_precip: Vec<HourlyPrecip> = per_point_hours
+        .iter()
+        .find(|(p, _)| *p == center_truncated)
+        .or_else(|| per_point_hours.first())
+        .map(|(_, hours)| {
+            hours
+                .iter()
+                .filter(|h| inputs.window.contains(h.time) && h.precipitation_mm.is_finite())
+                .map(|h| HourlyPrecip {
+                    time: h.time,
+                    precip_mm: h.precipitation_mm.max(0.0),
+                    prob_pct: h.probability_of_precip,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let scored: Vec<(Point, _)> = per_point_hours
         .into_iter()
         .map(|(p, hours)| (p, score(&hours, inputs.window, surface, inputs.lang)))
@@ -111,6 +131,7 @@ pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<Ag
     out.nowcast_alert = nowcast
         .as_ref()
         .and_then(|n| build_nowcast_alert(n, Utc::now()));
+    out.hourly_precip = hourly_precip;
     Ok(out)
 }
 
@@ -355,6 +376,20 @@ pub async fn run_hourly(client: &MetClient, inputs: HourlyInputs<'_>) -> Result<
                 ground: ((bd_ground + n / 2) / n) as u8,
             };
             let confidence = hour_confidence(start, now, six_hourly);
+            // Carry the centre point's raw values for this hour so a timeline
+            // renderer can show measured °C / m/s / mm, not just the derived
+            // sub-scores. Free — `center_hours` is already in scope.
+            let raw = center_hours
+                .iter()
+                .find(|h| h.time == start)
+                .map(|h| HourRaw {
+                    temperature_c: h.temperature_c,
+                    wind_speed_ms: h.wind_speed_ms,
+                    wind_gust_ms: h.wind_gust_ms,
+                    precipitation_mm: h.precipitation_mm,
+                    probability_of_precip: h.probability_of_precip,
+                    thunder: h.thunder,
+                });
             hours.push(HourScore {
                 time: start,
                 mean,
@@ -362,6 +397,7 @@ pub async fn run_hourly(client: &MetClient, inputs: HourlyInputs<'_>) -> Result<
                 max,
                 breakdown,
                 confidence,
+                raw,
             });
         }
         // Centre-point WindowStats over the *full* daytime window — the
@@ -391,6 +427,7 @@ pub async fn run_hourly(client: &MetClient, inputs: HourlyInputs<'_>) -> Result<
         days,
         rain_history,
         nowcast_alert: nowcast.as_ref().and_then(|n| build_nowcast_alert(n, now)),
+        sun: None,
     })
 }
 
@@ -842,6 +879,7 @@ where
                 let filler_count = gap_hours.round() as i64 - 1;
                 for i in 1..=filler_count {
                     let filler = HourlyConditions {
+                        thunder: false,
                         time: prev + Duration::hours(i),
                         temperature_c: 10.0,
                         wind_speed_ms: 3.0,
@@ -860,6 +898,7 @@ where
             }
         }
         let synth = HourlyConditions {
+            thunder: false,
             time: h.time,
             temperature_c: h.temp_c.unwrap_or(10.0),
             wind_speed_ms: h.wind_ms.unwrap_or(3.0),
@@ -1202,6 +1241,7 @@ mod tests {
         let mut per_point = vec![(
             point_oslo(),
             vec![HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(80.0),
                 ..HourlyConditions::minimal(h_start, 12.0, 3.0, 1.5)
             }],

@@ -58,6 +58,11 @@ pub struct HourlyConditions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uv_index_clear_sky: Option<f64>,
 
+    /// `true` when MET's hourly symbol code for this hour denotes thunder (any
+    /// `*thunder*` variant). Defaults to `false` for blobs predating the field.
+    #[serde(default)]
+    pub thunder: bool,
+
     /// Where the data originated. Defaults to `Hourly` for backward compat
     /// with serialized blobs predating the multi-day forecast feature.
     #[serde(default)]
@@ -84,6 +89,7 @@ impl HourlyConditions {
             relative_humidity: None,
             cloud_area_fraction: None,
             uv_index_clear_sky: None,
+            thunder: false,
             resolution: Resolution::Hourly,
         }
     }
@@ -204,6 +210,7 @@ mod tests {
     #[test]
     fn hourly_serde_keeps_some() {
         let h = HourlyConditions {
+            thunder: false,
             wind_gust_ms: Some(7.5),
             ..HourlyConditions::minimal(t(12), 16.0, 4.0, 0.0)
         };

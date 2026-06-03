@@ -240,6 +240,7 @@ mod tests {
 
     fn dry_hour(h: u32) -> HourlyConditions {
         HourlyConditions {
+            thunder: false,
             cloud_area_fraction: Some(20.0),
             uv_index_clear_sky: Some(4.0),
             relative_humidity: Some(40.0),
@@ -249,6 +250,7 @@ mod tests {
 
     fn rainy_hour(h: u32, mm: f64) -> HourlyConditions {
         HourlyConditions {
+            thunder: false,
             cloud_area_fraction: Some(95.0),
             uv_index_clear_sky: Some(0.0),
             relative_humidity: Some(95.0),
@@ -299,10 +301,12 @@ mod tests {
     fn rate_decreases_with_humidity() {
         let p = DryingParams::default();
         let base = HourlyConditions {
+            thunder: false,
             relative_humidity: Some(40.0),
             ..HourlyConditions::minimal(t(0), 18.0, 4.0, 0.0)
         };
         let humid = HourlyConditions {
+            thunder: false,
             relative_humidity: Some(95.0),
             ..HourlyConditions::minimal(t(0), 18.0, 4.0, 0.0)
         };
@@ -313,6 +317,7 @@ mod tests {
     fn rate_clamped_to_max() {
         let p = DryingParams::default();
         let extreme = HourlyConditions {
+            thunder: false,
             cloud_area_fraction: Some(0.0),
             uv_index_clear_sky: Some(11.0),
             relative_humidity: Some(10.0),
@@ -326,6 +331,7 @@ mod tests {
     fn rate_clamped_above_zero() {
         let p = DryingParams::default();
         let cold_humid = HourlyConditions {
+            thunder: false,
             cloud_area_fraction: Some(100.0),
             uv_index_clear_sky: Some(0.0),
             relative_humidity: Some(100.0),
@@ -567,6 +573,7 @@ mod tests {
     fn drying_rate_handles_nan_humidity() {
         let p = DryingParams::default();
         let h = HourlyConditions {
+            thunder: false,
             relative_humidity: Some(f64::NAN),
             ..HourlyConditions::minimal(t(0), 18.0, 4.0, 0.0)
         };
@@ -663,6 +670,7 @@ mod tests {
         // as in the old `(uv/5).clamp(0,2)` formula.
         let p = DryingParams::default();
         let extreme_sun = HourlyConditions {
+            thunder: false,
             cloud_area_fraction: Some(0.0),
             uv_index_clear_sky: Some(20.0),
             relative_humidity: Some(50.0),

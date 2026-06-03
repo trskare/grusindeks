@@ -1,0 +1,9 @@
+/target
+**/target
+.git
+.github
+*.md
+/docs
+.claude
+**/*.db
+**/*.db-*

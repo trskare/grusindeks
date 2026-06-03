@@ -8,7 +8,7 @@
 //! first ~60 hours.
 
 use chrono::{DateTime, Duration, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::drying::SurfaceState;
 use crate::lang::Language;
@@ -17,7 +17,7 @@ use crate::types::{HourlyConditions, Resolution, RideWindow};
 
 /// How much the user should trust a forecast. Drops as the horizon grows
 /// and as the proportion of 6-hourly data overtakes hourly data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Confidence {
     Hoy,
@@ -61,7 +61,7 @@ impl Confidence {
 /// it when the window is 9 °C is misleading, even if 9 °C is the
 /// warmest stretch of the day. `MinstKald` covers that comparative
 /// case without overselling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BestWindowReason {
     /// Window's felt-temperature is in the comfortable plateau (16–22 °C)
@@ -97,7 +97,7 @@ impl BestWindowReason {
 
 /// A sub-window of the day that scores meaningfully better than the day
 /// as a whole — the "go ride now" suggestion.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OptimalWindow {
     pub window: RideWindow,
     pub score: Grusindeks,
@@ -111,7 +111,7 @@ pub struct OptimalWindow {
 }
 
 /// One day's worth of summary data.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DayScore {
     /// The full day window in UTC. Whatever the caller passed in.
     pub window: RideWindow,
@@ -125,8 +125,9 @@ pub struct DayScore {
     pub optimal_window: Option<OptimalWindow>,
     /// Single-glyph weather summary for the day. Derived from the in-window
     /// cloud cover, total precipitation, max wind, and mean temperature so
-    /// the renderer can show one icon per day.
-    pub weather_icon: &'static str,
+    /// the renderer can show one icon per day. Owned so the type round-trips
+    /// through serde; the value is what [`weather_icon_for`] returns.
+    pub weather_icon: String,
 }
 
 /// Default minimum point-improvement before we surface a "best window" in
@@ -200,7 +201,7 @@ pub fn compute_day(
     )
     .filter(|ow| ow.improvement >= best_window.min_improvement);
 
-    let weather_icon = weather_icon_for(&in_window);
+    let weather_icon = weather_icon_for(&in_window).to_string();
 
     DayScore {
         window: day_window,
@@ -454,6 +455,7 @@ mod tests {
 
     fn nice_hour(time: DateTime<Utc>) -> HourlyConditions {
         HourlyConditions {
+            thunder: false,
             probability_of_precip: Some(5.0),
             ..HourlyConditions::minimal(time, 17.0, 2.0, 0.0)
         }
@@ -461,6 +463,7 @@ mod tests {
 
     fn awful_hour(time: DateTime<Utc>) -> HourlyConditions {
         HourlyConditions {
+            thunder: false,
             probability_of_precip: Some(95.0),
             ..HourlyConditions::minimal(time, 5.0, 11.0, 3.0)
         }
@@ -468,6 +471,7 @@ mod tests {
 
     fn sixhourly(time: DateTime<Utc>) -> HourlyConditions {
         HourlyConditions {
+            thunder: false,
             resolution: Resolution::SixHourly,
             ..nice_hour(time)
         }
@@ -679,6 +683,7 @@ mod tests {
         // Mildest, which would oversell a cold day.
         let mut hours: Vec<HourlyConditions> = (6..18)
             .map(|h| HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(5.0),
                 ..HourlyConditions::minimal(t(2026, 4, 26, h), 4.0, 2.0, 0.0)
             })
@@ -712,6 +717,7 @@ mod tests {
         // we want flagged as Mildest, not the hot spike.
         let mut hours: Vec<HourlyConditions> = (6..18)
             .map(|h| HourlyConditions {
+                thunder: false,
                 probability_of_precip: Some(5.0),
                 relative_humidity: Some(70.0),
                 ..HourlyConditions::minimal(t(2026, 4, 26, h), 17.0, 2.0, 0.0)
@@ -879,6 +885,7 @@ mod tests {
 
     fn with_clouds(time: DateTime<Utc>, cloud_pct: f64) -> HourlyConditions {
         HourlyConditions {
+            thunder: false,
             cloud_area_fraction: Some(cloud_pct),
             ..nice_hour(time)
         }
@@ -917,6 +924,7 @@ mod tests {
         // day as 🌧, even though the total is small.
         let mut hs: Vec<_> = (6..18)
             .map(|h| HourlyConditions {
+                thunder: false,
                 cloud_area_fraction: Some(90.0),
                 ..HourlyConditions::minimal(t(2026, 4, 26, h), 8.0, 2.0, 0.0)
             })
@@ -931,6 +939,7 @@ mod tests {
         // Wet all day at low intensity (0.3 mm/h × 12 h = 3.6 mm total).
         let hs: Vec<_> = (6..18)
             .map(|h| HourlyConditions {
+                thunder: false,
                 cloud_area_fraction: Some(90.0),
                 ..HourlyConditions::minimal(t(2026, 4, 26, h), 8.0, 2.0, 0.3)
             })
@@ -945,6 +954,7 @@ mod tests {
         // a non-event. Score sits in the 90s so the icon must agree.
         let mut hs: Vec<_> = (6..18)
             .map(|h| HourlyConditions {
+                thunder: false,
                 cloud_area_fraction: Some(60.0),
                 ..HourlyConditions::minimal(t(2026, 4, 26, h), 12.0, 2.0, 0.0)
             })
@@ -962,6 +972,7 @@ mod tests {
     fn weather_icon_snow_when_precip_and_freezing() {
         let mut hs: Vec<_> = (6..18)
             .map(|h| HourlyConditions {
+                thunder: false,
                 cloud_area_fraction: Some(90.0),
                 ..HourlyConditions::minimal(t(2026, 4, 26, h), -3.0, 2.0, 0.0)
             })
@@ -975,6 +986,7 @@ mod tests {
     fn weather_icon_wind_dominates_when_max_wind_above_10() {
         let hs: Vec<_> = (6..18)
             .map(|h| HourlyConditions {
+                thunder: false,
                 cloud_area_fraction: Some(20.0),
                 ..HourlyConditions::minimal(t(2026, 4, 26, h), 12.0, 11.0, 0.0)
             })
