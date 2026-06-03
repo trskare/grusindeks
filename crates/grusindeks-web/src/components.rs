@@ -290,8 +290,11 @@ pub fn Recommendation(
     let positive = penalties.is_empty().then(|| score_reason(breakdown, &[]));
     view! {
         <div class=format!("emboss rounded-2xl bg-gradient-to-br p-6 {}", soft_bg_class(total))>
-            <div class="flex items-start justify-between gap-4">
-                <div class="min-w-0">
+            <div class="flex items-stretch justify-between gap-4">
+                // Spread the eyebrow / verdict / summary across the row height so
+                // the block balances the taller verdict+gauge stack on the right
+                // (badge stays top-aligned with the pips; summary drops to fill).
+                <div class="flex min-w-0 flex-col justify-between gap-2">
                     // Horizon badge — makes the (otherwise invisible) 3-hour scope explicit.
                     <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                         <span class="inline-flex items-center gap-1 rounded-full bg-gruv-bg0/60 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-gruv-fg/80">
@@ -302,12 +305,20 @@ pub fn Recommendation(
                             {format!("· {place} · oppdatert {updated_str}")}
                         </span>
                     </div>
-                    <h2 class="mt-1.5 text-3xl font-semibold leading-tight tracking-tight">{cta}</h2>
-                    <p class="mt-1 text-sm text-gruv-fg/80">{summary}</p>
+                    <div>
+                        <h2 class="text-3xl font-semibold leading-tight tracking-tight">{cta}</h2>
+                        <p class="mt-1 text-sm text-gruv-fg/80">{summary}</p>
+                    </div>
                 </div>
-                <div class="flex shrink-0 items-center gap-2.5">
-                    {condition_pips(total)}
-                    <span class=chip_class(total)>{label}</span>
+                // Verdict stack (top-right): condition pips + label chip, and the
+                // next-3-hour index ring tucked underneath — sits beside the
+                // verdict text without adding a row on the left.
+                <div class="flex shrink-0 flex-col items-end gap-3">
+                    <div class="flex items-center gap-2.5">
+                        {condition_pips(total)}
+                        <span class=chip_class(total)>{label}</span>
+                    </div>
+                    <ScoreGauge total=total size=72/>
                 </div>
             </div>
 
@@ -379,30 +390,45 @@ pub fn Recommendation(
 }
 
 /// Radial score gauge: a ring filled to `total`% in the score colour, with the
-/// number and a verdict label in the middle.
+/// number (and, at larger sizes, an "indeks" label) in the middle. `size` is
+/// the rendered px diameter — all geometry/typography scales from it, so the
+/// same gauge works full-size in the Indeks section and shrunk on the card.
 #[component]
-pub fn ScoreGauge(total: u8) -> impl IntoView {
-    let r = 52.0_f64;
+pub fn ScoreGauge(total: u8, #[prop(default = 150_u32)] size: u32) -> impl IntoView {
+    let s = size as f64;
+    let c = s / 2.0;
+    let stroke = s * (13.0 / 150.0);
+    let r = s * (52.0 / 150.0);
     let circ = 2.0 * std::f64::consts::PI * r;
     let offset = circ * (1.0 - (total as f64 / 100.0));
     let hex = color::hex(total);
+    let num_px = s * 0.27;
+    // Scale the glow with the gauge so it stays proportional at small sizes.
+    let k = s / 150.0;
+    let (sh_y, sh_b1, sh_b2) = (4.0 * k, 12.0 * k, 8.0 * k);
+    // The "indeks" caption only earns its place on the big gauge; on the small
+    // card gauge the number alone (next to the verdict) is clear enough.
+    let show_label = size >= 110;
     view! {
         <div class="relative inline-grid place-items-center">
-            <svg width="150" height="150" viewBox="0 0 150 150" class="-rotate-90">
-                <circle cx="75" cy="75" r=r.to_string() fill="none" stroke="#504945" stroke-width="13"/>
+            // overflow-visible: the SVG viewport would otherwise clip the
+            // circular glow into a square at small sizes.
+            <svg width=size.to_string() height=size.to_string() viewBox=format!("0 0 {s} {s}") class="-rotate-90 overflow-visible">
+                <circle cx=c.to_string() cy=c.to_string() r=r.to_string() fill="none" stroke="#504945" stroke-width=stroke.to_string()/>
                 <circle
-                    cx="75" cy="75" r=r.to_string() fill="none"
-                    stroke=hex stroke-width="13" stroke-linecap="round"
+                    cx=c.to_string() cy=c.to_string() r=r.to_string() fill="none"
+                    stroke=hex stroke-width=stroke.to_string() stroke-linecap="round"
                     stroke-dasharray=circ.to_string()
                     stroke-dashoffset=offset.to_string()
-                    style=format!("transition: stroke-dashoffset 750ms cubic-bezier(0.23,1,0.32,1); filter: drop-shadow(0 4px 12px {hex}60) drop-shadow(0 0 8px {hex}45);")
+                    style=format!("transition: stroke-dashoffset 750ms cubic-bezier(0.23,1,0.32,1); filter: drop-shadow(0 {sh_y:.1}px {sh_b1:.1}px {hex}60) drop-shadow(0 0 {sh_b2:.1}px {hex}45);")
                 />
             </svg>
-            <div class="absolute text-center">
-                <div class=format!("text-4xl font-bold tabular-nums {}", color::text_class(total))>
+            <div class="absolute text-center leading-none">
+                <div class=format!("font-bold tabular-nums {}", color::text_class(total))
+                    style=format!("font-size:{num_px:.0}px")>
                     {total}
                 </div>
-                <div class="text-xs text-gruv-fg/60">"indeks"</div>
+                {show_label.then(|| view! { <div class="mt-1 text-xs text-gruv-fg/60">"indeks"</div> })}
             </div>
         </div>
     }

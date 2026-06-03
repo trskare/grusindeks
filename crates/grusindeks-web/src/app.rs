@@ -105,6 +105,22 @@ fn DashboardPage() -> impl IntoView {
         move || selected.get(),
         |place| async move { get_score(place, 3).await },
     );
+    // Rest-of-day aggregate for the Indeks section: a window from now to local
+    // midnight (≥1 h). The 3-hour `score` above still drives the "Kjør nå" card.
+    let rest_score = Resource::new(
+        move || selected.get(),
+        |place| async move {
+            let now = chrono::Local::now();
+            let end = now
+                .date_naive()
+                .succ_opt()
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+                .map(|m| (m - now.naive_local()).num_hours())
+                .unwrap_or(3)
+                .clamp(1, 24);
+            get_score(place, end).await
+        },
+    );
     let forecast = Resource::new(
         move || selected.get(),
         |place| async move { get_forecast(place, 6).await },
@@ -193,7 +209,6 @@ fn DashboardPage() -> impl IntoView {
                                     // chips, so the details card no longer repeats them.
                                     let penalties = c.score.penalties.clone();
                                     let breakdown = c.score.breakdown;
-                                    let highlights = c.score.highlights.clone();
                                     let stats = c.score.stats;
                                     let (sunrise, sunset) = agg.sun.map_or((None, None), |s| (s.sunrise, s.sunset));
                                     // Today's stand-out window, promoted from the multi-day strip.
@@ -240,6 +255,19 @@ fn DashboardPage() -> impl IntoView {
                                             (main, frac, format!("sol ned {set_hhmm}"))
                                         }
                                     });
+                                    // Rest-of-day aggregate for the Indeks section (gauge + bars
+                                    // + spread). Falls back to the 3-hour `agg` if it's not ready.
+                                    let rest = rest_score.await.ok();
+                                    let rest_center = rest
+                                        .as_ref()
+                                        .and_then(|r| r.points.iter().find(|p| p.is_center).or_else(|| r.points.first()));
+                                    let idx_mean = rest.as_ref().map_or(agg.mean, |r| r.mean);
+                                    let idx_min = rest.as_ref().map_or(agg.min, |r| r.min);
+                                    let idx_max = rest.as_ref().map_or(agg.max, |r| r.max);
+                                    let idx_points = rest.as_ref().map_or(agg.points.len(), |r| r.points.len());
+                                    let idx_breakdown = rest_center.map_or(c.score.breakdown, |p| p.score.breakdown);
+                                    let idx_highlights = rest_center
+                                        .map_or_else(|| c.score.highlights.clone(), |p| p.score.highlights.clone());
                                     let place = match selected.get_untracked() {
                                         p if !p.trim().is_empty() => p,
                                         _ => prefs
@@ -281,21 +309,21 @@ fn DashboardPage() -> impl IntoView {
                                                     })}
                                                 </Suspense>
 
-                                                // ── Indeks ──
+                                                // ── Indeks · resten av dagen ──
                                                 <div class="space-y-3">
-                                                    {section_band("Indeks")}
+                                                    {section_band("Indeks · resten av dagen")}
                                                     <div class="flex items-center gap-6">
-                                                        <ScoreGauge total=agg.mean/>
+                                                        <ScoreGauge total=idx_mean/>
                                                         <div class="flex-1">
-                                                            <SubscoreBars breakdown=c.score.breakdown/>
+                                                            <SubscoreBars breakdown=idx_breakdown/>
                                                             <p class="mt-3 text-sm text-gruv-fg/70">
-                                                                {format!("spenn {}–{} over {} punkter", agg.min, agg.max, agg.points.len())}
+                                                                {format!("spenn {}–{} over {} punkter", idx_min, idx_max, idx_points)}
                                                             </p>
                                                         </div>
                                                     </div>
-                                                    {(!highlights.is_empty()).then(|| view! {
+                                                    {(!idx_highlights.is_empty()).then(|| view! {
                                                         <div class="space-y-1 rounded-xl inset-well bg-gruv-bg0/45 p-3 text-sm text-gruv-blue">
-                                                            {highlights.into_iter().map(|h| view! { <p>{h}</p> }).collect_view()}
+                                                            {idx_highlights.into_iter().map(|h| view! { <p>{h}</p> }).collect_view()}
                                                         </div>
                                                     })}
                                                 </div>
