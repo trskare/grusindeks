@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 //! Leptos web GUI for grusindeks.
 //!
 //! The crate compiles two ways:

@@ -19,7 +19,9 @@ permissions:
 jobs:
   build:
     name: Build and push linux/arm64 image
-    runs-on: ubuntu-latest
+    # Build native ARM64. Building this Rust/Leptos image for ARM64 via QEMU on
+    # ubuntu-latest is extremely slow and can fail after several hours.
+    runs-on: ubuntu-24.04-arm
 
     steps:
       - name: Checkout

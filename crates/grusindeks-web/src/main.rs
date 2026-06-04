@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 //! Axum server entry point (ssr feature). Wires Leptos SSR + server functions
 //! and injects [`AppState`] into request context so server fns can reach the
 //! shared MET client and config.
