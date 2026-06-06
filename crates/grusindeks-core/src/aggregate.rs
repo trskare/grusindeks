@@ -39,6 +39,14 @@ pub struct AggregateScore {
     /// Frost was unavailable or the response contained no usable data.
     #[serde(default)]
     pub rain_history: Option<RainHistory>,
+    /// Current modelled surface water on the ground, in mm (0 ..=
+    /// `GROUND_SATURATED`). This is the drying model's *present* state —
+    /// what's actually on the gravel right now after rain, drainage and
+    /// drying — as opposed to `rain_history.total_mm`, which is the raw
+    /// rain that *fell* over the lookback window. `None` when no Frost
+    /// observations were available to seed the drying model.
+    #[serde(default)]
+    pub ground_water_mm: Option<f64>,
     /// Radar-based imminent-rain alert. `Some` when nowcast saw
     /// precipitation ≥ threshold in the next ~2 hours. `None` when nowcast
     /// wasn't fetched, the location is outside Norden, or the radar series
@@ -148,6 +156,7 @@ impl AggregateScore {
             max,
             points: scored,
             rain_history: None,
+            ground_water_mm: None,
             nowcast_alert: None,
             produced_at: None,
             sun: None,

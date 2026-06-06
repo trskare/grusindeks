@@ -128,6 +128,10 @@ pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<Ag
         .collect();
     let mut out = AggregateScore::from_points(inputs.center, scored, inputs.lang);
     out.rain_history = rain_history;
+    // Current modelled surface water on the ground (post rain/drainage/
+    // drying) — the "state of the ground right now", distinct from how much
+    // rain fell over the week.
+    out.ground_water_mm = surface.map(|s| s.accumulated_mm);
     out.nowcast_alert = nowcast
         .as_ref()
         .and_then(|n| build_nowcast_alert(n, Utc::now()));
@@ -907,7 +911,12 @@ where
             wind_from_deg: None,
             probability_of_precip: None,
             relative_humidity: h.humidity_pct.or(Some(70.0)),
-            cloud_area_fraction: Some(70.0),
+            // Real observed cloud cover when the station carries the sensor;
+            // a neutral 70 % overcast fallback otherwise. Previously this
+            // was hardcoded to 70 % for every hour, which pinned the solar
+            // drying term to its overcast floor and made a clear, sunny week
+            // dry the surface no faster than a grey one.
+            cloud_area_fraction: h.cloud_pct.or(Some(70.0)),
             uv_index_clear_sky: None,
             resolution: Resolution::Hourly,
         };
@@ -1421,6 +1430,7 @@ mod tests {
                 temp_c: None,
                 wind_ms: None,
                 humidity_pct: None,
+                cloud_pct: None,
             })
             .collect();
         let state = replay_into_state(&history, &DryingParams::default());
@@ -1443,6 +1453,7 @@ mod tests {
                 temp_c: Some(15.0),
                 wind_ms: Some(3.0),
                 humidity_pct: Some(50.0),
+                cloud_pct: None,
             },
             frost::HourlyObservation {
                 time: now,
@@ -1450,6 +1461,7 @@ mod tests {
                 temp_c: Some(15.0),
                 wind_ms: Some(3.0),
                 humidity_pct: Some(50.0),
+                cloud_pct: None,
             },
         ];
         let state = replay_into_state(&history, &DryingParams::default());
@@ -1478,6 +1490,7 @@ mod tests {
                 temp_c: Some(25.0),
                 wind_ms: Some(8.0),
                 humidity_pct: Some(40.0),
+                cloud_pct: None,
             })
             .collect();
         let damp_history: Vec<frost::HourlyObservation> = (0..6)
@@ -1487,6 +1500,7 @@ mod tests {
                 temp_c: Some(2.0),
                 wind_ms: Some(0.5),
                 humidity_pct: Some(95.0),
+                cloud_pct: None,
             })
             .collect();
         let p = DryingParams::default();
@@ -1498,6 +1512,62 @@ mod tests {
             dry_state.accumulated_mm,
             damp_state.accumulated_mm,
         );
+    }
+
+    #[test]
+    fn replay_uses_observed_cloud_cover_for_solar_drying() {
+        // Two histories identical in rain/temp/wind/humidity but with
+        // clear vs overcast skies. The clear-sky week must dry the surface
+        // more — the bug this fixes was a hardcoded 70% cloud that made
+        // every historic hour dry at the overcast rate regardless of sun.
+        let now = Utc::now();
+        // Light, continuous drizzle holds the surface at a wet equilibrium
+        // whose level is set by how fast it evaporates — which depends on
+        // cloud cover. Clearer skies → faster evaporation → a lower
+        // equilibrium. This isolates the solar term from the drainage of a
+        // one-off downpour (which would drain to 0 either way).
+        let make = |cloud: f64| -> Vec<frost::HourlyObservation> {
+            (0..24)
+                .map(|i| frost::HourlyObservation {
+                    time: now - Duration::hours(24 - i),
+                    precip_mm: Some(0.3),
+                    temp_c: Some(18.0),
+                    wind_ms: Some(2.0),
+                    humidity_pct: Some(55.0),
+                    cloud_pct: Some(cloud),
+                })
+                .collect()
+        };
+        let p = DryingParams::default();
+        let clear = replay_into_state(&make(5.0), &p);
+        let overcast = replay_into_state(&make(95.0), &p);
+        assert!(
+            clear.accumulated_mm < overcast.accumulated_mm,
+            "clear-sky week should leave the surface drier than an overcast one; \
+             got clear={}, overcast={}",
+            clear.accumulated_mm,
+            overcast.accumulated_mm,
+        );
+    }
+
+    #[test]
+    fn replay_cloud_fallback_when_station_has_no_cloud_sensor() {
+        // cloud_pct = None must not poison the replay — it falls back to the
+        // neutral overcast value and still produces a finite, sane state.
+        let now = Utc::now();
+        let history: Vec<frost::HourlyObservation> = (0..12)
+            .map(|i| frost::HourlyObservation {
+                time: now - Duration::hours(12 - i),
+                precip_mm: Some(if i == 0 { 2.0 } else { 0.0 }),
+                temp_c: Some(15.0),
+                wind_ms: Some(3.0),
+                humidity_pct: Some(60.0),
+                cloud_pct: None,
+            })
+            .collect();
+        let state = replay_into_state(&history, &DryingParams::default());
+        assert!(state.accumulated_mm.is_finite());
+        assert!((0.0..=5.0).contains(&state.accumulated_mm));
     }
 
     // ---- compute_rain_history ----
@@ -1520,6 +1590,7 @@ mod tests {
                 temp_c: None,
                 wind_ms: None,
                 humidity_pct: None,
+                cloud_pct: None,
             })
             .collect();
         let h = compute_rain_history(&history, 168).expect("Some for non-empty input");
@@ -1541,6 +1612,7 @@ mod tests {
                 temp_c: None,
                 wind_ms: None,
                 humidity_pct: None,
+                cloud_pct: None,
             });
         }
         history.push(frost::HourlyObservation {
@@ -1549,6 +1621,7 @@ mod tests {
             temp_c: None,
             wind_ms: None,
             humidity_pct: None,
+            cloud_pct: None,
         });
         let h = compute_rain_history(&history, 168).expect("Some");
         assert_eq!(h.rain_days, 2);
@@ -1576,6 +1649,7 @@ mod tests {
                 temp_c: None,
                 wind_ms: None,
                 humidity_pct: None,
+                cloud_pct: None,
             })
             .collect();
         let h = compute_rain_history(&history, 168).expect("Some");
@@ -1605,6 +1679,7 @@ mod tests {
             temp_c: None,
             wind_ms: None,
             humidity_pct: None,
+            cloud_pct: None,
         }];
         let h = compute_rain_history(&history, 168).expect("Some");
         assert_eq!(h.rain_days, 1);
@@ -1630,6 +1705,7 @@ mod tests {
             temp_c: Some(20.0),
             wind_ms: Some(5.0),
             humidity_pct: Some(40.0),
+            cloud_pct: None,
         }];
         let h = compute_rain_history(&history, 168).expect("Some");
         assert_eq!(
@@ -1651,6 +1727,7 @@ mod tests {
                 temp_c: None,
                 wind_ms: None,
                 humidity_pct: None,
+                cloud_pct: None,
             })
             .collect();
         let state = replay_into_state(&history, &DryingParams::default());
@@ -1672,6 +1749,7 @@ mod tests {
                 temp_c: None,
                 wind_ms: None,
                 humidity_pct: None,
+                cloud_pct: None,
             })
             .collect();
         // One real rain hour 96h ago.
@@ -1745,10 +1823,15 @@ mod tests {
     #[test]
     fn projection_wets_ground_after_forecast_rain() {
         let initial = SurfaceState::default();
-        // Day 0 dry, day 1 has heavy rain hours 24..30, day 2 dry again.
-        let mut hours: Vec<HourlyConditions> = (0..24).map(dry_hour).collect();
-        hours.extend((24..30).map(|h| rainy_hour(h, 2.0)));
-        hours.extend((30..72).map(dry_hour));
+        // Dry until the tail of day 1, then heavy rain in hours 42..48 — i.e.
+        // immediately before the day-2 snapshot. (Placing the rain right
+        // before the snapshot matters now that gravel drainage clears the
+        // surface within hours: a downpour 18 h earlier would already have
+        // drained away by the snapshot, which is the *correct* new
+        // behaviour — see `projection_ground_drains_within_hours`.)
+        let mut hours: Vec<HourlyConditions> = (0..42).map(dry_hour).collect();
+        hours.extend((42..48).map(|h| rainy_hour(h, 2.0)));
+        hours.extend((48..72).map(dry_hour));
         let day_starts = vec![ts(0), ts(24), ts(48)];
         let states =
             project_states_for_days(initial, &hours, &day_starts, &DryingParams::default());
@@ -1759,8 +1842,29 @@ mod tests {
         );
         assert!(
             states[2].accumulated_mm > 0.0,
-            "day after tomorrow: rain has fallen, ground is wet — got {:?}",
+            "day after tomorrow: rain just fell, ground is wet — got {:?}",
             states[2]
+        );
+    }
+
+    #[test]
+    fn projection_ground_drains_within_hours_not_days() {
+        // Regression guard for the gravel-drainage fix: a heavy downpour
+        // followed by a full day of dry weather must leave the surface dry
+        // by the next day's snapshot. Before drainage, slow evaporation
+        // alone kept the bucket "wet" for days, which is what made the score
+        // report a soaked surface long after the gravel had drained.
+        let initial = SurfaceState::default();
+        let mut hours: Vec<HourlyConditions> = (0..6).map(|h| rainy_hour(h, 3.0)).collect();
+        hours.extend((6..48).map(dry_hour));
+        let day_starts = vec![ts(0), ts(24)];
+        let states =
+            project_states_for_days(initial, &hours, &day_starts, &DryingParams::default());
+        // ~18 dry hours after the rain ends (rain 0..6, snapshot at ts(24)).
+        assert_eq!(
+            states[1].accumulated_mm, 0.0,
+            "gravel should have drained dry within a day; got {:?}",
+            states[1],
         );
     }
 

@@ -245,10 +245,11 @@ pub fn Recommendation(
     /// clock when the server didn't stamp it. Also anchors the "neste 3 timer"
     /// horizon badge (start → start + 3 h).
     updated: Option<DateTime<Utc>>,
-    /// Recent ground wetness for the "underlag" stats tile: cumulative
-    /// precipitation (mm) over the rain-history lookback, and that lookback in
-    /// hours. `None` hides the tile (Frost not configured / no data).
-    ground: Option<(f64, i64)>,
+    /// Current ground state for the "underlag" stats tile: the drying model's
+    /// surface water *right now* in mm (0 ..= `GROUND_SATURATED`), after rain,
+    /// drainage and drying. `None` hides the tile (Frost not configured / no
+    /// data).
+    ground: Option<f64>,
     /// Daylight-left for the "dagslys" stats tile: `(value, bar_pct, caption)`.
     /// `None` hides the tile (no sun data).
     daylight: Option<(String, Option<f64>, String)>,
@@ -434,12 +435,30 @@ pub fn ScoreGauge(total: u8, #[prop(default = 150_u32)] size: u32) -> impl IntoV
     }
 }
 
-/// Full-bar point for the "underlag" (recent ground water) tile, in mm of
-/// cumulative precipitation over `rain_history`'s lookback window (~7 days).
-/// This is the raw weekly *input*, NOT the drying model's surface accumulator
-/// (which saturates at `GROUND_SATURATED` = 5 mm of post-drying standing
-/// water) — so the scale is larger: ~25 mm reads as a thoroughly soaked week.
-const GROUND_BAR_MAX_MM: f64 = 25.0;
+/// Full-bar point for the "underlag" tile: the drying model's current surface
+/// water saturates at `GROUND_SATURATED` (5 mm of standing water), so the bar
+/// fills toward that. This is the *state of the ground right now*, not the
+/// rain that fell over the week.
+const GROUND_BAR_MAX_MM: f64 = grusindeks_core::score::thresholds::GROUND_SATURATED;
+
+/// A one-word description of the surface water state, for the "underlag" tile
+/// caption. Mirrors the ground-subscore's shape: bone-dry < lett fuktig
+/// (the optimum) < fuktig < våt < gjennomvåt.
+fn ground_state_word(mm: f64) -> &'static str {
+    use grusindeks_core::score::thresholds::{GROUND_OPTIMAL_MM, GROUND_SATURATED};
+    if mm < GROUND_OPTIMAL_MM * 0.25 {
+        "tørt"
+    } else if mm <= GROUND_OPTIMAL_MM * 1.5 {
+        // Around the damp optimum where gravel packs and rolls best.
+        "lett fuktig"
+    } else if mm < GROUND_SATURATED * 0.5 {
+        "fuktig"
+    } else if mm < GROUND_SATURATED * 0.9 {
+        "vått"
+    } else {
+        "gjennomvått"
+    }
+}
 
 /// Bar fill colour for the "underlag" tile — interpolates from muted gruv-blue
 /// (barely wet) toward the deeper, more saturated gruv-aqua (soaked), so a
@@ -465,7 +484,7 @@ fn ground_fill_color(frac: f64) -> String {
 #[component]
 pub fn WindowStatsRow(
     stats: WindowStats,
-    ground: Option<(f64, i64)>,
+    ground: Option<f64>,
     daylight: Option<(String, Option<f64>, String)>,
 ) -> impl IntoView {
     if stats.is_empty() {
@@ -521,20 +540,21 @@ pub fn WindowStatsRow(
                 {icons::cloud_rain(icon, Some("Nedbør"))}
                 <span class=metric>{rain}</span>
             </div>
-            // Recent ground water: mm fallen over the lookback window, with a
-            // bar that fills toward GROUND_BAR_MAX_MM (a soaked week).
-            {ground.map(|(mm, hours)| {
-                let days = (hours as f64 / 24.0).round().max(1.0) as i64;
+            // Current ground state: surface water on the gravel right now,
+            // with a bar that fills toward GROUND_BAR_MAX_MM (saturated).
+            {ground.map(|mm| {
+                let mm = mm.max(0.0);
+                let word = ground_state_word(mm);
                 let pct = ((mm / GROUND_BAR_MAX_MM) * 100.0).clamp(0.0, 100.0);
                 view! {
                     <div class=cell>
                         {icons::mountain(icon, Some("Underlag"))}
-                        <span class=metric>{format!("{mm:.0} mm")}</span>
+                        <span class=metric>{format!("{mm:.1} mm")}</span>
                         <span class="block h-1.5 w-full overflow-hidden rounded-full bg-gruv-bg2/60">
                             <span class="block h-full rounded-full"
                                 style=format!("width:{pct:.0}%; background-color:{}; transition: width 700ms cubic-bezier(0.22,1,0.36,1)", ground_fill_color(pct / 100.0))></span>
                         </span>
-                        <span class=cap>{format!("underlag · {days} d")}</span>
+                        <span class=cap>{format!("på bakken · {word}")}</span>
                     </div>
                 }
             })}

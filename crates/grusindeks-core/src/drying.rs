@@ -4,8 +4,9 @@
 //!
 //! Each simulated hour caps incoming precipitation at `GROUND_SATURATED`
 //! (gravel drains overflow into runoff that the model doesn't track),
-//! then subtracts a drying-rate that depends on temperature, wind,
-//! sunshine, and humidity. In parallel we keep
+//! then **drains** the free water above field capacity (gravel sheds water
+//! within hours, not days), then subtracts an evaporative drying-rate that
+//! depends on temperature, wind, sunshine, and humidity. In parallel we keep
 //! `hours_since_meaningful_rain`, which resets whenever the post-drying
 //! accumulator clears `SURFACE_WETTED_MM` and otherwise increments by
 //! one each step. The scoring layer uses that to flag flerdøgnstørke.
@@ -50,8 +51,9 @@ pub const FROST_FACTOR: f64 = 0.1;
 /// source of truth lives in `felt_temp::UV_NORDIC_PEAK` (= 7.0).
 pub use crate::felt_temp::UV_NORDIC_PEAK;
 
-/// Coefficients for the per-hour drying rate (mm/h). Exposed so tests and
-/// future calibration can override them without forking the function.
+/// Coefficients for the per-hour drying rate (mm/h) and the gravel
+/// drainage term. Exposed so tests and future calibration can override
+/// them without forking the function.
 #[derive(Debug, Clone, Copy)]
 pub struct DryingParams {
     pub base: f64,
@@ -61,6 +63,18 @@ pub struct DryingParams {
     pub per_pct_humidity_above_50: f64,
     pub min_rate: f64,
     pub max_rate: f64,
+    /// Surface water (mm) that the gravel holds onto against gravity —
+    /// capillary-retained "damp" that only leaves by evaporation, not
+    /// drainage. Water *above* this level is free water that drains/
+    /// infiltrates within hours (see [`DryingParams::drainage_fraction`]).
+    /// Aligned with the ground-score's damp optimum so a freshly-drained
+    /// surface settles toward "lett fuktig" rather than bone-dry.
+    pub field_capacity_mm: f64,
+    /// Fraction of the *free* water (the part above `field_capacity_mm`)
+    /// that drains away each hour. Gravel sheds water fast — without this
+    /// the model only lost water to slow evaporation and kept the surface
+    /// "wet" for days after the gravel had actually drained dry.
+    pub drainage_fraction: f64,
 }
 
 impl Default for DryingParams {
@@ -73,6 +87,8 @@ impl Default for DryingParams {
             per_pct_humidity_above_50: 0.005,
             min_rate: 0.0,
             max_rate: 1.5,
+            field_capacity_mm: 0.4,
+            drainage_fraction: 0.5,
         }
     }
 }
@@ -187,11 +203,19 @@ pub fn drying_rate(h: &HourlyConditions, p: &DryingParams) -> f64 {
 ///
 /// Order: cap incoming `accumulated + precip` at `GROUND_SATURATED`
 /// (overflow is treated as runoff that the model doesn't track), then
-/// subtract drying. Capping at the input — not after drying — makes the
-/// "vann forsvinner ut av regnskapet"-semantikk eksplisitt and avoids
-/// having two scenarios with very different physical meaning (a 50 mm
-/// deluge vs 5 hours of light rain) collapse to identical post-drying
-/// states.
+/// **drain** free water, then subtract evaporative drying. Capping at the
+/// input — not after drying — makes the "vann forsvinner ut av
+/// regnskapet"-semantikk eksplisitt and avoids having two scenarios with
+/// very different physical meaning (a 50 mm deluge vs 5 hours of light
+/// rain) collapse to identical post-drying states.
+///
+/// Drainage models the fact that gravel sheds water fast: the part of the
+/// surface water above `field_capacity_mm` is *free* water that infiltrates
+/// / runs off, and `drainage_fraction` of it leaves each hour. Water at or
+/// below field capacity is capillary-held "damp" that only evaporation can
+/// remove. Drainage is gated by frost the same way evaporation is — when
+/// the surface is below freezing the water is ice and neither drains nor
+/// evaporates appreciably (only the slow sublimation in `drying_rate`).
 ///
 /// Non-finite inputs are sanitised: NaN precipitation is treated as 0,
 /// NaN temperature/wind/humidity are treated as neutral by `drying_rate`.
@@ -202,7 +226,17 @@ pub fn drying_rate(h: &HourlyConditions, p: &DryingParams) -> f64 {
 pub fn drying_step(state: SurfaceState, h: &HourlyConditions, p: &DryingParams) -> SurfaceState {
     let precip = finite_or(h.precipitation_mm, 0.0).max(0.0);
     let after_rain = (state.accumulated_mm + precip).min(GROUND_SATURATED);
-    let after_drying = (after_rain - drying_rate(h, p)).max(0.0);
+    // Drain free water (above field capacity). Frozen surfaces don't drain
+    // — the water is locked up as ice — so mirror the frost gate that
+    // `drying_rate` applies to evaporation.
+    let temp_c = finite_or(h.temperature_c, 0.0);
+    let after_drainage = if temp_c < 0.0 {
+        after_rain
+    } else {
+        let free = (after_rain - p.field_capacity_mm).max(0.0);
+        after_rain - free * p.drainage_fraction.clamp(0.0, 1.0)
+    };
+    let after_drying = (after_drainage - drying_rate(h, p)).max(0.0);
     let hours_since_meaningful_rain = if after_drying >= SURFACE_WETTED_MM {
         0.0
     } else {
@@ -344,15 +378,18 @@ mod tests {
 
     #[test]
     fn rain_adds_water_during_step() {
-        // Rainy conditions push drying near zero (humid, no sun) — what we
-        // care about is that the precipitation makes it into the bucket.
+        // Rainy conditions push evaporation near zero (humid, no sun) — what
+        // we care about is that the precipitation makes it into the bucket.
+        // Drainage sheds part of the free water within the hour, so 2 mm of
+        // rain leaves less than 2 mm standing, but clearly more than the
+        // field-capacity floor.
         let p = DryingParams::default();
         let s = SurfaceState::new(0.0);
         let h = rainy_hour(0, 2.0);
         let s2 = drying_step(s, &h, &p);
         assert!(
-            s2.accumulated_mm > 1.5,
-            "rain should add water; got {}",
+            s2.accumulated_mm > p.field_capacity_mm,
+            "rain should add water above field capacity; got {}",
             s2.accumulated_mm
         );
         assert!(s2.accumulated_mm <= 2.0);
@@ -454,11 +491,25 @@ mod tests {
     }
 
     #[test]
-    fn replay_continuous_rain_yields_saturated() {
+    fn replay_continuous_rain_yields_wet_surface() {
+        // With gravel drainage, continuous heavy rain no longer ponds all
+        // the way to the saturation cap — free water drains each hour and
+        // the surface settles at a wet equilibrium well above field
+        // capacity. That's the physically honest result: the gravel is
+        // soaked, but it isn't holding 5 mm of standing water. The
+        // active-rain ceiling in the scorer handles "it's pouring right
+        // now" separately.
         let p = DryingParams::default();
         let history: Vec<_> = (0..24).map(|h| rainy_hour(h % 24, 3.0)).collect();
         let final_state = replay(SurfaceState::new(0.0), &history, &p);
-        assert!(final_state.is_saturated());
+        assert!(
+            final_state.accumulated_mm > 2.0,
+            "continuous 3 mm/h rain should leave the surface clearly wet; got {}",
+            final_state.accumulated_mm,
+        );
+        // And the ground subscore for that wetness should be poor — well
+        // below the 80-point "no penalty" line.
+        assert!(crate::score::ground_subscore(final_state.accumulated_mm) <= 50);
     }
 
     #[test]
@@ -511,12 +562,13 @@ mod tests {
 
     #[test]
     fn replay_drought_counter_picks_up_from_last_rain() {
-        // 24 h of solid rain (saturates the surface to 5 mm), then 100 h
-        // of warm dry hours. The drying model takes ~17 hours to push
-        // the surface below SURFACE_WETTED_MM, during which the counter
-        // keeps resetting; afterwards it climbs each hour. Allow a wide
-        // band — the exact value depends on the drying-rate
-        // coefficients, which we don't want this test to lock down.
+        // 24 h of solid rain (wets the surface), then 100 h of warm dry
+        // hours. With drainage the surface clears SURFACE_WETTED_MM within
+        // a few hours of the rain stopping, so the counter resets for only
+        // that short tail and then climbs each hour — landing near (but
+        // below) the full 100 h. Allow a wide band: the exact value depends
+        // on the drainage + drying coefficients, which we don't want this
+        // test to lock down.
         let p = DryingParams::default();
         let mut history: Vec<HourlyConditions> = (0..24).map(|h| rainy_hour(h, 2.0)).collect();
         history.extend((24..124).map(|h| dry_hour(h % 24)));
@@ -613,19 +665,24 @@ mod tests {
     // ---- Variant B: cap at input ----
 
     #[test]
-    fn step_excess_rain_is_treated_as_runoff_at_input() {
+    fn step_excess_rain_runs_off_at_input_then_drains() {
         // 4 mm bucket + 50 mm rain → capped to GROUND_SATURATED *before*
-        // drying applies, so drying actually reduces from the cap. The
-        // drought counter resets because the post-drying state is still
-        // above SURFACE_WETTED_MM.
+        // anything else (overflow is runoff the model doesn't track). Then
+        // drainage sheds the free water above field capacity within the
+        // hour, so the post-step surface sits well below the cap — but the
+        // surface is still soaked, so the drought counter resets.
         let p = DryingParams::default();
         let s = SurfaceState::new(4.0);
         let h = rainy_hour(0, 50.0);
         let s2 = drying_step(s, &h, &p);
         assert!(s2.accumulated_mm <= GROUND_SATURATED);
+        // From a 5 mm cap, one hour of drainage removes drainage_fraction of
+        // the free water (5 − 0.4 = 4.6 mm), leaving ≈ 2.7 mm.
+        let expected =
+            GROUND_SATURATED - (GROUND_SATURATED - p.field_capacity_mm) * p.drainage_fraction;
         assert!(
-            s2.accumulated_mm >= GROUND_SATURATED - 1.0,
-            "drying from cap shouldn't lose more than ~1 mm/h; got {}",
+            (s2.accumulated_mm - expected).abs() < 0.2,
+            "expected ≈{expected:.2} mm after one hour of drainage from the cap; got {}",
             s2.accumulated_mm,
         );
         assert_eq!(s2.hours_since_meaningful_rain, 0.0);
@@ -701,6 +758,154 @@ mod tests {
         assert!(
             ratio < 3.0,
             "sqrt wind should give ratio ~2 (got {ratio}); linear would be 4",
+        );
+    }
+
+    // ---- Cloud cover drives the solar drying term ----
+
+    /// Build an hour fixing every drying input except the one under test,
+    /// so a single-variable sweep is unambiguous.
+    fn hour_with(
+        temp: f64,
+        wind: f64,
+        humidity: f64,
+        cloud: Option<f64>,
+        uv: Option<f64>,
+        precip: f64,
+    ) -> HourlyConditions {
+        HourlyConditions {
+            thunder: false,
+            cloud_area_fraction: cloud,
+            uv_index_clear_sky: uv,
+            relative_humidity: Some(humidity),
+            ..HourlyConditions::minimal(t(0), temp, wind, precip)
+        }
+    }
+
+    #[test]
+    fn clear_sky_dries_faster_than_overcast_without_uv() {
+        // Cloud-only fallback path (no UV, as in the Frost replay): less
+        // cloud must mean more solar drying. This is exactly the signal the
+        // old hardcoded-70%-cloud replay threw away.
+        let p = DryingParams::default();
+        let clear = drying_rate(&hour_with(18.0, 3.0, 50.0, Some(5.0), None, 0.0), &p);
+        let overcast = drying_rate(&hour_with(18.0, 3.0, 50.0, Some(95.0), None, 0.0), &p);
+        assert!(
+            clear > overcast,
+            "clear sky should dry faster than overcast (clear={clear}, overcast={overcast})",
+        );
+    }
+
+    #[test]
+    fn drying_rate_monotonic_across_conditions() {
+        // Single-variable sweeps: warmer, windier, drier-air, and clearer
+        // each strictly increase the rate; humidity decreases it.
+        let p = DryingParams::default();
+        let base = drying_rate(&hour_with(15.0, 3.0, 60.0, Some(50.0), None, 0.0), &p);
+        let warmer = drying_rate(&hour_with(25.0, 3.0, 60.0, Some(50.0), None, 0.0), &p);
+        let windier = drying_rate(&hour_with(15.0, 8.0, 60.0, Some(50.0), None, 0.0), &p);
+        let drier_air = drying_rate(&hour_with(15.0, 3.0, 30.0, Some(50.0), None, 0.0), &p);
+        let clearer = drying_rate(&hour_with(15.0, 3.0, 60.0, Some(10.0), None, 0.0), &p);
+        let humid = drying_rate(&hour_with(15.0, 3.0, 95.0, Some(50.0), None, 0.0), &p);
+        assert!(warmer > base, "warmer should dry faster");
+        assert!(windier > base, "windier should dry faster");
+        assert!(drier_air > base, "drier air should dry faster");
+        assert!(clearer > base, "clearer sky should dry faster");
+        assert!(humid < base, "humid air should dry slower");
+    }
+
+    // ---- Gravel drainage ----
+
+    #[test]
+    fn saturated_surface_drains_within_hours() {
+        // A saturated surface on a cool, humid, calm day (evaporation ≈ 0)
+        // must still shed most of its water within a handful of hours — that
+        // shedding is drainage, not evaporation. Before the drainage term,
+        // this surface would have stayed near-saturated for days.
+        let p = DryingParams::default();
+        // Cool/humid/calm → drying_rate clamps to ~0, isolating drainage.
+        let damp_cool = hour_with(6.0, 1.0, 95.0, Some(95.0), None, 0.0);
+        let mut s = SurfaceState::new(GROUND_SATURATED);
+        for _ in 0..6 {
+            s = drying_step(s, &damp_cool, &p);
+        }
+        assert!(
+            s.accumulated_mm < 1.0,
+            "6 h of drainage should clear a saturated surface to < 1 mm even with ~zero evaporation; got {}",
+            s.accumulated_mm,
+        );
+    }
+
+    #[test]
+    fn drainage_does_not_touch_water_at_or_below_field_capacity() {
+        // Water at field capacity is capillary-held "damp" — drainage leaves
+        // it alone, so it can only fall via evaporation. With evaporation
+        // pinned to ~0 (cool/humid/calm) the damp level must be preserved.
+        let p = DryingParams::default();
+        let damp_cool = hour_with(6.0, 1.0, 95.0, Some(95.0), None, 0.0);
+        let s = SurfaceState::new(p.field_capacity_mm);
+        let s2 = drying_step(s, &damp_cool, &p);
+        assert!(
+            (s2.accumulated_mm - p.field_capacity_mm).abs() < 1e-9,
+            "field-capacity water must not drain; got {}",
+            s2.accumulated_mm,
+        );
+    }
+
+    #[test]
+    fn frozen_surface_does_not_drain() {
+        // Water locked up as ice neither evaporates nor drains. A saturated,
+        // frozen surface must hold its water across many hours.
+        let p = DryingParams::default();
+        let frozen = hour_with(-5.0, 4.0, 80.0, Some(50.0), None, 0.0);
+        let mut s = SurfaceState::new(GROUND_SATURATED);
+        for _ in 0..12 {
+            s = drying_step(s, &frozen, &p);
+        }
+        assert!(
+            s.accumulated_mm > GROUND_SATURATED - 0.5,
+            "frozen surface should retain ~all of its water (no drainage); got {}",
+            s.accumulated_mm,
+        );
+    }
+
+    #[test]
+    fn drainage_makes_recovery_much_faster_than_evaporation_alone() {
+        // Same wet surface and same weather, with vs without drainage. The
+        // drained surface must recover dramatically faster — this is the
+        // whole point of the fix.
+        let with_drainage = DryingParams::default();
+        let no_drainage = DryingParams {
+            drainage_fraction: 0.0,
+            ..DryingParams::default()
+        };
+        // A mild, partly-cloudy day after the rain.
+        let day: Vec<HourlyConditions> = (0..12)
+            .map(|h| HourlyConditions {
+                thunder: false,
+                cloud_area_fraction: Some(40.0),
+                uv_index_clear_sky: None,
+                relative_humidity: Some(65.0),
+                ..HourlyConditions::minimal(t(h % 24), 14.0, 3.0, 0.0)
+            })
+            .collect();
+        let drained = replay(SurfaceState::new(GROUND_SATURATED), &day, &with_drainage);
+        let evap_only = replay(SurfaceState::new(GROUND_SATURATED), &day, &no_drainage);
+        assert!(
+            drained.accumulated_mm < evap_only.accumulated_mm,
+            "drainage should recover faster (drained={}, evap_only={})",
+            drained.accumulated_mm,
+            evap_only.accumulated_mm,
+        );
+        assert!(
+            drained.accumulated_mm < 0.5,
+            "with drainage the surface should be near-dry after 12 h; got {}",
+            drained.accumulated_mm,
+        );
+        assert!(
+            evap_only.accumulated_mm > 1.0,
+            "evaporation alone should still leave the surface wet after 12 h; got {}",
+            evap_only.accumulated_mm,
         );
     }
 }

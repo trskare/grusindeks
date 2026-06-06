@@ -232,9 +232,10 @@ fn DashboardPage() -> impl IntoView {
                                             == now.with_timezone(&chrono::Local).date_naive()
                                     });
                                     let produced_at = agg.produced_at;
-                                    // Recent ground water for the "underlag" stats tile —
-                                    // shown whenever Frost data exists.
-                                    let ground = agg.rain_history.as_ref().map(|rh| (rh.total_mm, rh.lookback_hours));
+                                    // Current ground state for the "underlag" stats tile: the
+                                    // drying model's surface water *right now* (after rain,
+                                    // drainage and drying), not the rain that fell over the week.
+                                    let ground = agg.ground_water_mm;
                                     // Daylight-left for the "dagslys" stats tile: (value, bar
                                     // fraction 0–100, caption). After sunset it's a muted
                                     // "Mørkt" with no bar. `None` (no sun data) hides the tile.
