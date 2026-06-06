@@ -249,7 +249,7 @@ pub fn Recommendation(
     /// surface water *right now* in mm (0 ..= `GROUND_SATURATED`), after rain,
     /// drainage and drying. `None` hides the tile (Frost not configured / no
     /// data).
-    ground: Option<f64>,
+    ground: Option<(f64, bool)>,
     /// Daylight-left for the "dagslys" stats tile: `(value, bar_pct, caption)`.
     /// `None` hides the tile (no sun data).
     daylight: Option<(String, Option<f64>, String)>,
@@ -484,7 +484,7 @@ fn ground_fill_color(frac: f64) -> String {
 #[component]
 pub fn WindowStatsRow(
     stats: WindowStats,
-    ground: Option<f64>,
+    ground: Option<(f64, bool)>,
     daylight: Option<(String, Option<f64>, String)>,
 ) -> impl IntoView {
     if stats.is_empty() {
@@ -542,9 +542,11 @@ pub fn WindowStatsRow(
             </div>
             // Current ground state: surface water on the gravel right now,
             // with a bar that fills toward GROUND_BAR_MAX_MM (saturated).
-            {ground.map(|mm| {
+            {ground.map(|(mm, snow)| {
                 let mm = mm.max(0.0);
-                let word = ground_state_word(mm);
+                // Snow on the ground makes the surface-water model unreliable
+                // (no snowpack model) — say so instead of a misleading mm word.
+                let word = if snow { "snø? usikkert".to_string() } else { format!("på bakken · {}", ground_state_word(mm)) };
                 let pct = ((mm / GROUND_BAR_MAX_MM) * 100.0).clamp(0.0, 100.0);
                 view! {
                     <div class=cell>
@@ -554,7 +556,7 @@ pub fn WindowStatsRow(
                             <span class="block h-full rounded-full"
                                 style=format!("width:{pct:.0}%; background-color:{}; transition: width 700ms cubic-bezier(0.22,1,0.36,1)", ground_fill_color(pct / 100.0))></span>
                         </span>
-                        <span class=cap>{format!("på bakken · {word}")}</span>
+                        <span class=cap>{word}</span>
                     </div>
                 }
             })}

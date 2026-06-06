@@ -94,7 +94,7 @@ pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<Ag
     // can render as "ukjent" instead of silently masquerading as
     // "akkurat regnet" (which is what `SurfaceState::default()` would
     // imply).
-    let (surface, rain_history) = fetch_ground_state(
+    let (surface, rain_history, snow_suspected) = fetch_ground_state(
         client,
         inputs.frost_source_id,
         inputs.history_hours,
@@ -140,6 +140,9 @@ pub async fn run_score(client: &MetClient, inputs: ScoreInputs<'_>) -> Result<Ag
     // drying) — the "state of the ground right now", distinct from how much
     // rain fell over the week.
     out.ground_water_mm = surface.map(|s| s.accumulated_mm);
+    // Snow on the ground makes the drying model's ground axis unreliable
+    // (no snowpack model) — flag it so renderers can mark the score uncertain.
+    out.snow_suspected = snow_suspected;
     out.nowcast_alert = nowcast
         .as_ref()
         .and_then(|n| build_nowcast_alert(n, Utc::now()));
@@ -185,7 +188,7 @@ pub async fn run_forecast(
 ) -> Result<MultiDayForecast> {
     let points = sample_around(inputs.center, inputs.radius_km);
 
-    let (surface, rain_history) = fetch_ground_state(
+    let (surface, rain_history, _snow) = fetch_ground_state(
         client,
         inputs.frost_source_id,
         inputs.history_hours,
@@ -291,7 +294,7 @@ pub struct HourlyInputs<'a> {
 pub async fn run_hourly(client: &MetClient, inputs: HourlyInputs<'_>) -> Result<HourlyForecast> {
     let points = sample_around(inputs.center, inputs.radius_km);
 
-    let (surface, rain_history) = fetch_ground_state(
+    let (surface, rain_history, _snow) = fetch_ground_state(
         client,
         inputs.frost_source_id,
         inputs.history_hours,
@@ -501,10 +504,12 @@ fn hour_bucket_starts(
 /// since by convention `drying_step` advances by exactly one hour.
 ///
 /// Forecast gaps (rare — locationforecast already spreads 6h buckets to
-/// hourly records) are tolerated by simply skipping. Adding synthetic
-/// dry filler the way `replay_into_state` does would over-credit drying
-/// across a missing block; better to under-credit and accept the small
-/// drift.
+/// hourly records) are tolerated by simply skipping. This is intentionally
+/// asymmetric with the historical replay ([`replay_for_each`]), which fills
+/// missing hours to age the drought counter: there, the elapsed time is real
+/// and must be accounted for; here a forecast hole is just absent data with
+/// no extra time to credit, so skipping (and accepting a small drift) is the
+/// honest choice.
 fn project_states_for_days(
     initial: SurfaceState,
     hours: &[HourlyConditions],
@@ -720,12 +725,12 @@ async fn fetch_ground_state(
     center: Point,
     params: DryingParams,
     progress: &dyn ProgressSink,
-) -> (Option<SurfaceState>, Option<RainHistory>) {
+) -> (Option<SurfaceState>, Option<RainHistory>, bool) {
     let Some(src) = frost_source_id else {
-        return (None, None);
+        return (None, None, false);
     };
     if client.config().frost_client_id.is_none() {
-        return (None, None);
+        return (None, None, false);
     }
     progress.ground_started();
     let to: DateTime<Utc> = Utc::now();
@@ -740,15 +745,39 @@ async fn fetch_ground_state(
             let surface = replay_into_state(history, &params, location);
             let rain =
                 compute_rain_history_in_tz(history, history_hours, &Local, location, &params);
-            (Some(surface), rain)
+            (Some(surface), rain, snow_suspected(history))
         }
         Err(e) => {
             tracing::warn!("frost lookup failed, ground state will be reported as unknown: {e}",);
-            (None, None)
+            (None, None, false)
         }
     };
     progress.ground_finished(outcome.0.is_some());
     outcome
+}
+
+/// Minimum sub-zero precipitation (mm) over the lookback before we suspect
+/// snow on the ground.
+const SNOW_SUSPECT_FROZEN_PRECIP_MM: f64 = 3.0;
+
+/// Coarse heuristic: does the recent history suggest snow lying on the ground?
+/// The drying model deliberately doesn't track a snowpack, so we *flag* the
+/// case (so renderers can mark the ground score uncertain) rather than try to
+/// model it. True when a meaningful amount of precipitation fell while the air
+/// was at/below freezing *and* the surface is still cold — i.e. it likely fell
+/// as snow and hasn't melted yet. Conservative by design.
+fn snow_suspected(history: &[frost::HourlyObservation]) -> bool {
+    let frozen_precip: f64 = history
+        .iter()
+        .filter(|h| h.temp_c.is_some_and(|t| t <= 0.0))
+        .filter_map(|h| h.precip_mm)
+        .filter(|m| m.is_finite() && *m > 0.0)
+        .sum();
+    let still_cold = history
+        .last()
+        .and_then(|h| h.temp_c)
+        .is_some_and(|t| t <= 1.0);
+    frozen_precip >= SNOW_SUSPECT_FROZEN_PRECIP_MM && still_cold
 }
 
 /// Roll a list of Frost observations into a [`RainHistory`] aggregate.
@@ -879,11 +908,24 @@ fn compute_rain_history_in_tz<Tz: chrono::TimeZone>(
 /// bug the auditors flagged about the ground estimate diverging from
 /// reality on hetebølge / kjølig overskyet uke.
 ///
-/// Gap-aware: when consecutive observations are more than ~1.5 hours
-/// apart (Frost outage, sensor maintenance, station reboot) we
-/// synthesise dry filler hours so the drought counter climbs by the real
-/// elapsed time instead of treating the gap as if no time passed at all.
-/// Filler hours use neutral conditions and zero precipitation.
+/// Gap-aware: when consecutive observations are more than ~1.5 hours apart
+/// (Frost outage, sensor maintenance, station reboot) we advance one filler
+/// hour per missing hour so the drought counter climbs by the real elapsed
+/// time. We do **not** invent weather across the gap — the wetness
+/// accumulator is frozen and only the drought clock advances (see
+/// [`replay_for_each`]). This is deliberately asymmetric with the forward
+/// projection [`project_states_for_days`], which *skips* forecast gaps
+/// entirely: backfilling missing history must still age the drought counter,
+/// whereas a forecast hole is just absent data with no time to account for.
+///
+/// Seed assumption: the replay starts from a dry surface (0 mm accumulated)
+/// `history_hours` ago. The dry side is honest about this via
+/// `drought_at_lookback_cap`; the wet side has no equivalent, so an
+/// exceptionally wet spell *before* the lookback window is under-counted at
+/// t-start. Gravel's fast drainage gives the surface a short memory (it sheds
+/// free water within hours), so 168 h is comfortably enough for the
+/// accumulator to forget the seed — the only residual risk is sub-surface /
+/// ponded water the model doesn't represent anyway.
 fn replay_into_state(
     history: &[frost::HourlyObservation],
     p: &DryingParams,
@@ -937,6 +979,15 @@ fn replay_for_each<F>(
                 let filler_count = gap_hours.round() as i64 - 1;
                 for i in 1..=filler_count {
                     let time = prev + Duration::hours(i);
+                    // During a Frost outage we don't know the weather, so we
+                    // do NOT invent drying/drainage across the gap (the old
+                    // behaviour assumed neutral-overcast drying, which
+                    // under-dried heatwaves and over-dried cold-wet spells).
+                    // Instead freeze the wetness accumulator and only advance
+                    // the drought clock by the elapsed time — a dry surface
+                    // keeps ageing toward "tørt og løst", a wet one stays wet
+                    // until real observations resume. `drought_at_lookback_cap`
+                    // already flags long stretches with no reset.
                     let filler = HourlyConditions {
                         thunder: false,
                         time,
@@ -948,10 +999,21 @@ fn replay_for_each<F>(
                         probability_of_precip: None,
                         relative_humidity: Some(70.0),
                         cloud_area_fraction: Some(70.0),
-                        uv_index_clear_sky: clear_sky_uv_proxy(time, location),
+                        // Unused for drying now (we freeze across the gap); the
+                        // filler exists only to carry time + zero precip to the
+                        // callback.
+                        uv_index_clear_sky: None,
                         resolution: Resolution::Hourly,
                     };
-                    state = drying_step(state, &filler, p);
+                    state = SurfaceState {
+                        accumulated_mm: state.accumulated_mm,
+                        hours_since_meaningful_rain: if state.accumulated_mm >= SURFACE_WETTED_MM {
+                            0.0
+                        } else {
+                            state.hours_since_meaningful_rain + 1.0
+                        },
+                        drought_at_lookback_cap: state.drought_at_lookback_cap,
+                    };
                     on_step(&filler, &state);
                 }
             }
@@ -1085,7 +1147,7 @@ mod tests {
         let now = Utc::now();
         // Anchor steps at the next 5-min mark so they line up with the
         // forecast hour buckets the apply step will hit.
-        let nc_start = now + Duration::seconds(60); // ensure first_rain is in the future
+        let nc_start = now + Duration::minutes(5); // comfortably in the future, even on slow CI
         Mock::given(method("GET"))
             .and(path_m("/weatherapi/nowcast/2.0/complete"))
             .respond_with(
@@ -1179,7 +1241,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path_m("/weatherapi/nowcast/2.0/complete"))
             .respond_with(ResponseTemplate::new(200).set_body_string(nowcast_body(
-                now + Duration::seconds(60),
+                now + Duration::minutes(5),
                 1.0,
                 false,
             )))
@@ -1506,7 +1568,7 @@ mod tests {
 
     #[test]
     fn heavy_recent_history_leaves_water_on_ground() {
-        let now = Utc::now();
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
         let history: Vec<frost::HourlyObservation> = (0..6)
             .map(|i| frost::HourlyObservation {
                 time: now - Duration::hours(6 - i),
@@ -1529,7 +1591,7 @@ mod tests {
     fn replay_treats_gaps_in_history_as_dry_elapsed_time() {
         // Two readings 6 hours apart simulate a Frost outage. The
         // drought counter must climb by the elapsed time, not by 1.
-        let now = Utc::now();
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
         let history = vec![
             frost::HourlyObservation {
                 time: now - Duration::hours(6),
@@ -1566,7 +1628,7 @@ mod tests {
         // faster than cold/cloudy (still, no UV in observations →
         // sunshine bonus is half-strength either way; cloud is the same).
         // The dominant effect is temperature and wind.
-        let now = Utc::now();
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
         let dry_history: Vec<frost::HourlyObservation> = (0..6)
             .map(|i| frost::HourlyObservation {
                 time: now - Duration::hours(6 - i),
@@ -1604,7 +1666,7 @@ mod tests {
         // clear vs overcast skies. The clear-sky week must dry the surface
         // more — the bug this fixes was a hardcoded 70% cloud that made
         // every historic hour dry at the overcast rate regardless of sun.
-        let now = Utc::now();
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
         // Light, continuous drizzle holds the surface at a wet equilibrium
         // whose level is set by how fast it evaporates — which depends on
         // cloud cover. Clearer skies → faster evaporation → a lower
@@ -1642,7 +1704,7 @@ mod tests {
     fn replay_cloud_fallback_when_station_has_no_cloud_sensor() {
         // cloud_pct = None must not poison the replay — it falls back to the
         // neutral overcast value and still produces a finite, sane state.
-        let now = Utc::now();
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
         let history: Vec<frost::HourlyObservation> = (0..12)
             .map(|i| frost::HourlyObservation {
                 time: now - Duration::hours(12 - i),
@@ -1779,7 +1841,7 @@ mod tests {
             &history,
             &DryingParams {
                 drainage_fraction: 0.1,
-                field_capacity_mm: 1.5,
+                surface_retention_mm: 1.5,
                 ..DryingParams::default()
             },
             None,
@@ -1790,6 +1852,49 @@ mod tests {
             slow.accumulated_mm,
             default.accumulated_mm,
         );
+    }
+
+    // ---- snow_suspected (B4) ----
+
+    #[test]
+    fn snow_suspected_when_subzero_precip_and_still_cold() {
+        // ≥3 mm fell while at/below freezing and it's still cold → snow likely.
+        let now = Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap();
+        let history: Vec<frost::HourlyObservation> = (0..12)
+            .map(|i| frost::HourlyObservation {
+                time: now - Duration::hours(12 - i),
+                precip_mm: Some(0.5),
+                temp_c: Some(-3.0),
+                wind_ms: Some(2.0),
+                humidity_pct: Some(90.0),
+                cloud_pct: Some(95.0),
+            })
+            .collect();
+        assert!(snow_suspected(&history));
+    }
+
+    #[test]
+    fn no_snow_suspected_when_warm_or_thawed() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap();
+        // Plenty of precip but above freezing → rain, not snow.
+        let rain: Vec<frost::HourlyObservation> = (0..12)
+            .map(|i| frost::HourlyObservation {
+                time: now - Duration::hours(12 - i),
+                precip_mm: Some(0.5),
+                temp_c: Some(4.0),
+                wind_ms: Some(2.0),
+                humidity_pct: Some(90.0),
+                cloud_pct: Some(95.0),
+            })
+            .collect();
+        assert!(!snow_suspected(&rain), "above-freezing precip is rain");
+        // Sub-zero snowfall earlier, but the last hours are mild (+4 °C) → it
+        // has likely thawed, so don't flag.
+        let mut thawed = rain.clone();
+        for h in thawed.iter_mut().take(6) {
+            h.temp_c = Some(-3.0);
+        }
+        assert!(!snow_suspected(&thawed), "thawed-out snow should not flag");
     }
 
     // ---- compute_rain_history ----
@@ -1879,7 +1984,7 @@ mod tests {
         // We *did* check Frost; the answer is "no rain". Renderer collapses
         // the chip to "tørt siste N døgn" but the data layer must report
         // truthfully rather than masquerade as Frost-was-down.
-        let now = Utc::now();
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
         let history: Vec<frost::HourlyObservation> = (0..168)
             .map(|i| frost::HourlyObservation {
                 time: now - Duration::hours(168 - i),
@@ -1969,7 +2074,7 @@ mod tests {
         // 1.0 mm in one hour easily clears the drying rate, so the
         // accumulator reaches >= SURFACE_WETTED_MM and the drought counter
         // resets — that's a regndøgn.
-        let now = Utc::now();
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
         let history = vec![frost::HourlyObservation {
             time: now - Duration::hours(2),
             precip_mm: Some(1.0),
@@ -1992,7 +2097,7 @@ mod tests {
         // våtest day 0.3 mm, 1 regndøgn" alongside a Bakke "7 døgn uten
         // regn". With the drying-replay-based rule, this collapses to
         // zero regndøgn, in step with Bakke.
-        let now = Utc::now();
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
         let history = vec![frost::HourlyObservation {
             time: now - Duration::hours(2),
             // Warm + dry-ish so drying eats the 0.3 mm. The defaults in
@@ -2016,7 +2121,7 @@ mod tests {
     fn replay_marks_drought_at_lookback_cap_when_no_rain_in_history() {
         // 168 hours of dry observations — the counter ends at ≥168 with
         // no reset, so the chip's day-count is a lower bound. Flag it.
-        let now = Utc::now();
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
         let history: Vec<frost::HourlyObservation> = (0..168)
             .map(|i| frost::HourlyObservation {
                 time: now - Duration::hours(168 - i),
@@ -2038,7 +2143,7 @@ mod tests {
     fn replay_does_not_mark_cap_when_history_contains_rain() {
         // A reset somewhere in the lookback ⇒ the day-count is exact, not
         // a lower bound. No `+` should be appended in that case.
-        let now = Utc::now();
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
         let mut history: Vec<frost::HourlyObservation> = (0..168)
             .map(|i| frost::HourlyObservation {
                 time: now - Duration::hours(168 - i),
@@ -2055,6 +2160,58 @@ mod tests {
         assert!(
             !state.drought_at_lookback_cap,
             "history with a reset should not set the cap flag",
+        );
+    }
+
+    #[test]
+    fn replay_all_wet_history_has_zero_drought_and_no_cap() {
+        // Mirror image of the all-dry case: 24 h of steady rain → the surface
+        // is wet at the end, so the drought counter is 0 and the lookback-cap
+        // flag is false (a "reset" is in effect on the final step).
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
+        let history: Vec<frost::HourlyObservation> = (0..24)
+            .map(|i| frost::HourlyObservation {
+                time: now - Duration::hours(24 - i),
+                precip_mm: Some(2.0),
+                temp_c: Some(8.0),
+                wind_ms: Some(1.0),
+                humidity_pct: Some(95.0),
+                cloud_pct: Some(95.0),
+            })
+            .collect();
+        let state = replay_into_state(&history, &DryingParams::default(), None);
+        assert_eq!(state.hours_since_meaningful_rain, 0.0);
+        assert!(!state.drought_at_lookback_cap);
+        assert!(state.accumulated_mm > SURFACE_WETTED_MM);
+    }
+
+    #[test]
+    fn replay_no_cap_when_rain_only_in_last_observation() {
+        // Drought-cap edge: rain falls only on the very last observed hour, so
+        // the surface is wet at the end → counter 0, cap false. (The all-dry
+        // counterpart sets the cap; the first-hour-only case resets early then
+        // re-droughts, also no cap.)
+        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
+        let mut history: Vec<frost::HourlyObservation> = (0..168)
+            .map(|i| frost::HourlyObservation {
+                time: now - Duration::hours(168 - i),
+                precip_mm: Some(0.0),
+                temp_c: None,
+                wind_ms: None,
+                humidity_pct: None,
+                cloud_pct: None,
+            })
+            .collect();
+        let last = history.len() - 1;
+        history[last].precip_mm = Some(2.0);
+        let state = replay_into_state(&history, &DryingParams::default(), None);
+        assert_eq!(
+            state.hours_since_meaningful_rain, 0.0,
+            "wet on the last hour"
+        );
+        assert!(
+            !state.drought_at_lookback_cap,
+            "a reset occurred → no cap flag"
         );
     }
 
@@ -2188,5 +2345,20 @@ mod tests {
         let states =
             project_states_for_days(initial, &hours, &day_starts, &DryingParams::default());
         assert_eq!(states.len(), day_starts.len());
+    }
+
+    #[test]
+    fn projection_skips_forecast_gaps_without_synthesising_time() {
+        // Unlike the historical replay, the forward projection must NOT fill
+        // forecast holes: only the hours actually present are stepped. Here
+        // only 2 dry hours exist before a snapshot 10 h out, so the drought
+        // counter advances by 2, not 10 (no synthetic gap-fill).
+        let initial = SurfaceState::default();
+        let hours = vec![dry_hour(0), dry_hour(1)]; // hole from ts(2)..ts(10)
+        let states = project_states_for_days(initial, &hours, &[ts(10)], &DryingParams::default());
+        assert_eq!(
+            states[0].hours_since_meaningful_rain, 2.0,
+            "projection should step only the present hours, not fill the gap",
+        );
     }
 }

@@ -235,7 +235,7 @@ fn DashboardPage() -> impl IntoView {
                                     // Current ground state for the "underlag" stats tile: the
                                     // drying model's surface water *right now* (after rain,
                                     // drainage and drying), not the rain that fell over the week.
-                                    let ground = agg.ground_water_mm;
+                                    let ground = agg.ground_water_mm.map(|mm| (mm, agg.snow_suspected));
                                     // Daylight-left for the "dagslys" stats tile: (value, bar
                                     // fraction 0–100, caption). After sunset it's a muted
                                     // "Mørkt" with no bar. `None` (no sun data) hides the tile.

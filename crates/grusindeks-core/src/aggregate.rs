@@ -47,6 +47,14 @@ pub struct AggregateScore {
     /// observations were available to seed the drying model.
     #[serde(default)]
     pub ground_water_mm: Option<f64>,
+    /// `true` when recent observations suggest snow on the ground (sustained
+    /// sub-zero precipitation that hasn't melted). The drying model doesn't
+    /// model a snowpack, so the ground axis is unreliable here — renderers
+    /// should flag the score as uncertain rather than trusted. The honest
+    /// frozen-end analogue of `SurfaceState::drought_at_lookback_cap`.
+    /// Defaults to `false` (no data / not snowy).
+    #[serde(default)]
+    pub snow_suspected: bool,
     /// Radar-based imminent-rain alert. `Some` when nowcast saw
     /// precipitation ≥ threshold in the next ~2 hours. `None` when nowcast
     /// wasn't fetched, the location is outside Norden, or the radar series
@@ -157,6 +165,7 @@ impl AggregateScore {
             points: scored,
             rain_history: None,
             ground_water_mm: None,
+            snow_suspected: false,
             nowcast_alert: None,
             produced_at: None,
             sun: None,

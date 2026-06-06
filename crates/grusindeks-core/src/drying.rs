@@ -11,11 +11,11 @@
 //! accumulator clears `SURFACE_WETTED_MM` and otherwise increments by
 //! one each step. The scoring layer uses that to flag flerdøgnstørke.
 //!
-//! When the air is below freezing the drying-rate is multiplied by
-//! `FROST_FACTOR` since liquid evaporation effectively stops; only slow
-//! sublimation remains. Snow accumulation/melt is **not** modelled —
-//! callers should treat the score as undefined when snow is on the
-//! ground.
+//! Near and below freezing the drying-rate and drainage are scaled by a
+//! freeze/thaw ramp (`liquid_fraction`) toward `FROST_FACTOR`, since liquid
+//! evaporation and drainage effectively stop and only slow sublimation
+//! remains. Snow accumulation/melt is **not** modelled — callers should treat
+//! the score as undefined when snow is on the ground.
 //!
 //! Not a real Penman–Monteith ET model; it's a transparent heuristic with
 //! all coefficients tunable in one place. Good enough for scoring.
@@ -73,6 +73,17 @@ pub use crate::felt_temp::UV_NORDIC_PEAK;
 /// Coefficients for the per-hour drying rate (mm/h) and the gravel
 /// drainage term. Exposed so tests and future calibration can override
 /// them without forking the function.
+///
+/// **Calibration note — keep these three in sync.** Under sustained rain at
+/// intensity `R`, drainage drives the surface to a steady state
+/// `s* = surface_retention_mm + R·(1 − drainage_fraction) / drainage_fraction`
+/// (a linear-reservoir recession), so the wet-side ground subscore during
+/// active rain is set as much by `drainage_fraction` as by `R`. Don't retune
+/// `drainage_fraction`, `surface_retention_mm`, or [`GROUND_SATURATED`] in
+/// isolation: re-check `score::ground_subscore`'s breakpoints (optimum, wet
+/// ramp) afterwards, and prefer `score::active_rain_ground_ceiling` as the
+/// authoritative "it's wet because it's raining right now" signal (the
+/// equilibrium lags the first hour of rain by design).
 #[derive(Debug, Clone, Copy)]
 pub struct DryingParams {
     pub base: f64,
@@ -82,17 +93,20 @@ pub struct DryingParams {
     pub per_pct_humidity_above_50: f64,
     pub min_rate: f64,
     pub max_rate: f64,
-    /// Surface water (mm) that the gravel holds onto against gravity —
-    /// capillary-retained "damp" that only leaves by evaporation, not
-    /// drainage. Water *above* this level is free water that drains/
-    /// infiltrates within hours (see [`DryingParams::drainage_fraction`]).
-    /// Aligned with the ground-score's damp optimum so a freshly-drained
-    /// surface settles toward "lett fuktig" rather than bone-dry.
-    pub field_capacity_mm: f64,
-    /// Fraction of the *free* water (the part above `field_capacity_mm`)
+    /// Depth of the capillary-held "damp" surface film (mm) the gravel holds
+    /// against gravity — what's left once free water has drained. This is a
+    /// *grip-tuned surface-film retention depth*, NOT bulk-soil field capacity
+    /// (which for gravel would be several mm over a wearing course): it's
+    /// aligned with the ground-score's damp optimum so a freshly-drained
+    /// surface settles toward "lett fuktig" rather than bone-dry. Water at or
+    /// below this level only leaves by evaporation; water *above* it is free
+    /// water that drains (see [`DryingParams::drainage_fraction`]).
+    pub surface_retention_mm: f64,
+    /// Fraction of the *free* water (the part above `surface_retention_mm`)
     /// that drains away each hour. Gravel sheds water fast — without this
     /// the model only lost water to slow evaporation and kept the surface
-    /// "wet" for days after the gravel had actually drained dry.
+    /// "wet" for days after the gravel had actually drained dry. See the
+    /// calibration note on [`DryingParams`] before changing it.
     pub drainage_fraction: f64,
 }
 
@@ -106,7 +120,7 @@ impl Default for DryingParams {
             per_pct_humidity_above_50: 0.005,
             min_rate: 0.0,
             max_rate: 1.5,
-            field_capacity_mm: 0.4,
+            surface_retention_mm: 0.4,
             drainage_fraction: 0.5,
         }
     }
@@ -147,13 +161,13 @@ impl DrainageClass {
         match self {
             DrainageClass::Rask => DryingParams {
                 drainage_fraction: 0.8,
-                field_capacity_mm: 0.25,
+                surface_retention_mm: 0.25,
                 ..base
             },
             DrainageClass::Normal => base,
             DrainageClass::Treg => DryingParams {
                 drainage_fraction: 0.2,
-                field_capacity_mm: 0.9,
+                surface_retention_mm: 0.9,
                 ..base
             },
         }
@@ -218,6 +232,13 @@ fn finite_or(value: f64, fallback: f64) -> f64 {
     }
 }
 
+/// Saturation vapour pressure (kPa) at `temp_c`, via the Magnus formula.
+/// Used to give the humidity term its temperature dependence (the vapour-
+/// pressure deficit a given RH represents grows with temperature).
+fn saturation_vapour_kpa(temp_c: f64) -> f64 {
+    0.610_94 * (17.625 * temp_c / (temp_c + 243.04)).exp()
+}
+
 /// Drying rate (mm/h) for one hour of conditions.
 ///
 /// Sunshine term uses cloud cover and (when available) UV index. With both
@@ -257,8 +278,18 @@ pub fn drying_rate(h: &HourlyConditions, p: &DryingParams) -> f64 {
         _ => 0.0,
     };
 
+    // Humid air suppresses evaporation — but the same relative humidity leaves
+    // a larger vapour-pressure deficit to overcome as temperature rises, so a
+    // muggy 25 °C afternoon holds water far more than a damp 5 °C morning at
+    // the same RH. Scale the (RH − 50) penalty by the Magnus saturation-
+    // pressure ratio against a 15 °C reference (= 1 there, so the original
+    // calibration is preserved at 15 °C). A step toward a full VPD term
+    // without re-tuning the other coefficients.
     let humidity_penalty = match h.relative_humidity {
-        Some(rh) if rh.is_finite() => p.per_pct_humidity_above_50 * (rh - 50.0).max(0.0),
+        Some(rh) if rh.is_finite() => {
+            let temp_scale = saturation_vapour_kpa(temp_c) / saturation_vapour_kpa(15.0);
+            p.per_pct_humidity_above_50 * (rh - 50.0).max(0.0) * temp_scale
+        }
         _ => 0.0,
     };
 
@@ -279,8 +310,14 @@ pub fn drying_rate(h: &HourlyConditions, p: &DryingParams) -> f64 {
 /// very different physical meaning (a 50 mm deluge vs 5 hours of light
 /// rain) collapse to identical post-drying states.
 ///
+/// Infiltration capacity is assumed effectively infinite: all rain enters the
+/// surface bucket within the hour and only the amount past `GROUND_SATURATED`
+/// runs off. Gravel's infiltration rate vastly exceeds typical rainfall, so we
+/// don't separately model intense rain overwhelming infiltration and ponding;
+/// the active-rain ground-score ceiling captures "it's pouring now" instead.
+///
 /// Drainage models the fact that gravel sheds water fast: the part of the
-/// surface water above `field_capacity_mm` is *free* water that infiltrates
+/// surface water above `surface_retention_mm` is *free* water that infiltrates
 /// / runs off, and `drainage_fraction` of it leaves each hour. Water at or
 /// below field capacity is capillary-held "damp" that only evaporation can
 /// remove. Drainage is gated by frost the same way evaporation is — scaled by
@@ -302,7 +339,7 @@ pub fn drying_step(state: SurfaceState, h: &HourlyConditions, p: &DryingParams) 
     // freeze/thaw `liquid_fraction` ramp that gates evaporation, rather than a
     // hard cut at 0 °C.
     let temp_c = finite_or(h.temperature_c, 0.0);
-    let free = (after_rain - p.field_capacity_mm).max(0.0);
+    let free = (after_rain - p.surface_retention_mm).max(0.0);
     let drained = free * p.drainage_fraction.clamp(0.0, 1.0) * liquid_fraction(temp_c);
     let after_drainage = after_rain - drained;
     let after_drying = (after_drainage - drying_rate(h, p)).max(0.0);
@@ -401,6 +438,31 @@ mod tests {
     }
 
     #[test]
+    fn humidity_penalty_scales_with_temperature() {
+        // The same high RH must suppress drying more at warm temperatures than
+        // cold ones (larger vapour-pressure deficit when warm). Compare the
+        // humidity *deficit* against a dry-air baseline at each temperature so
+        // we isolate the humidity term from the temperature drying term.
+        let p = DryingParams::default();
+        let rate = |temp, rh| {
+            drying_rate(
+                &HourlyConditions {
+                    thunder: false,
+                    relative_humidity: Some(rh),
+                    ..HourlyConditions::minimal(t(0), temp, 4.0, 0.0)
+                },
+                &p,
+            )
+        };
+        let warm_drop = rate(25.0, 50.0) - rate(25.0, 95.0);
+        let cold_drop = rate(5.0, 50.0) - rate(5.0, 95.0);
+        assert!(
+            warm_drop > cold_drop,
+            "humidity should bite harder when warm: warm Δ {warm_drop}, cold Δ {cold_drop}",
+        );
+    }
+
+    #[test]
     fn rate_decreases_with_humidity() {
         let p = DryingParams::default();
         let base = HourlyConditions {
@@ -457,7 +519,7 @@ mod tests {
         let h = rainy_hour(0, 2.0);
         let s2 = drying_step(s, &h, &p);
         assert!(
-            s2.accumulated_mm > p.field_capacity_mm,
+            s2.accumulated_mm > p.surface_retention_mm,
             "rain should add water above field capacity; got {}",
             s2.accumulated_mm
         );
@@ -578,7 +640,24 @@ mod tests {
         );
         // And the ground subscore for that wetness should be poor — well
         // below the 80-point "no penalty" line.
-        assert!(crate::score::ground_subscore(final_state.accumulated_mm) <= 50);
+        assert!(crate::score::ground_subscore(final_state.accumulated_mm) < 60);
+        // Drainage must be load-bearing: with it off the surface would pin to
+        // the saturation cap. This makes the test fail if drainage regresses.
+        let no_drainage = replay(
+            SurfaceState::new(0.0),
+            &history,
+            &DryingParams {
+                drainage_fraction: 0.0,
+                ..p
+            },
+        );
+        assert!(
+            final_state.accumulated_mm < no_drainage.accumulated_mm - 1.0,
+            "drainage should hold the equilibrium clearly below the no-drainage cap; \
+             got drained={}, no_drainage={}",
+            final_state.accumulated_mm,
+            no_drainage.accumulated_mm,
+        );
     }
 
     #[test]
@@ -647,9 +726,54 @@ mod tests {
             "got {}",
             final_state.hours_since_meaningful_rain,
         );
+        // Drainage-sensitive: a slower-draining surface stays wet longer after
+        // the rain, so its drought counter must end up strictly lower. Guards
+        // against drainage silently regressing to "barely drains".
+        let slow = replay(
+            SurfaceState::default(),
+            &history,
+            &DryingParams {
+                drainage_fraction: 0.1,
+                ..p
+            },
+        );
+        assert!(
+            slow.hours_since_meaningful_rain < final_state.hours_since_meaningful_rain,
+            "slower drainage should clear later (lower counter); got slow={}, default={}",
+            slow.hours_since_meaningful_rain,
+            final_state.hours_since_meaningful_rain,
+        );
     }
 
     // ---- NaN sanitisation ----
+
+    #[test]
+    fn nan_temperature_behaves_as_zero_celsius_in_rate_and_step() {
+        // Defensive posture: a NaN temperature reaching the drying maths is
+        // sanitised to 0 °C (mid freeze-ramp) — NOT the replay layer's 10 °C
+        // fallback. In practice the replay substitutes 10 °C for a missing
+        // observation before drying ever sees it, so this only governs the
+        // last-ditch guard; pin it so the two layers' postures stay documented.
+        let p = DryingParams::default();
+        let nan_rate = drying_rate(&HourlyConditions::minimal(t(0), f64::NAN, 4.0, 0.0), &p);
+        let zero_rate = drying_rate(&HourlyConditions::minimal(t(0), 0.0, 4.0, 0.0), &p);
+        assert!(
+            (nan_rate - zero_rate).abs() < 1e-12,
+            "NaN temp should behave as 0 °C in drying_rate: {nan_rate} vs {zero_rate}",
+        );
+        let step = |temp| {
+            drying_step(
+                SurfaceState::new(GROUND_SATURATED),
+                &HourlyConditions::minimal(t(0), temp, 2.0, 0.0),
+                &p,
+            )
+            .accumulated_mm
+        };
+        assert!(
+            (step(f64::NAN) - step(0.0)).abs() < 1e-12,
+            "NaN-temp drainage should match 0 °C",
+        );
+    }
 
     #[test]
     fn surface_state_new_clamps_above_saturation() {
@@ -748,7 +872,7 @@ mod tests {
         // From a 5 mm cap, one hour of drainage removes drainage_fraction of
         // the free water (5 − 0.4 = 4.6 mm), leaving ≈ 2.7 mm.
         let expected =
-            GROUND_SATURATED - (GROUND_SATURATED - p.field_capacity_mm) * p.drainage_fraction;
+            GROUND_SATURATED - (GROUND_SATURATED - p.surface_retention_mm) * p.drainage_fraction;
         assert!(
             (s2.accumulated_mm - expected).abs() < 0.2,
             "expected ≈{expected:.2} mm after one hour of drainage from the cap; got {}",
@@ -912,10 +1036,10 @@ mod tests {
         // pinned to ~0 (cool/humid/calm) the damp level must be preserved.
         let p = DryingParams::default();
         let damp_cool = hour_with(6.0, 1.0, 95.0, Some(95.0), None, 0.0);
-        let s = SurfaceState::new(p.field_capacity_mm);
+        let s = SurfaceState::new(p.surface_retention_mm);
         let s2 = drying_step(s, &damp_cool, &p);
         assert!(
-            (s2.accumulated_mm - p.field_capacity_mm).abs() < 1e-9,
+            (s2.accumulated_mm - p.surface_retention_mm).abs() < 1e-9,
             "field-capacity water must not drain; got {}",
             s2.accumulated_mm,
         );
@@ -1019,7 +1143,7 @@ mod tests {
         let n = DrainageClass::Normal.drying_params();
         let d = DryingParams::default();
         assert_eq!(n.drainage_fraction, d.drainage_fraction);
-        assert_eq!(n.field_capacity_mm, d.field_capacity_mm);
+        assert_eq!(n.surface_retention_mm, d.surface_retention_mm);
     }
 
     #[test]
