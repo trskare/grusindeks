@@ -13,6 +13,7 @@ use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveTime, T
 use chrono::{NaiveDate, Timelike};
 use url::Url;
 
+use grusindeks_core::drying::DrainageClass;
 use grusindeks_core::geo::Point;
 use grusindeks_core::types::{Location, RideWindow};
 use grusindeks_met::client::{MetClient, MetClientConfig, UserAgent};
@@ -204,6 +205,17 @@ pub fn location_frost_source(cfg: &Config, loc: &Location) -> Option<String> {
         .get(&loc.name)
         .and_then(|p| p.frost_source_id.clone())
         .or_else(|| cfg.frost.source_id.clone())
+}
+
+/// Drainage character for the resolved location: the place's own `drainage`
+/// if set, otherwise the config-level default. Drives the gravel-drainage
+/// coefficients of the drying model (see [`DrainageClass::drying_params`]).
+/// Ad-hoc `--lat/--lon` locations (no matching named place) use the default.
+pub fn location_drainage(cfg: &Config, loc: &Location) -> DrainageClass {
+    cfg.places
+        .get(&loc.name)
+        .and_then(|p| p.drainage)
+        .unwrap_or(cfg.drainage)
 }
 
 pub fn resolve_window(window: Option<&str>, hours: i64) -> Result<RideWindow> {

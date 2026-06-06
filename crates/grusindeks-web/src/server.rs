@@ -31,7 +31,7 @@ pub async fn get_score(place: String, hours: i64) -> Result<AggregateScore, Serv
     use chrono::Utc;
     use grusindeks_cli::run::{run_score, ScoreInputs};
     use grusindeks_cli::windows::{
-        location_frost_source, resolve_location, resolve_window,
+        location_drainage, location_frost_source, resolve_location, resolve_window,
         window_starts_within_nowcast_horizon,
     };
 
@@ -57,6 +57,7 @@ pub async fn get_score(place: String, hours: i64) -> Result<AggregateScore, Serv
             history_hours: 168,
             lang: cfg.language,
             fetch_nowcast,
+            drying: location_drainage(&cfg, &location).drying_params(),
             progress: &NoopProgress,
         },
     )
@@ -115,8 +116,8 @@ pub async fn get_forecast(place: String, days: u8) -> Result<MultiDayForecast, S
     use chrono::{Local, Utc};
     use grusindeks_cli::run::{run_forecast, ForecastInputs};
     use grusindeks_cli::windows::{
-        build_day_windows, build_work_hour_exclusions, location_frost_source, resolve_location,
-        window_starts_within_nowcast_horizon,
+        build_day_windows, build_work_hour_exclusions, location_drainage, location_frost_source,
+        resolve_location, window_starts_within_nowcast_horizon,
     };
     use grusindeks_core::daily::{BestWindowConfig, Confidence};
 
@@ -151,6 +152,7 @@ pub async fn get_forecast(place: String, days: u8) -> Result<MultiDayForecast, S
             lang: cfg.language,
             best_window,
             fetch_nowcast,
+            drying: location_drainage(&cfg, &location).drying_params(),
             progress: &NoopProgress,
         },
     )
@@ -202,7 +204,8 @@ pub async fn get_hourly(place: String) -> Result<HourlyForecast, ServerFnError> 
     use chrono::{DurationRound, Local, TimeDelta, Utc};
     use grusindeks_cli::run::{run_hourly, DayWindow, HourlyInputs};
     use grusindeks_cli::windows::{
-        local_to_utc, location_frost_source, resolve_location, window_starts_within_nowcast_horizon,
+        local_to_utc, location_drainage, location_frost_source, resolve_location,
+        window_starts_within_nowcast_horizon,
     };
     use grusindeks_core::types::RideWindow;
 
@@ -248,6 +251,7 @@ pub async fn get_hourly(place: String) -> Result<HourlyForecast, ServerFnError> 
             lang: cfg.language,
             header_hours,
             fetch_nowcast,
+            drying: location_drainage(&cfg, &location).drying_params(),
             progress: &NoopProgress,
         },
     )
@@ -272,8 +276,8 @@ pub async fn get_hourly_day(place: String, date: String) -> Result<HourlyForecas
     use chrono::{NaiveDate, Utc};
     use grusindeks_cli::run::{run_hourly, DayWindow, HourlyInputs};
     use grusindeks_cli::windows::{
-        daytime_header_hours, has_forecast_hour_in_window, local_to_utc, location_frost_source,
-        resolve_location, window_starts_within_nowcast_horizon,
+        daytime_header_hours, has_forecast_hour_in_window, local_to_utc, location_drainage,
+        location_frost_source, resolve_location, window_starts_within_nowcast_horizon,
     };
     use grusindeks_core::types::RideWindow;
 
@@ -312,6 +316,7 @@ pub async fn get_hourly_day(place: String, date: String) -> Result<HourlyForecas
             lang: cfg.language,
             header_hours: daytime_header_hours(cfg.daytime_window),
             fetch_nowcast,
+            drying: location_drainage(&cfg, &location).drying_params(),
             progress: &NoopProgress,
         },
     )

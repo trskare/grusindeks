@@ -16,8 +16,8 @@ use grusindeks_cli::run::{
 };
 use grusindeks_cli::windows::{
     build_client, build_day_windows, build_work_hour_exclusions, daytime_header_hours,
-    location_frost_source, resolve_location, resolve_window, window_starts_within_nowcast_horizon,
-    DEFAULT_FORECAST_DAYS, MAX_FORECAST_DAYS, MAX_HOURS,
+    location_drainage, location_frost_source, resolve_location, resolve_window,
+    window_starts_within_nowcast_horizon, DEFAULT_FORECAST_DAYS, MAX_FORECAST_DAYS, MAX_HOURS,
 };
 
 const APP: &str = env!("CARGO_PKG_NAME");
@@ -243,6 +243,9 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
 
     let location = resolve_location(&cfg, cli.lat, cli.lon, cli.place.clone(), cli.radius_km)?;
     let frost_source_id = location_frost_source(&cfg, &location);
+    // Gravel drainage character for this location (per-place override, else the
+    // config default). Shapes the drying model's drainage coefficients.
+    let drying = location_drainage(&cfg, &location).drying_params();
     let client = build_client(
         APP,
         VERSION,
@@ -302,6 +305,7 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
                 lang: cfg.language,
                 header_hours,
                 fetch_nowcast,
+                drying,
                 progress: &progress,
             },
         )
@@ -355,6 +359,7 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
                 lang: cfg.language,
                 best_window,
                 fetch_nowcast,
+                drying,
                 progress: &progress,
             },
         )
@@ -394,6 +399,7 @@ async fn cmd_score(cli: &Cli) -> Result<()> {
             history_hours: 168,
             lang: cfg.language,
             fetch_nowcast,
+            drying,
             progress: &progress,
         },
     )
