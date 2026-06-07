@@ -1574,22 +1574,60 @@ pub fn RideTimeline(
                         })}
 
                         // hover marker: lightweight hit zones in 5-minute steps
-                        // so the label follows the pointer more precisely than
-                        // whole-hour buckets (the forecast values are still hourly).
+                        // *and* per lane, so the tooltip can show both the clock
+                        // time and the score for the exact block being hovered
+                        // (temp/vind/nedbør/sjanse/bakke). The forecast values are
+                        // still hourly; the 5-min split only makes the cursor feel
+                        // precise.
                         {cols.iter().flat_map(|c| {
-                            (0..12).map(move |m| {
+                            (0..12).flat_map(move |m| {
                                 let a = c.l + (c.r - c.l) * (m as f64 / 12.0);
                                 let b = c.l + (c.r - c.l) * ((m + 1) as f64 / 12.0);
-                                let label = format!("{:02}:{:02}", c.hour, m * 5);
-                                let style = format!("left:{}; width:{}", pct(a), pct(b - a));
-                                view! {
-                                    <div class="group absolute inset-y-0 z-30" style=style>
-                                        <div class="pointer-events-none absolute inset-y-0 left-1/2 hidden w-[2px] -translate-x-1/2 bg-gruv-aqua shadow-[0_0_8px_rgba(69,133,136,0.9)] group-hover:block"></div>
-                                        <div class="pointer-events-none absolute left-1/2 top-1 hidden -translate-x-1/2 rounded bg-gruv-fg px-1.5 py-0.5 text-[10px] font-bold leading-tight text-gruv-bg0 shadow-lg group-hover:block">
-                                            {label}
+                                let time_label = format!("{:02}:{:02}", c.hour, m * 5);
+                                (0..TL_LANES).map(move |lane| {
+                                    let (axis, score) = match lane {
+                                        0 => ("temperatur", c.s.breakdown.temperature),
+                                        1 => ("vind", c.s.breakdown.wind),
+                                        2 => ("nedbør", c.s.breakdown.precipitation),
+                                        3 => ("sjanse", c.s.breakdown.precip_probability),
+                                        _ => ("bakke", c.s.breakdown.ground),
+                                    };
+                                    let style = format!(
+                                        "left:{}; width:{}; top:{:.3}%; height:{:.3}%",
+                                        pct(a),
+                                        pct(b - a),
+                                        lane as f64 * 100.0 / TL_LANES as f64,
+                                        100.0 / TL_LANES as f64
+                                    );
+                                    // The hit zone is only one lane tall, but the
+                                    // marker line should span the whole plot.
+                                    let line_style = format!(
+                                        "top:-{}%; height:{}%",
+                                        lane * 100,
+                                        TL_LANES * 100
+                                    );
+                                    let tooltip = if lane == 0 {
+                                        view! {
+                                            <div class="pointer-events-none absolute left-1/2 top-1 hidden -translate-x-1/2 rounded bg-gruv-fg px-1.5 py-0.5 text-[10px] font-bold leading-tight text-gruv-bg0 shadow-lg group-hover:block">
+                                                <span class="block tabular-nums">{time_label.clone()}</span>
+                                                <span class="block whitespace-nowrap">{format!("{axis}: {score}/100")}</span>
+                                            </div>
+                                        }.into_any()
+                                    } else {
+                                        view! {
+                                            <div class="pointer-events-none absolute left-1/2 top-1/2 hidden -translate-x-1/2 -translate-y-1/2 rounded bg-gruv-fg px-1.5 py-0.5 text-[10px] font-bold leading-tight text-gruv-bg0 shadow-lg group-hover:block">
+                                                <span class="block tabular-nums">{time_label.clone()}</span>
+                                                <span class="block whitespace-nowrap">{format!("{axis}: {score}/100")}</span>
+                                            </div>
+                                        }.into_any()
+                                    };
+                                    view! {
+                                        <div class="group absolute z-30" style=style>
+                                            <div class="pointer-events-none absolute left-1/2 hidden w-[2px] -translate-x-1/2 bg-gruv-aqua shadow-[0_0_8px_rgba(69,133,136,0.9)] group-hover:block" style=line_style></div>
+                                            {tooltip}
                                         </div>
-                                    </div>
-                                }
+                                    }
+                                })
                             })
                         }).collect_view()}
 
