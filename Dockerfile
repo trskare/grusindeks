@@ -1,7 +1,7 @@
 # ---- builder ----
 # cargo-leptos downloads matching wasm-bindgen-cli and the Tailwind standalone
 # binary itself, so no Node toolchain is needed in the image.
-FROM rust:1.92-bookworm AS builder
+FROM rust:1.96-bookworm AS builder
 
 # cmake + a C toolchain are needed to build aws-lc-rs (reqwest 0.13's default
 # rustls crypto provider).

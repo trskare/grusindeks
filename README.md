@@ -30,7 +30,7 @@ I CLI-utskriften vises de to nedbør-signalene som én **Nedbør**-rad
 
 ### Forutsetninger
 
-- Rust 1.80 eller nyere — installer via [rustup](https://rustup.rs):
+- Rust 1.80 eller nyere for CLI-en (web-GUI-en krever 1.94+) — installer via [rustup](https://rustup.rs):
   `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
 
 Ingen andre system-avhengigheter; HTTP-klienten bruker `rustls` og

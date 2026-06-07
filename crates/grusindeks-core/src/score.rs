@@ -527,7 +527,7 @@ pub fn score(
         }
     }
     // Worst penalty first so the renderer can take the head.
-    penalties.sort_by(|a, b| b.severity.cmp(&a.severity));
+    penalties.sort_by_key(|p| std::cmp::Reverse(p.severity));
 
     let mut highlights = Vec::new();
     if let Some(msg) = sun_highlight(solar_warming, mean_temp, lang) {

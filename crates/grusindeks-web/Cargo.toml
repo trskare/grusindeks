@@ -2,9 +2,10 @@
 name = "grusindeks-web"
 version.workspace = true
 edition.workspace = true
-# Leptos 0.8 needs a newer toolchain than the reusable crates' 1.80 floor.
-# Pinned per-package so grusindeks-core/-met/-cli keep their conservative MSRV.
-rust-version = "1.83"
+# sqlx 0.9 (and Leptos 0.8) need a newer toolchain than the reusable crates'
+# 1.80 floor. Pinned per-package so grusindeks-core/-met/-cli keep their
+# conservative MSRV.
+rust-version = "1.94"
 license.workspace = true
 authors.workspace = true
 description = "Web GUI for grusindeks — Leptos SSR + Axum, reusing the core scoring crates"
@@ -46,7 +47,7 @@ grusindeks-met = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate", "chrono"], optional = true }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-none", "sqlite", "macros", "migrate", "chrono"], optional = true }
 arc-swap = { version = "1", optional = true }
 
 [dev-dependencies]

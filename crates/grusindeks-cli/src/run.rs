@@ -347,12 +347,12 @@ pub async fn run_hourly(client: &MetClient, inputs: HourlyInputs<'_>) -> Result<
 
     let mut surface_at: std::collections::HashMap<DateTime<Utc>, Option<SurfaceState>> =
         std::collections::HashMap::with_capacity(bucket_starts.len());
-    for (t, s) in bucket_starts.iter().zip(projected.into_iter()) {
+    for (t, s) in bucket_starts.iter().zip(projected) {
         surface_at.insert(*t, s);
     }
 
     let mut days = Vec::with_capacity(inputs.days.len());
-    for (dw, hour_starts) in inputs.days.iter().zip(per_day_starts.into_iter()) {
+    for (dw, hour_starts) in inputs.days.iter().zip(per_day_starts) {
         let mut hours = Vec::with_capacity(hour_starts.len());
         for start in hour_starts {
             let hour_window = RideWindow {
