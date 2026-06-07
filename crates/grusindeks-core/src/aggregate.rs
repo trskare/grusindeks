@@ -425,6 +425,10 @@ pub struct HourRaw {
     /// timeline's lightning flash. Defaults to `false` for older blobs.
     #[serde(default)]
     pub thunder: bool,
+    /// Total cloud cover 0–100 (MET `cloud_area_fraction`). Drives the
+    /// timeline's drifting cloud strip. `None` for older blobs / no data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_area_fraction: Option<f64>,
 }
 
 /// One day worth of hourly scores. `daytime_window` is the user's

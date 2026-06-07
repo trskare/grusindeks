@@ -409,6 +409,7 @@ pub async fn run_hourly(client: &MetClient, inputs: HourlyInputs<'_>) -> Result<
                     precipitation_mm: h.precipitation_mm,
                     probability_of_precip: h.probability_of_precip,
                     thunder: h.thunder,
+                    cloud_area_fraction: h.cloud_area_fraction,
                 });
             hours.push(HourScore {
                 time: start,

@@ -1307,9 +1307,10 @@ pub fn RideTimeline(
             </div>
 
             <div class="flex gap-x-1.5">
-                // ---- lane icon gutter (offset past the hour axis; inner column
-                // matches the plot height so icons stay centred on their lanes) ----
-                <div class="flex w-5 shrink-0 flex-col pt-[18px] text-gruv-fg/45">
+                // ---- lane icon gutter (offset past the hour axis + sky strip;
+                // inner column matches the plot height so icons stay centred on
+                // their lanes — 18px axis + 36px (h-9) cloud strip = 54px) ----
+                <div class="flex w-5 shrink-0 flex-col pt-[54px] text-gruv-fg/45">
                     <div class="flex h-52 flex-col">
                         <div class=glyph>
                             {icons::thermometer("h-[18px] w-[18px]", Some("Temperatur"))}
@@ -1349,7 +1350,61 @@ pub fn RideTimeline(
                     </div>
 
                     // ---- plot ----
-                    <div class="relative h-52 overflow-hidden rounded-lg bg-gruv-bg0/40 inset-well">
+                    <div class="relative overflow-hidden rounded-lg bg-gruv-bg0/40 inset-well">
+                    // ---- sky strip: one continuous, slowly-drifting cloud deck
+                    // (two feTurbulence parallax layers in CSS) masked per hour by
+                    // cloud_area_fraction. Dense where overcast, thin where partly
+                    // cloudy, gone where clear. No discrete sprites.
+                    {
+                        // Horizontal coverage mask: alpha at each hour's midpoint =
+                        // cloud %. CSS interpolates between midpoints → smooth deck.
+                        let mask = {
+                            // White (not black) so the mask works whether the engine
+                            // reads the gradient as alpha- or luminance-mode.
+                            let mut stops: Vec<String> = Vec::new();
+                            if cols.first().is_some_and(|c| c.mid > 0.0) {
+                                stops.push("rgba(255,255,255,0) 0%".into());
+                            }
+                            for c in &cols {
+                                let a = c
+                                    .s
+                                    .raw
+                                    .and_then(|r| r.cloud_area_fraction)
+                                    .map(|v| (v / 100.0).clamp(0.0, 1.0))
+                                    .filter(|f| *f >= 0.10) // under ~10 % = klart
+                                    // Sharper-than-linear: scattered hours render
+                                    // sparser so the tile's sky gaps show through.
+                                    .map_or(0.0, |f| f.powf(1.15).min(0.97));
+                                stops.push(format!("rgba(255,255,255,{a:.2}) {:.1}%", c.mid * 100.0));
+                            }
+                            // Fade out at the right edge (also covers any empty tail
+                            // when best_window stretches the domain past the last hour).
+                            stops.push("rgba(255,255,255,0) 100%".into());
+                            format!("linear-gradient(to right, {})", stops.join(", "))
+                        };
+                        view! {
+                            <div class="relative h-9 w-full overflow-hidden border-b border-gruv-bg0/60">
+                                <div class="gx-sky absolute inset-0"
+                                    style=format!("mask-image:{mask}; -webkit-mask-image:{mask}")>
+                                    <div class="gx-sky-layer gx-sky-back"></div>
+                                    <div class="gx-sky-layer gx-sky-front"></div>
+                                </div>
+                                // Where it rains, darken the cloud base (nimbus) so
+                                // the rain below reads as falling out of these clouds.
+                                {rain_bands.iter().map(|(a, b, mm, _)| {
+                                    let intensity = (mm / pmax).clamp(0.15, 1.0);
+                                    let op = 0.4 + intensity * 0.45;
+                                    view! {
+                                        <div class="gx-rain-cloud" style=format!(
+                                            "left:{}; width:{}; opacity:{op:.2}", pct(*a), pct(b - a)
+                                        )></div>
+                                    }
+                                }).collect_view()}
+                            </div>
+                        }
+                    }
+
+                    <div class="relative h-52">
                         <svg class="gx-sweep absolute inset-0 h-full w-full"
                             viewBox=format!("0 0 {TL_W} {TL_H}") preserveAspectRatio="none">
                             // lane heat backgrounds
@@ -1437,9 +1492,16 @@ pub fn RideTimeline(
                             // Scale against this day's max so light showers stay subtle and
                             // heavy hours visibly pick up intensity.
                             let intensity = (mm / pmax).clamp(0.15, 1.0);
-                            let drops = (4.0 + intensity * 12.0).round() as usize;
-                            let wash = 0.04 + intensity * 0.08;
-                            let style = format!("left:{}; width:{}; background:rgba(131,165,152,{wash:.3})", pct(*a), pct(b - a));
+                            let drops = (8.0 + intensity * 18.0).round() as usize;
+                            // Rain shaft: a soft veil, denser near the cloud base
+                            // (top) and fading downward, so the streaks read as
+                            // falling out of the deck above.
+                            let shaft_top = 0.09 + intensity * 0.11;
+                            let shaft_bot = 0.02 + intensity * 0.03;
+                            let style = format!(
+                                "left:{}; width:{}; background:linear-gradient(to bottom, rgba(150,180,170,{shaft_top:.3}), rgba(131,165,152,{shaft_bot:.3}))",
+                                pct(*a), pct(b - a)
+                            );
                             view! {
                                 <div class="pointer-events-none absolute inset-y-0 z-10 overflow-hidden rounded" style=style>
                                     // Thunder forecast in this band → an occasional
@@ -1450,12 +1512,12 @@ pub fn RideTimeline(
                                     {(0..drops).map(|i| {
                                         // Deterministic scatter: enough variation to feel organic,
                                         // but no JS/timers/state beyond CSS animation.
-                                        let left = 6 + ((i * 23) % 88);
-                                        let delay = -((i as f64) * (0.16 - intensity * 0.05).max(0.07));
-                                        let speed = (1.45 - intensity * 0.55) + ((i % 4) as f64) * 0.09;
-                                        let top = -(((i * 17) % 110) as i32);
-                                        let alpha = 0.55 + intensity * 0.35;
-                                        let size = 0.85 + intensity * 0.35;
+                                        let left = 4 + ((i * 53) % 92);
+                                        let delay = -((i as f64) * (0.10 - intensity * 0.03).max(0.04));
+                                        let speed = (1.05 - intensity * 0.4) + ((i % 5) as f64) * 0.05;
+                                        let top = -(((i * 29) % 120) as i32);
+                                        let alpha = 0.45 + intensity * 0.35;
+                                        let size = 0.8 + intensity * 0.5;
                                         view! {
                                             <span class="gx-rain-drop" style=format!(
                                                 "left:{left}%; top:{top}px; --gx-rain-delay:{delay:.2}s; --gx-rain-speed:{speed:.2}s; --gx-rain-alpha:{alpha:.2}; --gx-rain-size:{size:.2}"
@@ -1538,6 +1600,7 @@ pub fn RideTimeline(
                                 None => ().into_any(),
                             }
                         }).collect_view()}
+                    </div>
                     </div>
 
                     // ---- best-window tab (below plot, anchored to the box) ----
