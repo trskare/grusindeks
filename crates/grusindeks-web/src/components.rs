@@ -820,8 +820,12 @@ pub fn DayCard(
     };
 
     let st = &day.center().score.stats;
-    let weather =
-        (!st.is_empty()).then(|| format!("{:.0}° · {:.1} mm", st.max_temp_c, st.total_precip_mm));
+    let weather = (!st.is_empty()).then(|| {
+        format!(
+            "{:.0}° · {:.1} mm · {:.0} m/s",
+            st.max_temp_c, st.total_precip_mm, st.max_wind_ms
+        )
+    });
 
     let best = day.optimal_window.as_ref().map(|ow| {
         let s = ow.window.start.with_timezone(&Local).format("%H:%M");
