@@ -365,7 +365,10 @@ pub fn Recommendation(
             </div>
 
             // Better window — later today, or tomorrow once today's window is over.
-            {best_window.map(|bw| {
+            // Only when it's genuinely better (improvement > 0 — a "+0" window is
+            // no better than the day) and still ahead of us ("senere"/"i morgen"
+            // both imply the future); otherwise there's no better window to flag.
+            {best_window.filter(|bw| bw.improvement > 0 && (bw.tomorrow || bw.starts_in_future)).map(|bw| {
                 let breathe = if waiting { "gx-breathe" } else { "" };
                 let when = if bw.tomorrow { "Bedre vindu i morgen" } else { "Bedre vindu senere" };
                 view! {
