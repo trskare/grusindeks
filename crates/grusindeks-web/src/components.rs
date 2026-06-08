@@ -59,10 +59,13 @@ impl BestWindowHint {
     /// Build from an [`OptimalWindow`], formatting the window edges in local
     /// time. `now` is the wall clock used to decide whether the window is
     /// still ahead; `sunset` (if known) gates the "wait for it" suggestion.
+    /// `polar` disambiguates a missing sunset: midnight sun (always light) vs
+    /// polar night (always dark) — we never suggest waiting into the dark.
     pub fn from_window(
         ow: &grusindeks_core::daily::OptimalWindow,
         now: DateTime<Utc>,
         sunset: Option<DateTime<Utc>>,
+        polar: Option<grusindeks_core::sun::PolarDay>,
     ) -> Self {
         Self {
             start: ow
@@ -81,7 +84,12 @@ impl BestWindowHint {
             reason: ow.reason.map(best_window_reason_label),
             total: ow.score.total,
             starts_in_future: ow.window.start > now,
-            before_sunset: sunset.is_none_or(|s| ow.window.start < s),
+            // With a real sunset, the window must start before it. Without one,
+            // it's polar: midnight sun is fine, polar night never is.
+            before_sunset: sunset.map_or_else(
+                || !matches!(polar, Some(grusindeks_core::sun::PolarDay::PolarNight)),
+                |s| ow.window.start < s,
+            ),
             tomorrow: ow.window.start.with_timezone(&Oslo).date_naive()
                 != now.with_timezone(&Oslo).date_naive(),
         }

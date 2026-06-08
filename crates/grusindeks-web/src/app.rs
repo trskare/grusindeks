@@ -210,7 +210,8 @@ fn DashboardPage() -> impl IntoView {
                                     let penalties = c.score.penalties.clone();
                                     let breakdown = c.score.breakdown;
                                     let stats = c.score.stats;
-                                    let (sunrise, sunset) = agg.sun.map_or((None, None), |s| (s.sunrise, s.sunset));
+                                    let (sunrise, sunset, polar) =
+                                        agg.sun.map_or((None, None, None), |s| (s.sunrise, s.sunset, s.polar));
                                     // Today's stand-out window, promoted from the multi-day strip.
                                     // Only surface it while it's still relevant (not fully past).
                                     let now = chrono::Utc::now();
@@ -223,7 +224,7 @@ fn DashboardPage() -> impl IntoView {
                                     });
                                     let best_window = optimal
                                         .as_ref()
-                                        .map(|ow| BestWindowHint::from_window(ow, now, sunset));
+                                        .map(|ow| BestWindowHint::from_window(ow, now, sunset, polar));
                                     // Raw window for the timeline overlay — only when it's
                                     // *today* (the timeline shows the rest of today; a window
                                     // that rolled to tomorrow doesn't belong on it).

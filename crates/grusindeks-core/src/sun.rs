@@ -38,19 +38,54 @@ pub fn solar_elevation_deg(time: DateTime<Utc>, lat_deg: f64, lon_deg: f64) -> f
     sin_elev.clamp(-1.0, 1.0).asin() / d2r
 }
 
+/// When the sun never crosses the horizon on a date (so there's neither a
+/// sunrise nor a sunset), which half of the polar year it is — the bright one
+/// (sun always up) or the dark one (sun always down). Lets a consumer tell the
+/// two `None`-sunset cases apart: e.g. don't suggest "wait for a later window"
+/// during polar night, when every later hour is dark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PolarDay {
+    /// Midnight sun — the sun stays above the horizon all day.
+    MidnightSun,
+    /// Polar night — the sun stays below the horizon all day.
+    PolarNight,
+}
+
 /// Sunrise and sunset for one date and location, in UTC.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SunTimes {
     pub sunrise: Option<DateTime<Utc>>,
     pub sunset: Option<DateTime<Utc>>,
+    /// Set only when neither `sunrise` nor `sunset` occurs (the sun doesn't
+    /// cross the horizon): which polar regime it is. `None` on ordinary days.
+    #[serde(default)]
+    pub polar: Option<PolarDay>,
 }
 
 /// Sunrise/sunset for `date` (civil date at the location) at `lat_deg`/`lon_deg`
 /// (north / east positive).
 pub fn sun_times(date: NaiveDate, lat_deg: f64, lon_deg: f64) -> SunTimes {
+    let sunrise = event(date, lat_deg, lon_deg, true);
+    let sunset = event(date, lat_deg, lon_deg, false);
+    // No horizon crossing → classify by the sun's height at solar noon (its
+    // daily maximum): above the horizon means it never set (midnight sun),
+    // below means it never rose (polar night).
+    let polar = match (sunrise, sunset) {
+        (None, None) => date.and_hms_opt(0, 0, 0).map(|midnight| {
+            let noon_secs = ((12.0 - lon_deg / 15.0).rem_euclid(24.0) * 3600.0).round() as i64;
+            let noon = Utc.from_utc_datetime(&midnight) + Duration::seconds(noon_secs);
+            if solar_elevation_deg(noon, lat_deg, lon_deg) > 0.0 {
+                PolarDay::MidnightSun
+            } else {
+                PolarDay::PolarNight
+            }
+        }),
+        _ => None,
+    };
     SunTimes {
-        sunrise: event(date, lat_deg, lon_deg, true),
-        sunset: event(date, lat_deg, lon_deg, false),
+        sunrise,
+        sunset,
+        polar,
     }
 }
 
@@ -139,6 +174,18 @@ mod tests {
         let s = sun_times(date, 78.22, 15.65); // Longyearbyen
         assert!(s.sunset.is_none());
         assert!(s.sunrise.is_none());
+        assert_eq!(s.polar, Some(PolarDay::MidnightSun));
+    }
+
+    /// Same place mid-winter: the sun never rises — polar night, distinguished
+    /// from midnight sun even though both have no sunrise/sunset.
+    #[test]
+    fn polar_night_is_classified_distinctly() {
+        let date = NaiveDate::from_ymd_opt(2026, 12, 21).unwrap();
+        let s = sun_times(date, 78.22, 15.65); // Longyearbyen
+        assert!(s.sunset.is_none());
+        assert!(s.sunrise.is_none());
+        assert_eq!(s.polar, Some(PolarDay::PolarNight));
     }
 
     // ---- solar_elevation_deg ----
