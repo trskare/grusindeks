@@ -73,9 +73,14 @@ pub enum BestWindowReason {
     MinstKald,
     /// The window has the lowest wind / gusts.
     Vind,
-    /// The window is the driest stretch — least precipitation amount
-    /// and/or the lowest probability of rain.
+    /// The window is the driest stretch, driven by *actual* precipitation —
+    /// it has less measured rain than the rest of the day. Renders "tørrest".
     Nedbor,
+    /// The window has the lowest *probability* of rain, while measured
+    /// precipitation barely differs across the day (so calling it "driest"
+    /// would mislead — it's a lower rain-risk, not less actual rain).
+    /// Renders "minst regn-sjanse".
+    RegnSjanse,
 }
 
 impl BestWindowReason {
@@ -87,10 +92,12 @@ impl BestWindowReason {
             (Language::Norwegian, BestWindowReason::MinstKald) => "minst kald",
             (Language::Norwegian, BestWindowReason::Vind) => "minst vind",
             (Language::Norwegian, BestWindowReason::Nedbor) => "tørrest",
+            (Language::Norwegian, BestWindowReason::RegnSjanse) => "minst regn-sjanse",
             (Language::Swedish, BestWindowReason::Mildest) => "mildast",
             (Language::Swedish, BestWindowReason::MinstKald) => "minst kall",
             (Language::Swedish, BestWindowReason::Vind) => "minst vind",
             (Language::Swedish, BestWindowReason::Nedbor) => "torrast",
+            (Language::Swedish, BestWindowReason::RegnSjanse) => "minst regnrisk",
         }
     }
 }
@@ -393,15 +400,22 @@ fn pick_reason(window: &ScoreBreakdown, day: &ScoreBreakdown) -> Option<BestWind
         |w: u8, d: u8, weight: u8| -> i32 { (i32::from(w) - i32::from(d)) * i32::from(weight) };
     let temp = weighted(window.temperature, day.temperature, thresholds::W_TEMP);
     let wind = weighted(window.wind, day.wind, thresholds::W_WIND);
-    let precip = weighted(
+    // Split the rain axis into its two drivers so the label can be honest:
+    // measured rain ("tørrest") vs only a lower chance of rain
+    // ("minst regn-sjanse"). W_PRECIP (25) > W_PROB (10), so when real rain
+    // differs it dominates; a near-dry day where only the chance varies lands
+    // on the probability side.
+    let precip_amount = weighted(
         window.precipitation,
         day.precipitation,
         thresholds::W_PRECIP,
-    ) + weighted(
+    );
+    let precip_prob = weighted(
         window.precip_probability,
         day.precip_probability,
         thresholds::W_PROB,
     );
+    let precip = precip_amount + precip_prob;
 
     let max = temp.max(wind).max(precip);
     if max <= 0 {
@@ -410,8 +424,13 @@ fn pick_reason(window: &ScoreBreakdown, day: &ScoreBreakdown) -> Option<BestWind
     if precip == max {
         // Tie-break against precipitation first: rain dominates a ride
         // experientially. If two axes are equal, the user cares about
-        // "is it dry?" before "is it warm?".
-        Some(BestWindowReason::Nedbor)
+        // "is it dry?" before "is it warm?". Then distinguish actual rain
+        // from mere rain-risk so we don't say "driest" on a dry day.
+        if precip_amount >= precip_prob {
+            Some(BestWindowReason::Nedbor)
+        } else {
+            Some(BestWindowReason::RegnSjanse)
+        }
     } else if wind == max {
         Some(BestWindowReason::Vind)
     } else {
@@ -660,6 +679,33 @@ mod tests {
         )
         .expect("non-empty");
         assert_eq!(ow.reason, Some(BestWindowReason::Nedbor));
+    }
+
+    #[test]
+    fn best_window_reason_is_regn_sjanse_when_only_rain_chance_differs() {
+        // No measured rain anywhere (0 mm all day), but a high *chance* of
+        // rain except in a 3h window. The reason must be the rain-risk label,
+        // not "tørrest" — calling a dry day "driest" would mislead.
+        let mut hours: Vec<HourlyConditions> = (6..18)
+            .map(|h| HourlyConditions {
+                probability_of_precip: Some(80.0),
+                ..nice_hour(t(2026, 4, 26, h)) // 0 mm, mild, calm
+            })
+            .collect();
+        // Middle 3h (9..12) has a low rain chance — the low-risk "luke".
+        for hour in hours.iter_mut().skip(3).take(3) {
+            hour.probability_of_precip = Some(3.0);
+        }
+        let day = day_window(6, 12);
+        let ow = find_best_window(
+            &hours,
+            day,
+            3,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        )
+        .expect("non-empty");
+        assert_eq!(ow.reason, Some(BestWindowReason::RegnSjanse));
     }
 
     #[test]
