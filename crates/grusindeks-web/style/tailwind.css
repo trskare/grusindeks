@@ -159,6 +159,10 @@
   .gx-popdown { opacity: 1; transform: scale(1); }
   /* No blinking — keep a faint static wash so the thunder cue still reads. */
   .gx-lightning { opacity: 0.22; }
+  /* Without the fall animation each drop sits at its inline negative `top`,
+     above the clipped band → invisible. Pin them into view as static streaks so
+     rain still reads (overrides the inline top). */
+  .gx-rain-drop { top: 18% !important; opacity: 0.5 !important; transform: none !important; }
 }
 
 /* Depth system. Two recipes, deliberately: a raised plate (cards) and an

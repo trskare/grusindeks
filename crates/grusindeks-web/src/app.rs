@@ -410,12 +410,24 @@ fn DashboardPage() -> impl IntoView {
                                                 selected_best_window.set(None);
                                             }>
                                                 <div
+                                                    role="dialog"
+                                                    aria-modal="true"
+                                                    aria-label="Timesvarsel for dagen"
+                                                    tabindex="-1"
                                                     class="gx-popdown fixed w-[min(58rem,calc(100vw-1rem))] rounded-2xl bg-gruv-bg1 p-4 shadow-2xl ring-1 ring-gruv-bg2/70"
                                                     style=style
                                                     on:click=move |ev| ev.stop_propagation()
+                                                    on:keydown=move |ev| {
+                                                        if ev.key() == "Escape" {
+                                                            selected_day.set(None);
+                                                            selected_best_window.set(None);
+                                                        }
+                                                    }
                                                 >
                                                     <div class="mb-2 flex justify-end">
                                                         <button type="button"
+                                                            autofocus
+                                                            aria-label="Lukk"
                                                             class="cursor-pointer rounded-lg bg-gruv-bg0/70 px-2.5 py-1 text-xs font-semibold text-gruv-fg/70 ring-1 ring-gruv-bg2 transition-colors hover:bg-gruv-bg2/60 hover:text-gruv-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gruv-aqua"
                                                             on:click=move |_| {
                                                                 selected_day.set(None);
