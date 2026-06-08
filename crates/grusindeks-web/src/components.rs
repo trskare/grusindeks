@@ -820,6 +820,9 @@ pub fn DayCard(
 ) -> impl IntoView {
     let mean = day.mean;
     let date = day.date.format("%a %d.%m").to_string();
+    // Highlight the current day with an "i dag" sticker. Date computed in Oslo
+    // time like every other formatting here — never the server's `Local`.
+    let is_today = day.date == Utc::now().with_timezone(&Oslo).date_naive();
     let icon = day
         .center()
         .map(|c| c.weather_icon.clone())
@@ -884,7 +887,14 @@ pub fn DayCard(
             }
         >
             <div class="flex items-center justify-between">
-                <span class="text-sm text-gruv-fg/70">{date}</span>
+                <span class="flex items-center gap-1.5 text-sm text-gruv-fg/70">
+                    {date}
+                    {is_today.then(|| view! {
+                        <span class="rounded-full bg-gruv-aqua px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-gruv-bg0">
+                            "i dag"
+                        </span>
+                    })}
+                </span>
                 <span class="text-lg">{icon}</span>
             </div>
             <div class=format!("mt-2 text-2xl font-bold tabular-nums {mean_color}")>
