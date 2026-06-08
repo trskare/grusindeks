@@ -764,7 +764,7 @@ fn ground_chip(forecast: &MultiDayForecast) -> Option<String> {
     // surface state is shared across the whole forecast, so any day will
     // do, and the first one is always present.
     let first = forecast.days.first()?;
-    let center = first.center();
+    let center = first.center()?;
     let penalty = center
         .score
         .penalties
@@ -823,7 +823,7 @@ fn write_day_row(
     flags: ChipFlags,
     lang: Language,
 ) {
-    let center = day.center();
+    let Some(center) = day.center() else { return };
     let day_label = day_label(day.date, today_local, lang);
     let icon = center.weather_icon.as_str();
 
@@ -872,8 +872,7 @@ fn write_day_row(
     //   * default mode: today only — that's the day the user acts on
     //   * --verbose: every day. The tree's last row closes with `└─`
     //     unless penalty rows follow (verbose only).
-    let want_tall =
-        flags.window_stats && (is_today || verbose) && !day.center().score.stats.is_empty();
+    let want_tall = flags.window_stats && (is_today || verbose) && !center.score.stats.is_empty();
     if is_today || verbose {
         // The breakdown tree closes with `└─` unless something else
         // follows it — penalty rows in verbose, or the Tall stats line
@@ -882,7 +881,7 @@ fn write_day_row(
         write_day_breakdown(out, day, dim, breakdown_continues, lang);
     }
     if want_tall {
-        let stats = &day.center().score.stats;
+        let stats = &center.score.stats;
         let tail_branch = if verbose && penalty_take > 0 {
             "├─"
         } else {

@@ -667,14 +667,41 @@ fn PlacesSection() -> impl IntoView {
     let new_lat = RwSignal::new(String::new());
     let new_lon = RwSignal::new(String::new());
     let new_radius = RwSignal::new("20".to_string());
+    let new_err = RwSignal::new(None::<String>);
 
     let add = move |_| {
+        // Validate before saving: previously a bad/empty field parsed to 0.0,
+        // silently persisting a valid-looking place at (0,0). Accept Norwegian
+        // decimal commas, then range-check.
+        let parse = |s: String| s.trim().replace(',', ".").parse::<f64>().ok();
+        let name = new_name.get().trim().to_string();
+        let (lat, lon, radius) = (
+            parse(new_lat.get()),
+            parse(new_lon.get()),
+            parse(new_radius.get()),
+        );
+        let problem = if name.is_empty() {
+            Some("Stedet trenger et navn.")
+        } else if !matches!(lat, Some(v) if (-90.0..=90.0).contains(&v)) {
+            Some("Breddegrad må være et tall mellom −90 og 90.")
+        } else if !matches!(lon, Some(v) if (-180.0..=180.0).contains(&v)) {
+            Some("Lengdegrad må være et tall mellom −180 og 180.")
+        } else if !matches!(radius, Some(v) if v > 0.0 && v <= 100.0) {
+            Some("Radius må være et tall mellom 0 og 100 km.")
+        } else {
+            None
+        };
+        if let Some(msg) = problem {
+            new_err.set(Some(msg.to_string()));
+            return;
+        }
+        new_err.set(None);
         save.dispatch(PlaceDto {
             id: None,
-            name: new_name.get(),
-            lat: new_lat.get().parse().unwrap_or(0.0),
-            lon: new_lon.get().parse().unwrap_or(0.0),
-            radius_km: new_radius.get().parse().unwrap_or(20.0),
+            name,
+            lat: lat.unwrap(),
+            lon: lon.unwrap(),
+            radius_km: radius.unwrap(),
             frost_source_id: String::new(),
         });
         new_name.set(String::new());
@@ -722,6 +749,9 @@ fn PlacesSection() -> impl IntoView {
                 <input class=input_cls() placeholder="radius km" prop:value=move || new_radius.get()
                     on:input=move |ev| new_radius.set(event_target_value(&ev))/>
             </div>
+            {move || new_err.get().map(|e| view! {
+                <p class="text-sm text-gruv-red">{e}</p>
+            })}
             <button class=btn_cls() on:click=add>"Legg til sted"</button>
         </div>
     }

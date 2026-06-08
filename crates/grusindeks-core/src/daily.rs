@@ -248,6 +248,12 @@ pub fn weather_icon_for(hours: &[&HourlyConditions]) -> &'static str {
     if max_wind.is_finite() && max_wind > 10.0 {
         return "🌬";
     }
+    // Thunder outranks rain/cloud: MET emits low-precip thunder symbols
+    // (e.g. lightrainshowersandthunder) that would otherwise fall through to a
+    // sun/cloud glyph while the timeline draws lightning.
+    if hours.iter().any(|h| h.thunder) {
+        return "⛈";
+    }
     // Rain icon only when intensity *or* accumulation actually matters
     // for the ride. Tuned to roughly match the scoring drizzle threshold
     // (0.5 mm/h) and a multi-hour wet stretch (~3 mm total).
@@ -932,6 +938,24 @@ mod tests {
         hs[3].precipitation_mm = 0.8;
         let refs: Vec<&HourlyConditions> = hs.iter().collect();
         assert_eq!(weather_icon_for(&refs), "🌧");
+    }
+
+    #[test]
+    fn weather_icon_thunder_dominates_low_precip_day() {
+        // A low-precip thunder hour (MET's lightrainshowersandthunder) must show
+        // the storm glyph, not sun/cloud — the precip never clears the rain
+        // threshold, so without the thunder check it would fall through to ☀/⛅.
+        let mut hs: Vec<_> = (6..18)
+            .map(|h| HourlyConditions {
+                thunder: false,
+                cloud_area_fraction: Some(30.0),
+                ..HourlyConditions::minimal(t(2026, 4, 26, h), 18.0, 2.0, 0.0)
+            })
+            .collect();
+        hs[4].thunder = true;
+        hs[4].precipitation_mm = 0.2; // below the 0.5 mm/h rain threshold
+        let refs: Vec<&HourlyConditions> = hs.iter().collect();
+        assert_eq!(weather_icon_for(&refs), "⛈");
     }
 
     #[test]

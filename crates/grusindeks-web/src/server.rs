@@ -178,7 +178,7 @@ pub async fn get_forecast(place: String, days: u8) -> Result<MultiDayForecast, S
                     mean: day.mean,
                     min: day.min,
                     max: day.max,
-                    breakdown: Some(day.center().score.breakdown),
+                    breakdown: day.center().map(|c| c.score.breakdown),
                     confidence: Some(conf),
                 },
             )

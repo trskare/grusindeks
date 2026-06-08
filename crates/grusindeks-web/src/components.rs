@@ -274,8 +274,12 @@ pub fn Recommendation(
         Some(bw) => (
             format!("Vent til {}", bw.start),
             format!(
+                // Delta vs *now* — the same gap the gate (bw.total >= total + 10)
+                // fires on. `bw.improvement` is measured against the day mean, a
+                // different baseline, so it could show a contradictory number.
                 "Bedre forhold senere i dag — +{} poeng fra {}.",
-                bw.improvement, bw.start
+                bw.total.saturating_sub(total),
+                bw.start
             ),
         ),
         None => (default_cta.to_string(), default_summary.to_string()),
@@ -807,7 +811,10 @@ pub fn DayCard(
 ) -> impl IntoView {
     let mean = day.mean;
     let date = day.date.format("%a %d.%m").to_string();
-    let icon = day.center().weather_icon.clone();
+    let icon = day
+        .center()
+        .map(|c| c.weather_icon.clone())
+        .unwrap_or_default();
     let low = day.confidence == Confidence::Lav;
     // Low-confidence days are signalled by a dashed border and a neutral mean
     // colour — never by dimming, which would drop the numbers below readable
@@ -823,13 +830,16 @@ pub fn DayCard(
         color::text_class(mean)
     };
 
-    let st = &day.center().score.stats;
-    let weather = (!st.is_empty()).then(|| {
-        format!(
-            "{:.0}° · {:.1} mm · {:.0} m/s",
-            st.max_temp_c, st.total_precip_mm, st.max_wind_ms
-        )
-    });
+    let weather = day
+        .center()
+        .map(|c| &c.score.stats)
+        .filter(|st| !st.is_empty())
+        .map(|st| {
+            format!(
+                "{:.0}° · {:.1} mm · {:.0} m/s",
+                st.max_temp_c, st.total_precip_mm, st.max_wind_ms
+            )
+        });
 
     let best = day.optimal_window.as_ref().map(|ow| {
         let s = ow.window.start.with_timezone(&Oslo).format("%H:%M");

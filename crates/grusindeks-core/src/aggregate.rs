@@ -351,13 +351,14 @@ fn mean_u8(xs: &[u8]) -> u8 {
 impl DayAggregate {
     /// The center sample's full `DayScore`. Used by the renderer to pick a
     /// representative weather icon and penalty list for the day — neither
-    /// of which makes sense to "average" across points.
-    pub fn center(&self) -> &DayScore {
+    /// of which makes sense to "average" across points. `None` only for a
+    /// malformed (empty-`points`) value; `from_points` always yields `Some`.
+    pub fn center(&self) -> Option<&DayScore> {
         self.points
             .iter()
             .find(|p| p.is_center)
+            .or_else(|| self.points.first())
             .map(|p| &p.day_score)
-            .unwrap_or(&self.points[0].day_score)
     }
 }
 
