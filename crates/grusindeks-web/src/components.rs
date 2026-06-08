@@ -2,7 +2,7 @@
 //! awaited server-fn response) and renders with the shared score palette
 //! ([`crate::color`]). Animations are plain CSS transitions.
 
-use chrono::{DateTime, Duration, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Duration, Timelike, Utc};
 // Fixed Norway zone for all display formatting — never the server's `Local`,
 // which is UTC in the container and would render every time 1–2 h off (and is
 // resolved server-side under SSR, breaking hydration). The app is Norway-only.
@@ -1128,7 +1128,6 @@ pub fn RideTimeline(
     /// Wall clock captured once by the caller.
     now: DateTime<Utc>,
 ) -> impl IntoView {
-    let date = day.date;
     let hours = day.hours;
     if hours.is_empty() {
         return view! {
@@ -1137,27 +1136,15 @@ pub fn RideTimeline(
         .into_any();
     }
 
-    // ---- domain: "now → end of the shown day". MET publishes no past hours,
-    // so a full 00–24 axis would be mostly empty in the evening; instead we
-    // start at `now` for today (the timeline is always full of forecast) and at
-    // local midnight for a future day. End is that day's midnight. Local
-    // midnight is resolved client-side.
-    let local_midnight = |d: chrono::NaiveDate| -> Option<DateTime<Utc>> {
-        Oslo.from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
-            .single()
-            .map(|t| t.with_timezone(&Utc))
-    };
-    // Start at the first forecast hour we actually have (the live hour for
-    // today, midnight for a future day) so the lanes fill from the left edge —
-    // no empty sliver before the first cell. End at the shown day's midnight.
+    // ---- domain: the span we actually have data for. Start at the first
+    // forecast hour (the live hour for today, the window start for a future
+    // day) and end at the last hour's end — NOT a forced local midnight, which
+    // left an empty 22→24 sliver whenever the data stops at the daytime-window
+    // end (e.g. the day-detail popup's 10–22 window). Only the best-window box
+    // may push the end out further.
     let d0 = hours.first().unwrap().time;
     let last_end = hours.last().unwrap().time + Duration::hours(1);
-    let dom_end0 = date
-        .succ_opt()
-        .and_then(local_midnight)
-        .unwrap_or(last_end)
-        .max(last_end);
-    let dom_end = best_window.map_or(dom_end0, |w| dom_end0.max(w.end));
+    let dom_end = best_window.map_or(last_end, |w| last_end.max(w.end));
     let span = (dom_end - d0).num_seconds().max(1) as f64;
     let frac = |t: DateTime<Utc>| (((t - d0).num_seconds()) as f64 / span).clamp(0.0, 1.0);
 
