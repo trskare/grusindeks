@@ -305,11 +305,20 @@ pub fn find_best_window_excluding(
     if length_hours <= 0 || day_window.duration_hours() < length_hours {
         return None;
     }
-    if !hours.iter().any(|h| day_window.contains(h.time)) {
+    // Filter to the day window once. Every candidate below is a sub-window of
+    // it, so scoring against this small slice is identical to scoring against
+    // the full (often multi-day, ~100–200 h) `hours` — but avoids re-filtering
+    // every hour inside `score` per candidate, plus the separate has-data scan.
+    let day_hours: Vec<HourlyConditions> = hours
+        .iter()
+        .filter(|h| day_window.contains(h.time))
+        .cloned()
+        .collect();
+    if day_hours.is_empty() {
         return None;
     }
 
-    let day_score = score(hours, day_window, surface, lang);
+    let day_score = score(&day_hours, day_window, surface, lang);
     let day_total = day_score.total;
     let len = Duration::hours(length_hours);
 
@@ -330,9 +339,9 @@ pub fn find_best_window_excluding(
         // Only score sub-windows that actually contain at least one hour
         // of data; otherwise we'd compare against the empty-window neutral
         // fallback inside `score`, which is misleading.
-        let has_data = hours.iter().any(|h| candidate.contains(h.time));
+        let has_data = day_hours.iter().any(|h| candidate.contains(h.time));
         if has_data {
-            let s = score(hours, candidate, surface, lang);
+            let s = score(&day_hours, candidate, surface, lang);
             best = match best {
                 None => Some((candidate, s)),
                 Some((_, ref cur)) if s.total > cur.total => Some((candidate, s)),

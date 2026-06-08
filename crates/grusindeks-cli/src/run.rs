@@ -368,12 +368,16 @@ pub async fn run_hourly(client: &MetClient, inputs: HourlyInputs<'_>) -> Result<
             let mut bd_ground: u32 = 0;
             let mut six_hourly = false;
             for (_, point_hours) in &per_point_hours {
-                if let Some(h) = point_hours.iter().find(|h| h.time == start) {
-                    if h.resolution == Resolution::SixHourly {
-                        six_hourly = true;
-                    }
+                let h = point_hours.iter().find(|h| h.time == start);
+                if h.is_some_and(|h| h.resolution == Resolution::SixHourly) {
+                    six_hourly = true;
                 }
-                let s = score(point_hours, hour_window, surface_now, inputs.lang);
+                // The bucket's one hour is already located — score just it
+                // instead of making `score` linear-scan the point's full
+                // (~100–200 h, multi-day) slice per bucket. `None` → empty
+                // slice reproduces score's empty-window neutral fallback.
+                let one = h.map(std::slice::from_ref).unwrap_or(&[]);
+                let s = score(one, hour_window, surface_now, inputs.lang);
                 totals.push(s.total);
                 bd_temp += u32::from(s.breakdown.temperature);
                 bd_wind += u32::from(s.breakdown.wind);
