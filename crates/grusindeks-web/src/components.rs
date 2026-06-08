@@ -1060,6 +1060,52 @@ fn lane_y(lane: usize, value: f64, min: f64, max: f64) -> f64 {
     top + (1.0 - ((value - min) / range).clamp(0.0, 1.0)) * h
 }
 
+/// Horizontal `mask-image` gradient for the cloud strip: per-hour alpha =
+/// cloud_area_fraction (sharpened so partly-cloudy hours thin out and the
+/// tile's sky gaps show through; clear <10 % → 0). White stops so it works in
+/// alpha- and luminance-mask modes alike. The first/last hours are anchored to
+/// the 0 %/100 % edges when the data fills the domain, so a fully-overcast hour
+/// (incl. a lone final hour, `n == 1`) renders edge-to-edge instead of a
+/// triangular "clouds-in-the-middle" band; an empty tail (e.g. `best_window`
+/// stretched the domain past the last hour) still fades to clear.
+/// Each cell is `(left, right, mid, cloud_pct)`: the hour's left/right/centre as
+/// 0–1 fractions of the domain width, plus its cloud_area_fraction (0–100,
+/// `None` = unknown → treated as clear).
+fn cloud_cover_mask(cells: &[(f64, f64, f64, Option<f64>)]) -> String {
+    let alpha = |cloud: Option<f64>| {
+        cloud
+            .map(|v| (v / 100.0).clamp(0.0, 1.0))
+            .filter(|f| *f >= 0.10)
+            .map_or(0.0, |f| f.powf(1.15).min(0.97))
+    };
+    let (Some(first), Some(last)) = (cells.first(), cells.last()) else {
+        return "linear-gradient(to right, rgba(255,255,255,0) 0%, rgba(255,255,255,0) 100%)"
+            .into();
+    };
+    let mut stops: Vec<String> = Vec::new();
+    if first.0 > 0.001 {
+        // Genuine empty space before the first hour — keep it clear.
+        stops.push("rgba(255,255,255,0) 0%".into());
+        stops.push(format!("rgba(255,255,255,0) {:.1}%", first.0 * 100.0));
+    } else {
+        stops.push(format!("rgba(255,255,255,{:.2}) 0%", alpha(first.3)));
+    }
+    for &(_, _, mid, cloud) in cells {
+        stops.push(format!(
+            "rgba(255,255,255,{:.2}) {:.1}%",
+            alpha(cloud),
+            mid * 100.0
+        ));
+    }
+    if last.1 < 0.999 {
+        stops.push(format!("rgba(255,255,255,0) {:.1}%", last.1 * 100.0));
+        stops.push("rgba(255,255,255,0) 100%".into());
+    } else {
+        stops.push(format!("rgba(255,255,255,{:.2}) 100%", alpha(last.3)));
+    }
+    format!("linear-gradient(to right, {})", stops.join(", "))
+}
+
 #[component]
 pub fn RideTimeline(
     day: HourlyDayAggregate,
@@ -1376,32 +1422,11 @@ pub fn RideTimeline(
                     // cloud_area_fraction. Dense where overcast, thin where partly
                     // cloudy, gone where clear. No discrete sprites.
                     {
-                        // Horizontal coverage mask: alpha at each hour's midpoint =
-                        // cloud %. CSS interpolates between midpoints → smooth deck.
-                        let mask = {
-                            // White (not black) so the mask works whether the engine
-                            // reads the gradient as alpha- or luminance-mode.
-                            let mut stops: Vec<String> = Vec::new();
-                            if cols.first().is_some_and(|c| c.mid > 0.0) {
-                                stops.push("rgba(255,255,255,0) 0%".into());
-                            }
-                            for c in &cols {
-                                let a = c
-                                    .s
-                                    .raw
-                                    .and_then(|r| r.cloud_area_fraction)
-                                    .map(|v| (v / 100.0).clamp(0.0, 1.0))
-                                    .filter(|f| *f >= 0.10) // under ~10 % = klart
-                                    // Sharper-than-linear: scattered hours render
-                                    // sparser so the tile's sky gaps show through.
-                                    .map_or(0.0, |f| f.powf(1.15).min(0.97));
-                                stops.push(format!("rgba(255,255,255,{a:.2}) {:.1}%", c.mid * 100.0));
-                            }
-                            // Fade out at the right edge (also covers any empty tail
-                            // when best_window stretches the domain past the last hour).
-                            stops.push("rgba(255,255,255,0) 100%".into());
-                            format!("linear-gradient(to right, {})", stops.join(", "))
-                        };
+                        let cells: Vec<(f64, f64, f64, Option<f64>)> = cols
+                            .iter()
+                            .map(|c| (c.l, c.r, c.mid, c.s.raw.and_then(|r| r.cloud_area_fraction)))
+                            .collect();
+                        let mask = cloud_cover_mask(&cells);
                         view! {
                             <div class="relative h-9 w-full overflow-hidden border-b border-gruv-bg0/60">
                                 <div class="gx-sky absolute inset-0"
@@ -1686,4 +1711,45 @@ pub fn RideTimeline(
         </div>
     }
     .into_any()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cloud_cover_mask;
+
+    #[test]
+    fn cloud_mask_single_overcast_hour_covers_edge_to_edge() {
+        // n == 1, fully overcast: the deck must fill 0%..100%, not render a
+        // triangular "clouds-in-the-middle" band that fades in/out at the edges.
+        let mask = cloud_cover_mask(&[(0.0, 1.0, 0.5, Some(100.0))]);
+        assert!(mask.contains("0.97) 0%"), "left edge not covered: {mask}");
+        assert!(
+            mask.contains("0.97) 100%"),
+            "right edge not covered: {mask}"
+        );
+    }
+
+    #[test]
+    fn cloud_mask_clear_sky_is_fully_transparent() {
+        let mask = cloud_cover_mask(&[(0.0, 1.0, 0.5, Some(2.0))]);
+        assert!(
+            mask.contains("0.00) 0%"),
+            "clear edge should be zero alpha: {mask}"
+        );
+        assert!(
+            !mask.contains("0.97"),
+            "clear sky should have no opaque stop: {mask}"
+        );
+    }
+
+    #[test]
+    fn cloud_mask_empty_tail_fades_to_clear() {
+        // Data fills only 0..0.6 of the domain (best_window stretched it past the
+        // last hour) → the tail must fade to transparent, not hold the deck.
+        let mask = cloud_cover_mask(&[(0.0, 0.6, 0.3, Some(100.0))]);
+        assert!(
+            mask.contains("rgba(255,255,255,0) 100%"),
+            "empty tail not cleared: {mask}"
+        );
+    }
 }

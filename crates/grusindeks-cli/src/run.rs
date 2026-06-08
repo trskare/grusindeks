@@ -774,9 +774,14 @@ fn snow_suspected(history: &[frost::HourlyObservation]) -> bool {
         .filter_map(|h| h.precip_mm)
         .filter(|m| m.is_finite() && *m > 0.0)
         .sum();
+    // Use the most-recent hour that actually carries a temperature, not just
+    // the final one: a station omitting the temp sensor (or a non-finite
+    // reading) on the last hour would otherwise force still_cold = false and
+    // suppress the flag right after sub-zero precip.
     let still_cold = history
-        .last()
-        .and_then(|h| h.temp_c)
+        .iter()
+        .rev()
+        .find_map(|h| h.temp_c.filter(|t| t.is_finite()))
         .is_some_and(|t| t <= 1.0);
     frozen_precip >= SNOW_SUSPECT_FROZEN_PRECIP_MM && still_cold
 }
@@ -1872,6 +1877,29 @@ mod tests {
             })
             .collect();
         assert!(snow_suspected(&history));
+    }
+
+    #[test]
+    fn snow_suspected_uses_last_finite_temp_not_missing_final_hour() {
+        // Sub-zero snowfall, still cold — but the final hour's station dropped
+        // its temperature reading. "still cold" must fall back to the most
+        // recent *finite* temp instead of giving up and clearing the flag.
+        let now = Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap();
+        let mut history: Vec<frost::HourlyObservation> = (0..12)
+            .map(|i| frost::HourlyObservation {
+                time: now - Duration::hours(12 - i),
+                precip_mm: Some(0.5),
+                temp_c: Some(-3.0),
+                wind_ms: Some(2.0),
+                humidity_pct: Some(90.0),
+                cloud_pct: Some(95.0),
+            })
+            .collect();
+        history.last_mut().unwrap().temp_c = None; // sensor gap on the last hour
+        assert!(
+            snow_suspected(&history),
+            "a missing final temp must not suppress the snow flag"
+        );
     }
 
     #[test]

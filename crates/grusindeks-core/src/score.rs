@@ -602,7 +602,16 @@ fn severity_for(subscore: u8) -> Option<Severity> {
 
 fn temp_penalty(subscore: u8, mean_temp: f64, felt_temp: f64, lang: Language) -> Option<Penalty> {
     let severity = severity_for(subscore)?;
-    let cold = mean_temp < thresholds::TEMP_OPTIMAL_LOW;
+    // The subscore is computed from felt-T, so the cold/warm word must follow
+    // felt-T too — otherwise a windy mild day (air 12 °C, felt 8 °C) reads
+    // "varmt … føles som 8 °C", contradicting itself. Fall back to air temp
+    // when felt-T isn't finite.
+    let basis_temp = if felt_temp.is_finite() {
+        felt_temp
+    } else {
+        mean_temp
+    };
+    let cold = basis_temp < thresholds::TEMP_OPTIMAL_LOW;
     // Surface "felt-T" only when it diverges meaningfully from air temp
     // (>= 2 °C). Otherwise it's just noise and the wind/humidity context
     // is already covered by the other axes.
@@ -2177,6 +2186,27 @@ mod tests {
             temp_pen.message.contains("føles som"),
             "penalty message did not mention felt-T: {:?}",
             temp_pen.message
+        );
+    }
+
+    #[test]
+    fn temp_penalty_word_follows_felt_not_air() {
+        // The subscore is computed from felt-T, so the cold/warm word must too.
+        // Air ≥ optimal-low (would read "varmt") but felt below it must read
+        // "kjølig", not contradict itself.
+        let p = temp_penalty(40, 17.0, 12.0, Language::Norwegian)
+            .expect("a low subscore must yield a penalty");
+        assert!(
+            p.message.starts_with("kjølig"),
+            "word should follow felt-T (cold): {:?}",
+            p.message
+        );
+        // Inverse: cold air but felt warm (e.g. strong sun) reads "varmt".
+        let q = temp_penalty(40, 15.0, 26.0, Language::Norwegian).unwrap();
+        assert!(
+            q.message.starts_with("varmt"),
+            "word should follow felt-T (warm): {:?}",
+            q.message
         );
     }
 
