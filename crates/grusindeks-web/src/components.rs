@@ -29,6 +29,7 @@ fn best_window_reason_label(r: BestWindowReason) -> &'static str {
         BestWindowReason::MinstKald => "minst kald",
         BestWindowReason::Vind => "minst vind",
         BestWindowReason::Nedbor => "tørrest",
+        BestWindowReason::RegnSjanse => "minst regn-sjanse",
     }
 }
 
