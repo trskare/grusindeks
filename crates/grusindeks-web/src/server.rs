@@ -113,7 +113,8 @@ pub async fn get_forecast(place: String, days: u8) -> Result<MultiDayForecast, S
     use crate::db::{load_config, DEFAULT_USER_ID};
     use crate::db::{log_score, place_id_by_name, HistoryInsert};
     use crate::state::AppState;
-    use chrono::{Local, Utc};
+    use chrono::Utc;
+    use chrono_tz::Europe::Oslo;
     use grusindeks_cli::run::{run_forecast, ForecastInputs};
     use grusindeks_cli::windows::{
         build_day_windows, build_work_hour_exclusions, location_drainage, location_frost_source,
@@ -128,7 +129,7 @@ pub async fn get_forecast(place: String, days: u8) -> Result<MultiDayForecast, S
     let location = resolve_location(&cfg, None, None, place_arg, None).map_err(err)?;
     let frost_source_id = location_frost_source(&cfg, &location);
 
-    let today = Local::now().date_naive();
+    let today = Utc::now().with_timezone(&Oslo).date_naive();
     let day_windows =
         build_day_windows(today, days, Utc::now(), cfg.daytime_window).map_err(err)?;
     let excluded = build_work_hour_exclusions(today, days, &cfg.work_hours);
@@ -201,7 +202,8 @@ pub async fn get_forecast(place: String, days: u8) -> Result<MultiDayForecast, S
 pub async fn get_hourly(place: String) -> Result<HourlyForecast, ServerFnError> {
     use crate::db::{load_config, DEFAULT_USER_ID};
     use crate::state::AppState;
-    use chrono::{DurationRound, Local, TimeDelta, Utc};
+    use chrono::{DurationRound, TimeDelta, Utc};
+    use chrono_tz::Europe::Oslo;
     use grusindeks_cli::run::{run_hourly, DayWindow, HourlyInputs};
     use grusindeks_cli::windows::{
         local_to_utc, location_drainage, location_frost_source, resolve_location,
@@ -220,7 +222,7 @@ pub async fn get_hourly(place: String) -> Result<HourlyForecast, ServerFnError> 
     // The timeline is "the rest of today" — from the current hour to local
     // midnight — so it stays on *today* until midnight (unlike the daytime-window
     // ride score, which rolls to tomorrow once the 10–22 window is nearly over).
-    let date = Local::now().date_naive();
+    let date = Utc::now().with_timezone(&Oslo).date_naive();
     let day_end = local_to_utc(
         date.succ_opt()
             .expect("date has a successor")

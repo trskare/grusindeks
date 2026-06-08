@@ -27,6 +27,9 @@ leptos_axum = { version = "0.8", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+# All user-facing times render in Norway's zone (fixed, not the server's TZ) so
+# SSR and wasm hydration agree and a UTC container shows correct local times.
+chrono-tz = "0.10"
 
 # Client (wasm) only.
 console_error_panic_hook = { version = "0.1", optional = true }

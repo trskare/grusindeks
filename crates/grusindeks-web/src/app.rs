@@ -110,7 +110,7 @@ fn DashboardPage() -> impl IntoView {
     let rest_score = Resource::new(
         move || selected.get(),
         |place| async move {
-            let now = chrono::Local::now();
+            let now = chrono::Utc::now().with_timezone(&chrono_tz::Europe::Oslo);
             let end = now
                 .date_naive()
                 .succ_opt()
@@ -228,8 +228,8 @@ fn DashboardPage() -> impl IntoView {
                                     // *today* (the timeline shows the rest of today; a window
                                     // that rolled to tomorrow doesn't belong on it).
                                     let best_window_rw = optimal.as_ref().map(|ow| ow.window).filter(|w| {
-                                        w.start.with_timezone(&chrono::Local).date_naive()
-                                            == now.with_timezone(&chrono::Local).date_naive()
+                                        w.start.with_timezone(&chrono_tz::Europe::Oslo).date_naive()
+                                            == now.with_timezone(&chrono_tz::Europe::Oslo).date_naive()
                                     });
                                     let produced_at = agg.produced_at;
                                     // Current ground state for the "underlag" stats tile: the
@@ -240,7 +240,7 @@ fn DashboardPage() -> impl IntoView {
                                     // fraction 0–100, caption). After sunset it's a muted
                                     // "Mørkt" with no bar. `None` (no sun data) hides the tile.
                                     let daylight = sunset.map(|ss| {
-                                        let set_hhmm = ss.with_timezone(&chrono::Local).format("%H:%M").to_string();
+                                        let set_hhmm = ss.with_timezone(&chrono_tz::Europe::Oslo).format("%H:%M").to_string();
                                         if now >= ss {
                                             ("Mørkt".to_string(), None, format!("sol ned {set_hhmm}"))
                                         } else {

@@ -2,7 +2,11 @@
 //! awaited server-fn response) and renders with the shared score palette
 //! ([`crate::color`]). Animations are plain CSS transitions.
 
-use chrono::{DateTime, Duration, Local, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Duration, TimeZone, Timelike, Utc};
+// Fixed Norway zone for all display formatting — never the server's `Local`,
+// which is UTC in the container and would render every time 1–2 h off (and is
+// resolved server-side under SSR, breaking hydration). The app is Norway-only.
+use chrono_tz::Europe::Oslo;
 use leptos::prelude::*;
 
 use grusindeks_core::aggregate::{
@@ -64,13 +68,13 @@ impl BestWindowHint {
             start: ow
                 .window
                 .start
-                .with_timezone(&Local)
+                .with_timezone(&Oslo)
                 .format("%H:%M")
                 .to_string(),
             end: ow
                 .window
                 .end
-                .with_timezone(&Local)
+                .with_timezone(&Oslo)
                 .format("%H:%M")
                 .to_string(),
             improvement: ow.improvement,
@@ -78,8 +82,8 @@ impl BestWindowHint {
             total: ow.score.total,
             starts_in_future: ow.window.start > now,
             before_sunset: sunset.is_none_or(|s| ow.window.start < s),
-            tomorrow: ow.window.start.with_timezone(&Local).date_naive()
-                != now.with_timezone(&Local).date_naive(),
+            tomorrow: ow.window.start.with_timezone(&Oslo).date_naive()
+                != now.with_timezone(&Oslo).date_naive(),
         }
     }
 }
@@ -276,7 +280,7 @@ pub fn Recommendation(
         ),
         None => (default_cta.to_string(), default_summary.to_string()),
     };
-    let updated_dt = updated.unwrap_or_else(Utc::now).with_timezone(&Local);
+    let updated_dt = updated.unwrap_or_else(Utc::now).with_timezone(&Oslo);
     let updated_str = updated_dt.format("%H:%M").to_string();
     let horizon = format!(
         "{}–{}",
@@ -599,7 +603,7 @@ pub fn HourlyPrecipStrip(hours: Vec<HourlyPrecip>) -> impl IntoView {
             <p class="text-xs uppercase tracking-wide text-gruv-fg/70">"Nedbør per time"</p>
             <div class="flex items-end gap-2">
                 {hours.into_iter().map(|h| {
-                    let label = h.time.with_timezone(&Local).format("%H").to_string();
+                    let label = h.time.with_timezone(&Oslo).format("%H").to_string();
                     let wet = h.precip_mm >= 0.05;
                     // Floor the height so a wet hour is always visibly taller than a dry one.
                     let pct = if wet { ((h.precip_mm / max) * 100.0).clamp(12.0, 100.0) } else { 4.0 };
@@ -828,8 +832,8 @@ pub fn DayCard(
     });
 
     let best = day.optimal_window.as_ref().map(|ow| {
-        let s = ow.window.start.with_timezone(&Local).format("%H:%M");
-        let e = ow.window.end.with_timezone(&Local).format("%H:%M");
+        let s = ow.window.start.with_timezone(&Oslo).format("%H:%M");
+        let e = ow.window.end.with_timezone(&Oslo).format("%H:%M");
         match ow.reason.map(best_window_reason_label) {
             Some(r) => format!("beste {s}–{e} · {r}"),
             None => format!("beste {s}–{e}"),
@@ -893,8 +897,8 @@ pub fn CompactDayTimeline(
 
     let best = best_window.map(|w| {
         (
-            w.start.with_timezone(&Local).format("%H:%M").to_string(),
-            w.end.with_timezone(&Local).format("%H:%M").to_string(),
+            w.start.with_timezone(&Oslo).format("%H:%M").to_string(),
+            w.end.with_timezone(&Oslo).format("%H:%M").to_string(),
             w,
         )
     });
@@ -930,7 +934,7 @@ pub fn CompactDayTimeline(
                     <div class="ml-10 grid h-6 text-[10px] text-gruv-fg/50" style=grid.clone()>
                         {hours.iter().map(|h| view! {
                             <div class="flex items-center justify-center tabular-nums">
-                                {h.time.with_timezone(&Local).format("%H").to_string()}
+                                {h.time.with_timezone(&Oslo).format("%H").to_string()}
                             </div>
                         }).collect_view()}
                     </div>
@@ -1074,8 +1078,7 @@ pub fn RideTimeline(
     // local midnight for a future day. End is that day's midnight. Local
     // midnight is resolved client-side.
     let local_midnight = |d: chrono::NaiveDate| -> Option<DateTime<Utc>> {
-        Local
-            .from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
+        Oslo.from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
             .single()
             .map(|t| t.with_timezone(&Utc))
     };
@@ -1102,7 +1105,7 @@ pub fn RideTimeline(
                 l,
                 r,
                 mid: (l + r) / 2.0,
-                hour: s.time.with_timezone(&Local).hour(),
+                hour: s.time.with_timezone(&Oslo).hour(),
                 low: s.confidence == Confidence::Lav,
                 s,
             }
@@ -1203,7 +1206,7 @@ pub fn RideTimeline(
     // past, `get_hourly` rolls forward to tomorrow, so the heading must say so
     // — and the "now" marker only makes sense when *now* falls inside the
     // shown span (otherwise it would pin uselessly to an edge).
-    let today_local = now.with_timezone(&Local).date_naive();
+    let today_local = now.with_timezone(&Oslo).date_naive();
     let day_label = if day.date == today_local {
         "i dag"
     } else if Some(day.date) == today_local.succ_opt() {
@@ -1217,10 +1220,10 @@ pub fn RideTimeline(
     // the marker tooltips). Both drive the daylight arc and the night shading.
     let sunrise_f = sunrise
         .filter(|s| *s > d0 && *s < dom_end)
-        .map(|s| (frac(s), s.with_timezone(&Local).format("%H:%M").to_string()));
+        .map(|s| (frac(s), s.with_timezone(&Oslo).format("%H:%M").to_string()));
     let sunset_f = sunset
         .filter(|s| *s > d0 && *s < dom_end)
-        .map(|s| (frac(s), s.with_timezone(&Local).format("%H:%M").to_string()));
+        .map(|s| (frac(s), s.with_timezone(&Oslo).format("%H:%M").to_string()));
     // Daylight illustrated as a *semi-transparent wash over the whole plot*
     // (not a separate lane): night = a dark-blue tint, sunrise/sunset = an
     // orange glow, daytime fully transparent so lanes stay vivid. Built across
@@ -1267,8 +1270,8 @@ pub fn RideTimeline(
         }
     };
     let bw = best_window.map(|w| {
-        let s = w.start.with_timezone(&Local).format("%H").to_string();
-        let e = w.end.with_timezone(&Local).format("%H").to_string();
+        let s = w.start.with_timezone(&Oslo).format("%H").to_string();
+        let e = w.end.with_timezone(&Oslo).format("%H").to_string();
         (frac(w.start), frac(w.end), s, e, w.start > now)
     });
 
@@ -1560,7 +1563,7 @@ pub fn RideTimeline(
                         // now marker — only when "now" actually falls inside the
                         // shown span (a past/future day has no meaningful marker)
                         {now_in_range.then(|| {
-                            let now_hhmm = now.with_timezone(&Local).format("%H:%M").to_string();
+                            let now_hhmm = now.with_timezone(&Oslo).format("%H:%M").to_string();
                             view! {
                                 <div class="pointer-events-none absolute inset-y-0 z-20"
                                     style=format!("left:{}", pct(now_f))>
