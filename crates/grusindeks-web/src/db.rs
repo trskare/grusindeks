@@ -130,6 +130,10 @@ pub async fn load_config(pool: &SqlitePool, user_id: i64) -> Result<Config> {
                 lon: r.lon,
                 radius_km: r.radius_km,
                 frost_source_id: r.frost_source_id.clone(),
+                // Per-place drainage is configurable via the CLI TOML config;
+                // the web UI doesn't expose it yet, so places fall back to the
+                // config-level default below.
+                drainage: None,
             },
         );
     }
@@ -154,6 +158,9 @@ pub async fn load_config(pool: &SqlitePool, user_id: i64) -> Result<Config> {
             client_id: prefs.frost_client_id,
             source_id: prefs.frost_source_id,
         },
+        // Global drainage default for the web; per-place / per-config tuning
+        // lives in the CLI TOML for now.
+        drainage: Default::default(),
         show_rain_history: prefs.show_rain_history != 0,
         show_window_stats: prefs.show_window_stats != 0,
         places,

@@ -23,10 +23,15 @@ pub const ELEMENT_HOURLY_PRECIP: &str = "sum(precipitation_amount PT1H)";
 pub const ELEMENT_HOURLY_TEMP: &str = "mean(air_temperature PT1H)";
 pub const ELEMENT_HOURLY_WIND: &str = "mean(wind_speed PT1H)";
 pub const ELEMENT_HOURLY_HUMIDITY: &str = "mean(relative_humidity PT1H)";
+/// Mean total cloud cover over the hour, in percent. Lets the drying-model
+/// replay use real sky conditions for the solar drying term instead of a
+/// hardcoded overcast fallback — a clear, sunny week now dries the surface
+/// faster than a grey one.
+pub const ELEMENT_HOURLY_CLOUD: &str = "mean(cloud_area_fraction PT1H)";
 
 /// Comma-separated list of element IDs we ask Frost for in one request
-/// when we want full observations (precip + temp + wind + humidity).
-/// Going through one round-trip means the timestamps line up by
+/// when we want full observations (precip + temp + wind + humidity +
+/// cloud). Going through one round-trip means the timestamps line up by
 /// `referenceTime` and the parser can group them per-hour.
 fn full_element_query() -> String {
     [
@@ -34,6 +39,7 @@ fn full_element_query() -> String {
         ELEMENT_HOURLY_TEMP,
         ELEMENT_HOURLY_WIND,
         ELEMENT_HOURLY_HUMIDITY,
+        ELEMENT_HOURLY_CLOUD,
     ]
     .join(",")
 }
@@ -61,6 +67,10 @@ pub struct HourlyObservation {
     pub temp_c: Option<f64>,
     pub wind_ms: Option<f64>,
     pub humidity_pct: Option<f64>,
+    /// Total cloud cover, 0–100 %. `None` when the station carries no
+    /// cloud sensor — the drying replay then falls back to a neutral
+    /// overcast value rather than pretending the sky was clear.
+    pub cloud_pct: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,6 +143,7 @@ pub fn parse_hourly_observations(body: &str) -> Result<Vec<HourlyObservation>, C
                 temp_c: None,
                 wind_ms: None,
                 humidity_pct: None,
+                cloud_pct: None,
             };
             for o in entry.observations {
                 if !o.value.is_finite() {
@@ -144,6 +155,9 @@ pub fn parse_hourly_observations(body: &str) -> Result<Vec<HourlyObservation>, C
                     ELEMENT_HOURLY_WIND if o.value >= 0.0 => obs.wind_ms = Some(o.value),
                     ELEMENT_HOURLY_HUMIDITY if (0.0..=100.0).contains(&o.value) => {
                         obs.humidity_pct = Some(o.value)
+                    }
+                    ELEMENT_HOURLY_CLOUD if (0.0..=100.0).contains(&o.value) => {
+                        obs.cloud_pct = Some(o.value)
                     }
                     _ => {}
                 }
@@ -388,7 +402,8 @@ mod tests {
                     {"elementId": "sum(precipitation_amount PT1H)", "value": 0.4},
                     {"elementId": "mean(air_temperature PT1H)",     "value": 9.5},
                     {"elementId": "mean(wind_speed PT1H)",          "value": 3.2},
-                    {"elementId": "mean(relative_humidity PT1H)",   "value": 78.0}
+                    {"elementId": "mean(relative_humidity PT1H)",   "value": 78.0},
+                    {"elementId": "mean(cloud_area_fraction PT1H)", "value": 35.0}
                  ]},
                 {"referenceTime": "2026-04-25T01:00:00.000Z",
                  "observations": [
@@ -404,11 +419,13 @@ mod tests {
         assert_eq!(first.temp_c, Some(9.5));
         assert_eq!(first.wind_ms, Some(3.2));
         assert_eq!(first.humidity_pct, Some(78.0));
+        assert_eq!(first.cloud_pct, Some(35.0));
         let second = &series[1];
         assert_eq!(second.precip_mm, Some(0.0));
         assert_eq!(second.temp_c, Some(9.0));
         assert_eq!(second.wind_ms, None, "missing wind must stay None");
         assert_eq!(second.humidity_pct, None);
+        assert_eq!(second.cloud_pct, None, "missing cloud must stay None");
     }
 
     #[test]
@@ -419,7 +436,8 @@ mod tests {
                 "observations": [
                     {"elementId": "sum(precipitation_amount PT1H)", "value": -10.0},
                     {"elementId": "mean(wind_speed PT1H)",          "value": -2.0},
-                    {"elementId": "mean(relative_humidity PT1H)",   "value": 250.0}
+                    {"elementId": "mean(relative_humidity PT1H)",   "value": 250.0},
+                    {"elementId": "mean(cloud_area_fraction PT1H)", "value": 150.0}
                 ]
             }]
         }"#;
@@ -427,10 +445,11 @@ mod tests {
         assert_eq!(obs.precip_mm, None, "negative precip dropped");
         assert_eq!(obs.wind_ms, None, "negative wind dropped");
         assert_eq!(obs.humidity_pct, None, "RH > 100 dropped");
+        assert_eq!(obs.cloud_pct, None, "cloud > 100 dropped");
     }
 
     #[tokio::test]
-    async fn fetch_observations_requests_all_four_elements() {
+    async fn fetch_observations_requests_all_five_elements() {
         let server = MockServer::start().await;
         let body = r#"{
             "data": [{
@@ -448,7 +467,7 @@ mod tests {
             .and(path_m("/observations/v0.jsonld"))
             .and(query_param(
                 "elements",
-                "sum(precipitation_amount PT1H),mean(air_temperature PT1H),mean(wind_speed PT1H),mean(relative_humidity PT1H)",
+                "sum(precipitation_amount PT1H),mean(air_temperature PT1H),mean(wind_speed PT1H),mean(relative_humidity PT1H),mean(cloud_area_fraction PT1H)",
             ))
             .respond_with(ResponseTemplate::new(200).set_body_string(body))
             .mount(&server)

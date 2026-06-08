@@ -2,7 +2,11 @@
 //! awaited server-fn response) and renders with the shared score palette
 //! ([`crate::color`]). Animations are plain CSS transitions.
 
-use chrono::{DateTime, Duration, Local, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Duration, TimeZone, Timelike, Utc};
+// Fixed Norway zone for all display formatting — never the server's `Local`,
+// which is UTC in the container and would render every time 1–2 h off (and is
+// resolved server-side under SSR, breaking hydration). The app is Norway-only.
+use chrono_tz::Europe::Oslo;
 use leptos::prelude::*;
 
 use grusindeks_core::aggregate::{
@@ -55,31 +59,39 @@ impl BestWindowHint {
     /// Build from an [`OptimalWindow`], formatting the window edges in local
     /// time. `now` is the wall clock used to decide whether the window is
     /// still ahead; `sunset` (if known) gates the "wait for it" suggestion.
+    /// `polar` disambiguates a missing sunset: midnight sun (always light) vs
+    /// polar night (always dark) — we never suggest waiting into the dark.
     pub fn from_window(
         ow: &grusindeks_core::daily::OptimalWindow,
         now: DateTime<Utc>,
         sunset: Option<DateTime<Utc>>,
+        polar: Option<grusindeks_core::sun::PolarDay>,
     ) -> Self {
         Self {
             start: ow
                 .window
                 .start
-                .with_timezone(&Local)
+                .with_timezone(&Oslo)
                 .format("%H:%M")
                 .to_string(),
             end: ow
                 .window
                 .end
-                .with_timezone(&Local)
+                .with_timezone(&Oslo)
                 .format("%H:%M")
                 .to_string(),
             improvement: ow.improvement,
             reason: ow.reason.map(best_window_reason_label),
             total: ow.score.total,
             starts_in_future: ow.window.start > now,
-            before_sunset: sunset.is_none_or(|s| ow.window.start < s),
-            tomorrow: ow.window.start.with_timezone(&Local).date_naive()
-                != now.with_timezone(&Local).date_naive(),
+            // With a real sunset, the window must start before it. Without one,
+            // it's polar: midnight sun is fine, polar night never is.
+            before_sunset: sunset.map_or_else(
+                || !matches!(polar, Some(grusindeks_core::sun::PolarDay::PolarNight)),
+                |s| ow.window.start < s,
+            ),
+            tomorrow: ow.window.start.with_timezone(&Oslo).date_naive()
+                != now.with_timezone(&Oslo).date_naive(),
         }
     }
 }
@@ -245,10 +257,11 @@ pub fn Recommendation(
     /// clock when the server didn't stamp it. Also anchors the "neste 3 timer"
     /// horizon badge (start → start + 3 h).
     updated: Option<DateTime<Utc>>,
-    /// Recent ground wetness for the "underlag" stats tile: cumulative
-    /// precipitation (mm) over the rain-history lookback, and that lookback in
-    /// hours. `None` hides the tile (Frost not configured / no data).
-    ground: Option<(f64, i64)>,
+    /// Current ground state for the "underlag" stats tile: the drying model's
+    /// surface water *right now* in mm (0 ..= `GROUND_SATURATED`), after rain,
+    /// drainage and drying. `None` hides the tile (Frost not configured / no
+    /// data).
+    ground: Option<(f64, bool)>,
     /// Daylight-left for the "dagslys" stats tile: `(value, bar_pct, caption)`.
     /// `None` hides the tile (no sun data).
     daylight: Option<(String, Option<f64>, String)>,
@@ -269,13 +282,17 @@ pub fn Recommendation(
         Some(bw) => (
             format!("Vent til {}", bw.start),
             format!(
+                // Delta vs *now* — the same gap the gate (bw.total >= total + 10)
+                // fires on. `bw.improvement` is measured against the day mean, a
+                // different baseline, so it could show a contradictory number.
                 "Bedre forhold senere i dag — +{} poeng fra {}.",
-                bw.improvement, bw.start
+                bw.total.saturating_sub(total),
+                bw.start
             ),
         ),
         None => (default_cta.to_string(), default_summary.to_string()),
     };
-    let updated_dt = updated.unwrap_or_else(Utc::now).with_timezone(&Local);
+    let updated_dt = updated.unwrap_or_else(Utc::now).with_timezone(&Oslo);
     let updated_str = updated_dt.format("%H:%M").to_string();
     let horizon = format!(
         "{}–{}",
@@ -364,7 +381,10 @@ pub fn Recommendation(
             </div>
 
             // Better window — later today, or tomorrow once today's window is over.
-            {best_window.map(|bw| {
+            // Only when it's genuinely better (improvement > 0 — a "+0" window is
+            // no better than the day) and still ahead of us ("senere"/"i morgen"
+            // both imply the future); otherwise there's no better window to flag.
+            {best_window.filter(|bw| bw.improvement > 0 && (bw.tomorrow || bw.starts_in_future)).map(|bw| {
                 let breathe = if waiting { "gx-breathe" } else { "" };
                 let when = if bw.tomorrow { "Bedre vindu i morgen" } else { "Bedre vindu senere" };
                 view! {
@@ -434,12 +454,30 @@ pub fn ScoreGauge(total: u8, #[prop(default = 150_u32)] size: u32) -> impl IntoV
     }
 }
 
-/// Full-bar point for the "underlag" (recent ground water) tile, in mm of
-/// cumulative precipitation over `rain_history`'s lookback window (~7 days).
-/// This is the raw weekly *input*, NOT the drying model's surface accumulator
-/// (which saturates at `GROUND_SATURATED` = 5 mm of post-drying standing
-/// water) — so the scale is larger: ~25 mm reads as a thoroughly soaked week.
-const GROUND_BAR_MAX_MM: f64 = 25.0;
+/// Full-bar point for the "underlag" tile: the drying model's current surface
+/// water saturates at `GROUND_SATURATED` (5 mm of standing water), so the bar
+/// fills toward that. This is the *state of the ground right now*, not the
+/// rain that fell over the week.
+const GROUND_BAR_MAX_MM: f64 = grusindeks_core::score::thresholds::GROUND_SATURATED;
+
+/// A one-word description of the surface water state, for the "underlag" tile
+/// caption. Mirrors the ground-subscore's shape: bone-dry < lett fuktig
+/// (the optimum) < fuktig < våt < gjennomvåt.
+fn ground_state_word(mm: f64) -> &'static str {
+    use grusindeks_core::score::thresholds::{GROUND_OPTIMAL_MM, GROUND_SATURATED};
+    if mm < GROUND_OPTIMAL_MM * 0.25 {
+        "tørt"
+    } else if mm <= GROUND_OPTIMAL_MM * 1.5 {
+        // Around the damp optimum where gravel packs and rolls best.
+        "lett fuktig"
+    } else if mm < GROUND_SATURATED * 0.5 {
+        "fuktig"
+    } else if mm < GROUND_SATURATED * 0.9 {
+        "vått"
+    } else {
+        "gjennomvått"
+    }
+}
 
 /// Bar fill colour for the "underlag" tile — interpolates from muted gruv-blue
 /// (barely wet) toward the deeper, more saturated gruv-aqua (soaked), so a
@@ -465,7 +503,7 @@ fn ground_fill_color(frac: f64) -> String {
 #[component]
 pub fn WindowStatsRow(
     stats: WindowStats,
-    ground: Option<(f64, i64)>,
+    ground: Option<(f64, bool)>,
     daylight: Option<(String, Option<f64>, String)>,
 ) -> impl IntoView {
     if stats.is_empty() {
@@ -521,20 +559,23 @@ pub fn WindowStatsRow(
                 {icons::cloud_rain(icon, Some("Nedbør"))}
                 <span class=metric>{rain}</span>
             </div>
-            // Recent ground water: mm fallen over the lookback window, with a
-            // bar that fills toward GROUND_BAR_MAX_MM (a soaked week).
-            {ground.map(|(mm, hours)| {
-                let days = (hours as f64 / 24.0).round().max(1.0) as i64;
+            // Current ground state: surface water on the gravel right now,
+            // with a bar that fills toward GROUND_BAR_MAX_MM (saturated).
+            {ground.map(|(mm, snow)| {
+                let mm = mm.max(0.0);
+                // Snow on the ground makes the surface-water model unreliable
+                // (no snowpack model) — say so instead of a misleading mm word.
+                let word = if snow { "snø? usikkert".to_string() } else { format!("på bakken · {}", ground_state_word(mm)) };
                 let pct = ((mm / GROUND_BAR_MAX_MM) * 100.0).clamp(0.0, 100.0);
                 view! {
                     <div class=cell>
                         {icons::mountain(icon, Some("Underlag"))}
-                        <span class=metric>{format!("{mm:.0} mm")}</span>
+                        <span class=metric>{format!("{mm:.1} mm")}</span>
                         <span class="block h-1.5 w-full overflow-hidden rounded-full bg-gruv-bg2/60">
                             <span class="block h-full rounded-full"
                                 style=format!("width:{pct:.0}%; background-color:{}; transition: width 700ms cubic-bezier(0.22,1,0.36,1)", ground_fill_color(pct / 100.0))></span>
                         </span>
-                        <span class=cap>{format!("underlag · {days} d")}</span>
+                        <span class=cap>{word}</span>
                     </div>
                 }
             })}
@@ -574,7 +615,7 @@ pub fn HourlyPrecipStrip(hours: Vec<HourlyPrecip>) -> impl IntoView {
             <p class="text-xs uppercase tracking-wide text-gruv-fg/70">"Nedbør per time"</p>
             <div class="flex items-end gap-2">
                 {hours.into_iter().map(|h| {
-                    let label = h.time.with_timezone(&Local).format("%H").to_string();
+                    let label = h.time.with_timezone(&Oslo).format("%H").to_string();
                     let wet = h.precip_mm >= 0.05;
                     // Floor the height so a wet hour is always visibly taller than a dry one.
                     let pct = if wet { ((h.precip_mm / max) * 100.0).clamp(12.0, 100.0) } else { 4.0 };
@@ -778,7 +819,10 @@ pub fn DayCard(
 ) -> impl IntoView {
     let mean = day.mean;
     let date = day.date.format("%a %d.%m").to_string();
-    let icon = day.center().weather_icon.clone();
+    let icon = day
+        .center()
+        .map(|c| c.weather_icon.clone())
+        .unwrap_or_default();
     let low = day.confidence == Confidence::Lav;
     // Low-confidence days are signalled by a dashed border and a neutral mean
     // colour — never by dimming, which would drop the numbers below readable
@@ -794,13 +838,20 @@ pub fn DayCard(
         color::text_class(mean)
     };
 
-    let st = &day.center().score.stats;
-    let weather =
-        (!st.is_empty()).then(|| format!("{:.0}° · {:.1} mm", st.max_temp_c, st.total_precip_mm));
+    let weather = day
+        .center()
+        .map(|c| &c.score.stats)
+        .filter(|st| !st.is_empty())
+        .map(|st| {
+            format!(
+                "{:.0}° · {:.1} mm · {:.0} m/s",
+                st.max_temp_c, st.total_precip_mm, st.max_wind_ms
+            )
+        });
 
     let best = day.optimal_window.as_ref().map(|ow| {
-        let s = ow.window.start.with_timezone(&Local).format("%H:%M");
-        let e = ow.window.end.with_timezone(&Local).format("%H:%M");
+        let s = ow.window.start.with_timezone(&Oslo).format("%H:%M");
+        let e = ow.window.end.with_timezone(&Oslo).format("%H:%M");
         match ow.reason.map(best_window_reason_label) {
             Some(r) => format!("beste {s}–{e} · {r}"),
             None => format!("beste {s}–{e}"),
@@ -864,8 +915,8 @@ pub fn CompactDayTimeline(
 
     let best = best_window.map(|w| {
         (
-            w.start.with_timezone(&Local).format("%H:%M").to_string(),
-            w.end.with_timezone(&Local).format("%H:%M").to_string(),
+            w.start.with_timezone(&Oslo).format("%H:%M").to_string(),
+            w.end.with_timezone(&Oslo).format("%H:%M").to_string(),
             w,
         )
     });
@@ -901,7 +952,7 @@ pub fn CompactDayTimeline(
                     <div class="ml-10 grid h-6 text-[10px] text-gruv-fg/50" style=grid.clone()>
                         {hours.iter().map(|h| view! {
                             <div class="flex items-center justify-center tabular-nums">
-                                {h.time.with_timezone(&Local).format("%H").to_string()}
+                                {h.time.with_timezone(&Oslo).format("%H").to_string()}
                             </div>
                         }).collect_view()}
                     </div>
@@ -1017,6 +1068,52 @@ fn lane_y(lane: usize, value: f64, min: f64, max: f64) -> f64 {
     top + (1.0 - ((value - min) / range).clamp(0.0, 1.0)) * h
 }
 
+/// Horizontal `mask-image` gradient for the cloud strip: per-hour alpha =
+/// cloud_area_fraction (sharpened so partly-cloudy hours thin out and the
+/// tile's sky gaps show through; clear <10 % → 0). White stops so it works in
+/// alpha- and luminance-mask modes alike. The first/last hours are anchored to
+/// the 0 %/100 % edges when the data fills the domain, so a fully-overcast hour
+/// (incl. a lone final hour, `n == 1`) renders edge-to-edge instead of a
+/// triangular "clouds-in-the-middle" band; an empty tail (e.g. `best_window`
+/// stretched the domain past the last hour) still fades to clear.
+/// Each cell is `(left, right, mid, cloud_pct)`: the hour's left/right/centre as
+/// 0–1 fractions of the domain width, plus its cloud_area_fraction (0–100,
+/// `None` = unknown → treated as clear).
+fn cloud_cover_mask(cells: &[(f64, f64, f64, Option<f64>)]) -> String {
+    let alpha = |cloud: Option<f64>| {
+        cloud
+            .map(|v| (v / 100.0).clamp(0.0, 1.0))
+            .filter(|f| *f >= 0.10)
+            .map_or(0.0, |f| f.powf(1.15).min(0.97))
+    };
+    let (Some(first), Some(last)) = (cells.first(), cells.last()) else {
+        return "linear-gradient(to right, rgba(255,255,255,0) 0%, rgba(255,255,255,0) 100%)"
+            .into();
+    };
+    let mut stops: Vec<String> = Vec::new();
+    if first.0 > 0.001 {
+        // Genuine empty space before the first hour — keep it clear.
+        stops.push("rgba(255,255,255,0) 0%".into());
+        stops.push(format!("rgba(255,255,255,0) {:.1}%", first.0 * 100.0));
+    } else {
+        stops.push(format!("rgba(255,255,255,{:.2}) 0%", alpha(first.3)));
+    }
+    for &(_, _, mid, cloud) in cells {
+        stops.push(format!(
+            "rgba(255,255,255,{:.2}) {:.1}%",
+            alpha(cloud),
+            mid * 100.0
+        ));
+    }
+    if last.1 < 0.999 {
+        stops.push(format!("rgba(255,255,255,0) {:.1}%", last.1 * 100.0));
+        stops.push("rgba(255,255,255,0) 100%".into());
+    } else {
+        stops.push(format!("rgba(255,255,255,{:.2}) 100%", alpha(last.3)));
+    }
+    format!("linear-gradient(to right, {})", stops.join(", "))
+}
+
 #[component]
 pub fn RideTimeline(
     day: HourlyDayAggregate,
@@ -1045,8 +1142,7 @@ pub fn RideTimeline(
     // local midnight for a future day. End is that day's midnight. Local
     // midnight is resolved client-side.
     let local_midnight = |d: chrono::NaiveDate| -> Option<DateTime<Utc>> {
-        Local
-            .from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
+        Oslo.from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
             .single()
             .map(|t| t.with_timezone(&Utc))
     };
@@ -1073,7 +1169,7 @@ pub fn RideTimeline(
                 l,
                 r,
                 mid: (l + r) / 2.0,
-                hour: s.time.with_timezone(&Local).hour(),
+                hour: s.time.with_timezone(&Oslo).hour(),
                 low: s.confidence == Confidence::Lav,
                 s,
             }
@@ -1174,7 +1270,7 @@ pub fn RideTimeline(
     // past, `get_hourly` rolls forward to tomorrow, so the heading must say so
     // — and the "now" marker only makes sense when *now* falls inside the
     // shown span (otherwise it would pin uselessly to an edge).
-    let today_local = now.with_timezone(&Local).date_naive();
+    let today_local = now.with_timezone(&Oslo).date_naive();
     let day_label = if day.date == today_local {
         "i dag"
     } else if Some(day.date) == today_local.succ_opt() {
@@ -1188,10 +1284,10 @@ pub fn RideTimeline(
     // the marker tooltips). Both drive the daylight arc and the night shading.
     let sunrise_f = sunrise
         .filter(|s| *s > d0 && *s < dom_end)
-        .map(|s| (frac(s), s.with_timezone(&Local).format("%H:%M").to_string()));
+        .map(|s| (frac(s), s.with_timezone(&Oslo).format("%H:%M").to_string()));
     let sunset_f = sunset
         .filter(|s| *s > d0 && *s < dom_end)
-        .map(|s| (frac(s), s.with_timezone(&Local).format("%H:%M").to_string()));
+        .map(|s| (frac(s), s.with_timezone(&Oslo).format("%H:%M").to_string()));
     // Daylight illustrated as a *semi-transparent wash over the whole plot*
     // (not a separate lane): night = a dark-blue tint, sunrise/sunset = an
     // orange glow, daytime fully transparent so lanes stay vivid. Built across
@@ -1238,8 +1334,8 @@ pub fn RideTimeline(
         }
     };
     let bw = best_window.map(|w| {
-        let s = w.start.with_timezone(&Local).format("%H").to_string();
-        let e = w.end.with_timezone(&Local).format("%H").to_string();
+        let s = w.start.with_timezone(&Oslo).format("%H").to_string();
+        let e = w.end.with_timezone(&Oslo).format("%H").to_string();
         (frac(w.start), frac(w.end), s, e, w.start > now)
     });
 
@@ -1285,9 +1381,10 @@ pub fn RideTimeline(
             </div>
 
             <div class="flex gap-x-1.5">
-                // ---- lane icon gutter (offset past the hour axis; inner column
-                // matches the plot height so icons stay centred on their lanes) ----
-                <div class="flex w-5 shrink-0 flex-col pt-[18px] text-gruv-fg/45">
+                // ---- lane icon gutter (offset past the hour axis + sky strip;
+                // inner column matches the plot height so icons stay centred on
+                // their lanes — 18px axis + 36px (h-9) cloud strip = 54px) ----
+                <div class="flex w-5 shrink-0 flex-col pt-[54px] text-gruv-fg/45">
                     <div class="flex h-52 flex-col">
                         <div class=glyph>
                             {icons::thermometer("h-[18px] w-[18px]", Some("Temperatur"))}
@@ -1327,7 +1424,40 @@ pub fn RideTimeline(
                     </div>
 
                     // ---- plot ----
-                    <div class="relative h-52 overflow-hidden rounded-lg bg-gruv-bg0/40 inset-well">
+                    <div class="relative overflow-hidden rounded-lg bg-gruv-bg0/40 inset-well">
+                    // ---- sky strip: one continuous, slowly-drifting cloud deck
+                    // (two feTurbulence parallax layers in CSS) masked per hour by
+                    // cloud_area_fraction. Dense where overcast, thin where partly
+                    // cloudy, gone where clear. No discrete sprites.
+                    {
+                        let cells: Vec<(f64, f64, f64, Option<f64>)> = cols
+                            .iter()
+                            .map(|c| (c.l, c.r, c.mid, c.s.raw.and_then(|r| r.cloud_area_fraction)))
+                            .collect();
+                        let mask = cloud_cover_mask(&cells);
+                        view! {
+                            <div class="relative h-9 w-full overflow-hidden border-b border-gruv-bg0/60">
+                                <div class="gx-sky absolute inset-0"
+                                    style=format!("mask-image:{mask}; -webkit-mask-image:{mask}")>
+                                    <div class="gx-sky-layer gx-sky-back"></div>
+                                    <div class="gx-sky-layer gx-sky-front"></div>
+                                </div>
+                                // Where it rains, darken the cloud base (nimbus) so
+                                // the rain below reads as falling out of these clouds.
+                                {rain_bands.iter().map(|(a, b, mm, _)| {
+                                    let intensity = (mm / pmax).clamp(0.15, 1.0);
+                                    let op = 0.4 + intensity * 0.45;
+                                    view! {
+                                        <div class="gx-rain-cloud" style=format!(
+                                            "left:{}; width:{}; opacity:{op:.2}", pct(*a), pct(b - a)
+                                        )></div>
+                                    }
+                                }).collect_view()}
+                            </div>
+                        }
+                    }
+
+                    <div class="relative h-52">
                         <svg class="gx-sweep absolute inset-0 h-full w-full"
                             viewBox=format!("0 0 {TL_W} {TL_H}") preserveAspectRatio="none">
                             // lane heat backgrounds
@@ -1415,9 +1545,16 @@ pub fn RideTimeline(
                             // Scale against this day's max so light showers stay subtle and
                             // heavy hours visibly pick up intensity.
                             let intensity = (mm / pmax).clamp(0.15, 1.0);
-                            let drops = (4.0 + intensity * 12.0).round() as usize;
-                            let wash = 0.04 + intensity * 0.08;
-                            let style = format!("left:{}; width:{}; background:rgba(131,165,152,{wash:.3})", pct(*a), pct(b - a));
+                            let drops = (8.0 + intensity * 18.0).round() as usize;
+                            // Rain shaft: a soft veil, denser near the cloud base
+                            // (top) and fading downward, so the streaks read as
+                            // falling out of the deck above.
+                            let shaft_top = 0.09 + intensity * 0.11;
+                            let shaft_bot = 0.02 + intensity * 0.03;
+                            let style = format!(
+                                "left:{}; width:{}; background:linear-gradient(to bottom, rgba(150,180,170,{shaft_top:.3}), rgba(131,165,152,{shaft_bot:.3}))",
+                                pct(*a), pct(b - a)
+                            );
                             view! {
                                 <div class="pointer-events-none absolute inset-y-0 z-10 overflow-hidden rounded" style=style>
                                     // Thunder forecast in this band → an occasional
@@ -1428,12 +1565,12 @@ pub fn RideTimeline(
                                     {(0..drops).map(|i| {
                                         // Deterministic scatter: enough variation to feel organic,
                                         // but no JS/timers/state beyond CSS animation.
-                                        let left = 6 + ((i * 23) % 88);
-                                        let delay = -((i as f64) * (0.16 - intensity * 0.05).max(0.07));
-                                        let speed = (1.45 - intensity * 0.55) + ((i % 4) as f64) * 0.09;
-                                        let top = -(((i * 17) % 110) as i32);
-                                        let alpha = 0.55 + intensity * 0.35;
-                                        let size = 0.85 + intensity * 0.35;
+                                        let left = 4 + ((i * 53) % 92);
+                                        let delay = -((i as f64) * (0.10 - intensity * 0.03).max(0.04));
+                                        let speed = (1.05 - intensity * 0.4) + ((i % 5) as f64) * 0.05;
+                                        let top = -(((i * 29) % 120) as i32);
+                                        let alpha = 0.45 + intensity * 0.35;
+                                        let size = 0.8 + intensity * 0.5;
                                         view! {
                                             <span class="gx-rain-drop" style=format!(
                                                 "left:{left}%; top:{top}px; --gx-rain-delay:{delay:.2}s; --gx-rain-speed:{speed:.2}s; --gx-rain-alpha:{alpha:.2}; --gx-rain-size:{size:.2}"
@@ -1469,7 +1606,7 @@ pub fn RideTimeline(
                         // now marker — only when "now" actually falls inside the
                         // shown span (a past/future day has no meaningful marker)
                         {now_in_range.then(|| {
-                            let now_hhmm = now.with_timezone(&Local).format("%H:%M").to_string();
+                            let now_hhmm = now.with_timezone(&Oslo).format("%H:%M").to_string();
                             view! {
                                 <div class="pointer-events-none absolute inset-y-0 z-20"
                                     style=format!("left:{}", pct(now_f))>
@@ -1483,22 +1620,60 @@ pub fn RideTimeline(
                         })}
 
                         // hover marker: lightweight hit zones in 5-minute steps
-                        // so the label follows the pointer more precisely than
-                        // whole-hour buckets (the forecast values are still hourly).
+                        // *and* per lane, so the tooltip can show both the clock
+                        // time and the score for the exact block being hovered
+                        // (temp/vind/nedbør/sjanse/bakke). The forecast values are
+                        // still hourly; the 5-min split only makes the cursor feel
+                        // precise.
                         {cols.iter().flat_map(|c| {
-                            (0..12).map(move |m| {
+                            (0..12).flat_map(move |m| {
                                 let a = c.l + (c.r - c.l) * (m as f64 / 12.0);
                                 let b = c.l + (c.r - c.l) * ((m + 1) as f64 / 12.0);
-                                let label = format!("{:02}:{:02}", c.hour, m * 5);
-                                let style = format!("left:{}; width:{}", pct(a), pct(b - a));
-                                view! {
-                                    <div class="group absolute inset-y-0 z-30" style=style>
-                                        <div class="pointer-events-none absolute inset-y-0 left-1/2 hidden w-[2px] -translate-x-1/2 bg-gruv-aqua shadow-[0_0_8px_rgba(69,133,136,0.9)] group-hover:block"></div>
-                                        <div class="pointer-events-none absolute left-1/2 top-1 hidden -translate-x-1/2 rounded bg-gruv-fg px-1.5 py-0.5 text-[10px] font-bold leading-tight text-gruv-bg0 shadow-lg group-hover:block">
-                                            {label}
+                                let time_label = format!("{:02}:{:02}", c.hour, m * 5);
+                                (0..TL_LANES).map(move |lane| {
+                                    let (axis, score) = match lane {
+                                        0 => ("temperatur", c.s.breakdown.temperature),
+                                        1 => ("vind", c.s.breakdown.wind),
+                                        2 => ("nedbør", c.s.breakdown.precipitation),
+                                        3 => ("sjanse", c.s.breakdown.precip_probability),
+                                        _ => ("bakke", c.s.breakdown.ground),
+                                    };
+                                    let style = format!(
+                                        "left:{}; width:{}; top:{:.3}%; height:{:.3}%",
+                                        pct(a),
+                                        pct(b - a),
+                                        lane as f64 * 100.0 / TL_LANES as f64,
+                                        100.0 / TL_LANES as f64
+                                    );
+                                    // The hit zone is only one lane tall, but the
+                                    // marker line should span the whole plot.
+                                    let line_style = format!(
+                                        "top:-{}%; height:{}%",
+                                        lane * 100,
+                                        TL_LANES * 100
+                                    );
+                                    let tooltip = if lane == 0 {
+                                        view! {
+                                            <div class="pointer-events-none absolute left-1/2 top-1 hidden -translate-x-1/2 rounded bg-gruv-fg px-1.5 py-0.5 text-[10px] font-bold leading-tight text-gruv-bg0 shadow-lg group-hover:block">
+                                                <span class="block tabular-nums">{time_label.clone()}</span>
+                                                <span class="block whitespace-nowrap">{format!("{axis}: {score}/100")}</span>
+                                            </div>
+                                        }.into_any()
+                                    } else {
+                                        view! {
+                                            <div class="pointer-events-none absolute left-1/2 top-1/2 hidden -translate-x-1/2 -translate-y-1/2 rounded bg-gruv-fg px-1.5 py-0.5 text-[10px] font-bold leading-tight text-gruv-bg0 shadow-lg group-hover:block">
+                                                <span class="block tabular-nums">{time_label.clone()}</span>
+                                                <span class="block whitespace-nowrap">{format!("{axis}: {score}/100")}</span>
+                                            </div>
+                                        }.into_any()
+                                    };
+                                    view! {
+                                        <div class="group absolute z-30" style=style>
+                                            <div class="pointer-events-none absolute left-1/2 hidden w-[2px] -translate-x-1/2 bg-gruv-aqua shadow-[0_0_8px_rgba(69,133,136,0.9)] group-hover:block" style=line_style></div>
+                                            {tooltip}
                                         </div>
-                                    </div>
-                                }
+                                    }
+                                })
                             })
                         }).collect_view()}
 
@@ -1516,6 +1691,7 @@ pub fn RideTimeline(
                                 None => ().into_any(),
                             }
                         }).collect_view()}
+                    </div>
                     </div>
 
                     // ---- best-window tab (below plot, anchored to the box) ----
@@ -1543,4 +1719,45 @@ pub fn RideTimeline(
         </div>
     }
     .into_any()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cloud_cover_mask;
+
+    #[test]
+    fn cloud_mask_single_overcast_hour_covers_edge_to_edge() {
+        // n == 1, fully overcast: the deck must fill 0%..100%, not render a
+        // triangular "clouds-in-the-middle" band that fades in/out at the edges.
+        let mask = cloud_cover_mask(&[(0.0, 1.0, 0.5, Some(100.0))]);
+        assert!(mask.contains("0.97) 0%"), "left edge not covered: {mask}");
+        assert!(
+            mask.contains("0.97) 100%"),
+            "right edge not covered: {mask}"
+        );
+    }
+
+    #[test]
+    fn cloud_mask_clear_sky_is_fully_transparent() {
+        let mask = cloud_cover_mask(&[(0.0, 1.0, 0.5, Some(2.0))]);
+        assert!(
+            mask.contains("0.00) 0%"),
+            "clear edge should be zero alpha: {mask}"
+        );
+        assert!(
+            !mask.contains("0.97"),
+            "clear sky should have no opaque stop: {mask}"
+        );
+    }
+
+    #[test]
+    fn cloud_mask_empty_tail_fades_to_clear() {
+        // Data fills only 0..0.6 of the domain (best_window stretched it past the
+        // last hour) → the tail must fade to transparent, not hold the deck.
+        let mask = cloud_cover_mask(&[(0.0, 0.6, 0.3, Some(100.0))]);
+        assert!(
+            mask.contains("rgba(255,255,255,0) 100%"),
+            "empty tail not cleared: {mask}"
+        );
+    }
 }

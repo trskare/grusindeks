@@ -110,7 +110,7 @@ fn DashboardPage() -> impl IntoView {
     let rest_score = Resource::new(
         move || selected.get(),
         |place| async move {
-            let now = chrono::Local::now();
+            let now = chrono::Utc::now().with_timezone(&chrono_tz::Europe::Oslo);
             let end = now
                 .date_naive()
                 .succ_opt()
@@ -210,7 +210,8 @@ fn DashboardPage() -> impl IntoView {
                                     let penalties = c.score.penalties.clone();
                                     let breakdown = c.score.breakdown;
                                     let stats = c.score.stats;
-                                    let (sunrise, sunset) = agg.sun.map_or((None, None), |s| (s.sunrise, s.sunset));
+                                    let (sunrise, sunset, polar) =
+                                        agg.sun.map_or((None, None, None), |s| (s.sunrise, s.sunset, s.polar));
                                     // Today's stand-out window, promoted from the multi-day strip.
                                     // Only surface it while it's still relevant (not fully past).
                                     let now = chrono::Utc::now();
@@ -223,23 +224,24 @@ fn DashboardPage() -> impl IntoView {
                                     });
                                     let best_window = optimal
                                         .as_ref()
-                                        .map(|ow| BestWindowHint::from_window(ow, now, sunset));
+                                        .map(|ow| BestWindowHint::from_window(ow, now, sunset, polar));
                                     // Raw window for the timeline overlay — only when it's
                                     // *today* (the timeline shows the rest of today; a window
                                     // that rolled to tomorrow doesn't belong on it).
                                     let best_window_rw = optimal.as_ref().map(|ow| ow.window).filter(|w| {
-                                        w.start.with_timezone(&chrono::Local).date_naive()
-                                            == now.with_timezone(&chrono::Local).date_naive()
+                                        w.start.with_timezone(&chrono_tz::Europe::Oslo).date_naive()
+                                            == now.with_timezone(&chrono_tz::Europe::Oslo).date_naive()
                                     });
                                     let produced_at = agg.produced_at;
-                                    // Recent ground water for the "underlag" stats tile —
-                                    // shown whenever Frost data exists.
-                                    let ground = agg.rain_history.as_ref().map(|rh| (rh.total_mm, rh.lookback_hours));
+                                    // Current ground state for the "underlag" stats tile: the
+                                    // drying model's surface water *right now* (after rain,
+                                    // drainage and drying), not the rain that fell over the week.
+                                    let ground = agg.ground_water_mm.map(|mm| (mm, agg.snow_suspected));
                                     // Daylight-left for the "dagslys" stats tile: (value, bar
                                     // fraction 0–100, caption). After sunset it's a muted
                                     // "Mørkt" with no bar. `None` (no sun data) hides the tile.
                                     let daylight = sunset.map(|ss| {
-                                        let set_hhmm = ss.with_timezone(&chrono::Local).format("%H:%M").to_string();
+                                        let set_hhmm = ss.with_timezone(&chrono_tz::Europe::Oslo).format("%H:%M").to_string();
                                         if now >= ss {
                                             ("Mørkt".to_string(), None, format!("sol ned {set_hhmm}"))
                                         } else {
@@ -409,12 +411,24 @@ fn DashboardPage() -> impl IntoView {
                                                 selected_best_window.set(None);
                                             }>
                                                 <div
+                                                    role="dialog"
+                                                    aria-modal="true"
+                                                    aria-label="Timesvarsel for dagen"
+                                                    tabindex="-1"
                                                     class="gx-popdown fixed w-[min(58rem,calc(100vw-1rem))] rounded-2xl bg-gruv-bg1 p-4 shadow-2xl ring-1 ring-gruv-bg2/70"
                                                     style=style
                                                     on:click=move |ev| ev.stop_propagation()
+                                                    on:keydown=move |ev| {
+                                                        if ev.key() == "Escape" {
+                                                            selected_day.set(None);
+                                                            selected_best_window.set(None);
+                                                        }
+                                                    }
                                                 >
                                                     <div class="mb-2 flex justify-end">
                                                         <button type="button"
+                                                            autofocus
+                                                            aria-label="Lukk"
                                                             class="cursor-pointer rounded-lg bg-gruv-bg0/70 px-2.5 py-1 text-xs font-semibold text-gruv-fg/70 ring-1 ring-gruv-bg2 transition-colors hover:bg-gruv-bg2/60 hover:text-gruv-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gruv-aqua"
                                                             on:click=move |_| {
                                                                 selected_day.set(None);
@@ -666,14 +680,41 @@ fn PlacesSection() -> impl IntoView {
     let new_lat = RwSignal::new(String::new());
     let new_lon = RwSignal::new(String::new());
     let new_radius = RwSignal::new("20".to_string());
+    let new_err = RwSignal::new(None::<String>);
 
     let add = move |_| {
+        // Validate before saving: previously a bad/empty field parsed to 0.0,
+        // silently persisting a valid-looking place at (0,0). Accept Norwegian
+        // decimal commas, then range-check.
+        let parse = |s: String| s.trim().replace(',', ".").parse::<f64>().ok();
+        let name = new_name.get().trim().to_string();
+        let (lat, lon, radius) = (
+            parse(new_lat.get()),
+            parse(new_lon.get()),
+            parse(new_radius.get()),
+        );
+        let problem = if name.is_empty() {
+            Some("Stedet trenger et navn.")
+        } else if !matches!(lat, Some(v) if (-90.0..=90.0).contains(&v)) {
+            Some("Breddegrad må være et tall mellom −90 og 90.")
+        } else if !matches!(lon, Some(v) if (-180.0..=180.0).contains(&v)) {
+            Some("Lengdegrad må være et tall mellom −180 og 180.")
+        } else if !matches!(radius, Some(v) if v > 0.0 && v <= 100.0) {
+            Some("Radius må være et tall mellom 0 og 100 km.")
+        } else {
+            None
+        };
+        if let Some(msg) = problem {
+            new_err.set(Some(msg.to_string()));
+            return;
+        }
+        new_err.set(None);
         save.dispatch(PlaceDto {
             id: None,
-            name: new_name.get(),
-            lat: new_lat.get().parse().unwrap_or(0.0),
-            lon: new_lon.get().parse().unwrap_or(0.0),
-            radius_km: new_radius.get().parse().unwrap_or(20.0),
+            name,
+            lat: lat.unwrap(),
+            lon: lon.unwrap(),
+            radius_km: radius.unwrap(),
             frost_source_id: String::new(),
         });
         new_name.set(String::new());
@@ -721,6 +762,9 @@ fn PlacesSection() -> impl IntoView {
                 <input class=input_cls() placeholder="radius km" prop:value=move || new_radius.get()
                     on:input=move |ev| new_radius.set(event_target_value(&ev))/>
             </div>
+            {move || new_err.get().map(|e| view! {
+                <p class="text-sm text-gruv-red">{e}</p>
+            })}
             <button class=btn_cls() on:click=add>"Legg til sted"</button>
         </div>
     }

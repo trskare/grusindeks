@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{NaiveTime, Weekday};
 use directories::ProjectDirs;
+use grusindeks_core::drying::DrainageClass;
 use grusindeks_core::geo::Point;
 use grusindeks_core::lang::Language;
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,13 @@ pub struct Config {
 
     #[serde(default)]
     pub frost: FrostConfig,
+
+    /// Default drainage character for ride locations that don't set their own.
+    /// `"normal"` (the calibrated default) unless you know your local roads
+    /// drain unusually fast (`"rask"`) or slowly (`"treg"`). Per-place
+    /// `[places.x] drainage = …` overrides this.
+    #[serde(default)]
+    pub drainage: DrainageClass,
 
     /// Vis "Regn 7d"-footer-chip når Frost-historikk er tilgjengelig.
     /// Default `true` — sett til `false` for å skjule chipen i utskriften
@@ -198,6 +206,10 @@ pub struct PlaceConfig {
     /// observations. Falls back to `frost.source_id`.
     #[serde(default)]
     pub frost_source_id: Option<String>,
+    /// Optional drainage character for *this* place's gravel. Falls back to
+    /// the top-level `drainage` when unset. `"rask"` / `"normal"` / `"treg"`.
+    #[serde(default)]
+    pub drainage: Option<DrainageClass>,
 }
 
 impl PlaceConfig {
@@ -279,6 +291,13 @@ default_place = "oslo"
 # days = ["mon", "tue", "wed", "thu", "fri"]
 # window = "08:00-15:00"
 
+# Optional: default drainage character for your gravel roads. The model is
+# calibrated for "normal"; set "rask" for coarse, well-crowned free-draining
+# roads or "treg" for fine/compacted/flat surfaces that stay wet for hours.
+# This is a property of the road you must set yourself — it can't be derived
+# from weather data. Per-place [places.x] drainage overrides it.
+# drainage = "normal"
+
 [frost]
 # Register a free client_id at https://frost.met.no/auth/requestCredentials.html
 # Without it, grusindeks skips historical observations and assumes dry ground.
@@ -290,6 +309,7 @@ lat = 59.9139
 lon = 10.7522
 radius_km = 20.0
 # frost_source_id = "SN18700"  # overrides the global Frost station for this place
+# drainage = "treg"            # this road drains slowly (overrides the global default)
 "#;
 
 #[cfg(test)]
@@ -368,6 +388,40 @@ frost_source_id = "SN50540"
         let bergen = &cfg.places["bergen"];
         assert_eq!(bergen.radius_km, 12.5);
         assert_eq!(bergen.frost_source_id.as_deref(), Some("SN50540"));
+    }
+
+    #[test]
+    fn drainage_defaults_to_normal_and_parses_per_place_override() {
+        let dir = TempDir::new().unwrap();
+        let p = write_cfg(
+            &dir,
+            r#"
+user_agent_contact = "dev@example.invalid"
+drainage = "rask"
+[places.leirveg]
+lat = 60.0
+lon = 11.0
+drainage = "treg"
+[places.skogsbilveg]
+lat = 61.0
+lon = 12.0
+"#,
+        );
+        let cfg = Config::load_from(&p).unwrap();
+        // Global override parsed.
+        assert_eq!(cfg.drainage, DrainageClass::Rask);
+        // Per-place override.
+        assert_eq!(cfg.places["leirveg"].drainage, Some(DrainageClass::Treg));
+        // Place without its own setting leaves it None (falls back to global).
+        assert_eq!(cfg.places["skogsbilveg"].drainage, None);
+    }
+
+    #[test]
+    fn drainage_defaults_to_normal_when_unset() {
+        let dir = TempDir::new().unwrap();
+        let p = write_cfg(&dir, "user_agent_contact = \"dev@example.invalid\"\n");
+        let cfg = Config::load_from(&p).unwrap();
+        assert_eq!(cfg.drainage, DrainageClass::Normal);
     }
 
     #[test]

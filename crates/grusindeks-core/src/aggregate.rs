@@ -39,6 +39,22 @@ pub struct AggregateScore {
     /// Frost was unavailable or the response contained no usable data.
     #[serde(default)]
     pub rain_history: Option<RainHistory>,
+    /// Current modelled surface water on the ground, in mm (0 ..=
+    /// `GROUND_SATURATED`). This is the drying model's *present* state —
+    /// what's actually on the gravel right now after rain, drainage and
+    /// drying — as opposed to `rain_history.total_mm`, which is the raw
+    /// rain that *fell* over the lookback window. `None` when no Frost
+    /// observations were available to seed the drying model.
+    #[serde(default)]
+    pub ground_water_mm: Option<f64>,
+    /// `true` when recent observations suggest snow on the ground (sustained
+    /// sub-zero precipitation that hasn't melted). The drying model doesn't
+    /// model a snowpack, so the ground axis is unreliable here — renderers
+    /// should flag the score as uncertain rather than trusted. The honest
+    /// frozen-end analogue of `SurfaceState::drought_at_lookback_cap`.
+    /// Defaults to `false` (no data / not snowy).
+    #[serde(default)]
+    pub snow_suspected: bool,
     /// Radar-based imminent-rain alert. `Some` when nowcast saw
     /// precipitation ≥ threshold in the next ~2 hours. `None` when nowcast
     /// wasn't fetched, the location is outside Norden, or the radar series
@@ -148,6 +164,8 @@ impl AggregateScore {
             max,
             points: scored,
             rain_history: None,
+            ground_water_mm: None,
+            snow_suspected: false,
             nowcast_alert: None,
             produced_at: None,
             sun: None,
@@ -333,13 +351,14 @@ fn mean_u8(xs: &[u8]) -> u8 {
 impl DayAggregate {
     /// The center sample's full `DayScore`. Used by the renderer to pick a
     /// representative weather icon and penalty list for the day — neither
-    /// of which makes sense to "average" across points.
-    pub fn center(&self) -> &DayScore {
+    /// of which makes sense to "average" across points. `None` only for a
+    /// malformed (empty-`points`) value; `from_points` always yields `Some`.
+    pub fn center(&self) -> Option<&DayScore> {
         self.points
             .iter()
             .find(|p| p.is_center)
+            .or_else(|| self.points.first())
             .map(|p| &p.day_score)
-            .unwrap_or(&self.points[0].day_score)
     }
 }
 
@@ -407,6 +426,10 @@ pub struct HourRaw {
     /// timeline's lightning flash. Defaults to `false` for older blobs.
     #[serde(default)]
     pub thunder: bool,
+    /// Total cloud cover 0–100 (MET `cloud_area_fraction`). Drives the
+    /// timeline's drifting cloud strip. `None` for older blobs / no data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_area_fraction: Option<f64>,
 }
 
 /// One day worth of hourly scores. `daytime_window` is the user's
