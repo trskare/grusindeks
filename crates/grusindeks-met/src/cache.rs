@@ -44,7 +44,17 @@ pub enum CacheOutcome {
     Revalidated,
     /// New body fetched from upstream (no prior entry, or upstream sent 200).
     Refreshed,
+    /// Revalidation failed with a transient error (network, 429, 5xx) and the
+    /// stale cached body was served instead. Only happens within
+    /// [`STALE_GRACE_HOURS`] of the entry's `Expires`.
+    StaleOnError,
 }
+
+/// How long past `Expires` a cached body may still be served when
+/// revalidation fails with a transient error. MET forecasts expire roughly
+/// half an hour after fetch, so this tolerates an outage of a working day
+/// without ever presenting truly outdated data as current.
+const STALE_GRACE_HOURS: i64 = 6;
 
 impl Cache {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
@@ -82,6 +92,13 @@ impl Cache {
 
     /// Get the body for `url`, using the cache when fresh and revalidating
     /// with `If-Modified-Since` once `Expires` has passed.
+    ///
+    /// When revalidation fails *transiently* — the request never reaches the
+    /// server, or MET answers 429/5xx — a stale entry within
+    /// [`STALE_GRACE_HOURS`] of its `Expires` is served instead of failing,
+    /// so a brief MET outage degrades to a slightly old forecast rather than
+    /// an empty app. Non-transient errors (403 banned User-Agent, 404, …)
+    /// always propagate: those need the operator's attention.
     pub async fn get_or_revalidate(
         &self,
         http: &reqwest::Client,
@@ -107,7 +124,16 @@ impl Cache {
                 req = req.header("if-modified-since", lm);
             }
         }
-        let resp = req.send().await?;
+        let resp = match req.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                if let Some(entry) = cached.filter(|e| within_stale_grace(e, now)) {
+                    tracing::warn!(%url, error = %e, "MET unreachable — serving stale cache");
+                    return Ok((entry.body, CacheOutcome::StaleOnError));
+                }
+                return Err(e.into());
+            }
+        };
 
         // 304: keep the body, refresh Expires from the new headers.
         if resp.status().as_u16() == 304 {
@@ -134,6 +160,13 @@ impl Cache {
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
+            let transient = status == 429 || resp.status().is_server_error();
+            if transient {
+                if let Some(entry) = cached.filter(|e| within_stale_grace(e, now)) {
+                    tracing::warn!(%url, status, "MET error — serving stale cache");
+                    return Ok((entry.body, CacheOutcome::StaleOnError));
+                }
+            }
             let body = resp.text().await.ok();
             return Err(ClientError::Http { status, body });
         }
@@ -154,6 +187,15 @@ impl Cache {
         self.write_entry(&url, &entry).await?;
         Ok((body, CacheOutcome::Refreshed))
     }
+}
+
+/// Whether a stale entry is still recent enough to serve when revalidation
+/// fails transiently. Entries without `Expires` have no age bound we can
+/// reason about, so they never qualify.
+fn within_stale_grace(entry: &CacheEntry, now: DateTime<Utc>) -> bool {
+    entry
+        .expires
+        .is_some_and(|exp| now < exp + chrono::Duration::hours(STALE_GRACE_HOURS))
 }
 
 fn parse_expires(h: Option<&reqwest::header::HeaderValue>) -> Option<DateTime<Utc>> {
@@ -342,6 +384,160 @@ mod tests {
         assert_eq!(b1, "body-0");
         assert_eq!(b2, "body-1");
         assert_eq!(o2, CacheOutcome::Refreshed);
+    }
+
+    /// Mount a one-off 200 with the given expiry so the cache holds a stale
+    /// entry, then swap the server's response for the follow-up call.
+    async fn prime_stale_entry(
+        server: &MockServer,
+        cache: &Cache,
+        http: &reqwest::Client,
+        url: &Url,
+        expires: DateTime<Utc>,
+    ) {
+        let guard = Mock::given(method("GET"))
+            .and(path("/cached"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("stale-body")
+                    .insert_header(
+                        "last-modified",
+                        http_date(Utc::now() - Duration::minutes(10)).as_str(),
+                    )
+                    .insert_header("expires", http_date(expires).as_str()),
+            )
+            .mount_as_scoped(server)
+            .await;
+        let (body, outcome) = cache.get_or_revalidate(http, url.clone()).await.unwrap();
+        assert_eq!(body, "stale-body");
+        assert_eq!(outcome, CacheOutcome::Refreshed);
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn server_error_within_grace_serves_stale_body() {
+        let server = MockServer::start().await;
+        let (cache, _dir, http, url) = build_cached_url(&server).await;
+        prime_stale_entry(
+            &server,
+            &cache,
+            &http,
+            &url,
+            Utc::now() - Duration::minutes(1),
+        )
+        .await;
+
+        Mock::given(method("GET"))
+            .and(path("/cached"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("down"))
+            .mount(&server)
+            .await;
+
+        let (body, outcome) = cache.get_or_revalidate(&http, url).await.unwrap();
+        assert_eq!(body, "stale-body");
+        assert_eq!(outcome, CacheOutcome::StaleOnError);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_within_grace_serves_stale_body() {
+        let server = MockServer::start().await;
+        let (cache, _dir, http, url) = build_cached_url(&server).await;
+        prime_stale_entry(
+            &server,
+            &cache,
+            &http,
+            &url,
+            Utc::now() - Duration::minutes(1),
+        )
+        .await;
+
+        Mock::given(method("GET"))
+            .and(path("/cached"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+
+        let (_, outcome) = cache.get_or_revalidate(&http, url).await.unwrap();
+        assert_eq!(outcome, CacheOutcome::StaleOnError);
+    }
+
+    #[tokio::test]
+    async fn server_error_past_grace_propagates() {
+        let server = MockServer::start().await;
+        let (cache, _dir, http, url) = build_cached_url(&server).await;
+        prime_stale_entry(
+            &server,
+            &cache,
+            &http,
+            &url,
+            Utc::now() - Duration::hours(STALE_GRACE_HOURS + 1),
+        )
+        .await;
+
+        Mock::given(method("GET"))
+            .and(path("/cached"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let err = cache.get_or_revalidate(&http, url).await.unwrap_err();
+        match err {
+            ClientError::Http { status: 503, .. } => {}
+            other => panic!("expected 503 past grace, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn client_error_with_stale_entry_propagates() {
+        let server = MockServer::start().await;
+        let (cache, _dir, http, url) = build_cached_url(&server).await;
+        prime_stale_entry(
+            &server,
+            &cache,
+            &http,
+            &url,
+            Utc::now() - Duration::minutes(1),
+        )
+        .await;
+
+        // 403 = banned User-Agent per the MET TOS — never paper over it.
+        Mock::given(method("GET"))
+            .and(path("/cached"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let err = cache.get_or_revalidate(&http, url).await.unwrap_err();
+        match err {
+            ClientError::Http { status: 403, .. } => {}
+            other => panic!("expected 403, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn network_error_within_grace_serves_stale_body() {
+        let dir = TempDir::new().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf());
+        let http = reqwest::Client::builder().build().unwrap();
+
+        // Point at a port nothing listens on, with a stale entry pre-written,
+        // so the revalidation GET fails with a connection error.
+        let url = Url::parse("http://127.0.0.1:9/cached").unwrap();
+        cache
+            .write_entry(
+                &url,
+                &CacheEntry {
+                    last_modified: None,
+                    expires: Some(Utc::now() - Duration::minutes(1)),
+                    body: "stale-body".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let (body, outcome) = cache.get_or_revalidate(&http, url).await.unwrap();
+        assert_eq!(body, "stale-body");
+        assert_eq!(outcome, CacheOutcome::StaleOnError);
     }
 
     #[tokio::test]
