@@ -101,15 +101,59 @@ fn DashboardPage() -> impl IntoView {
     // The clicked day card's box in viewport coords: (left, top, width, height).
     let selected_day_anchor = RwSignal::new((0_i32, 0_i32, 0_i32, 0_i32));
 
+    // ---- auto-refresh ----
+    // Weather goes stale in an open tab: bump `refresh_tick` every
+    // REFRESH_MINUTES while the tab is visible, and immediately when the tab
+    // becomes visible again with old data (the "re-open the tab next morning"
+    // case). The tick is part of every weather resource's source below, so one
+    // bump refetches the dashboard consistently — including the windows that
+    // `rest_score`/`get_hourly` derive from "now", which otherwise freeze at
+    // page-load time. The data sections render in `Transition` (not
+    // `Suspense`), so a refresh swaps in fresh numbers without flashing the
+    // loading skeletons. Effects never run during SSR, so this is client-only
+    // by construction; the server's MET cache absorbs the extra calls.
+    const REFRESH_MINUTES: i64 = 10;
+    let refresh_tick = RwSignal::new(0_u32);
+    let last_refresh = StoredValue::new(chrono::Utc::now());
+    let bump = move || {
+        last_refresh.set_value(chrono::Utc::now());
+        refresh_tick.update(|n| *n += 1);
+    };
+    Effect::new(move |_| {
+        let interval = set_interval_with_handle(
+            move || {
+                if !document().hidden() {
+                    bump();
+                }
+            },
+            std::time::Duration::from_secs(REFRESH_MINUTES as u64 * 60),
+        );
+        // `visibilitychange` fires on the document but bubbles, so the window
+        // listener sees it (leptos has no typed descriptor for it).
+        let visibility = window_event_listener_untyped("visibilitychange", move |_| {
+            let stale = chrono::Utc::now() - last_refresh.get_value()
+                >= chrono::TimeDelta::minutes(REFRESH_MINUTES);
+            if !document().hidden() && stale {
+                bump();
+            }
+        });
+        on_cleanup(move || {
+            if let Ok(interval) = interval {
+                interval.clear();
+            }
+            visibility.remove();
+        });
+    });
+
     let score = Resource::new(
-        move || selected.get(),
-        |place| async move { get_score(place, 3).await },
+        move || (selected.get(), refresh_tick.get()),
+        |(place, _)| async move { get_score(place, 3).await },
     );
     // Rest-of-day aggregate for the Indeks section: a window from now to local
     // midnight (≥1 h). The 3-hour `score` above still drives the "Kjør nå" card.
     let rest_score = Resource::new(
-        move || selected.get(),
-        |place| async move {
+        move || (selected.get(), refresh_tick.get()),
+        |(place, _)| async move {
             let now = chrono::Utc::now().with_timezone(&chrono_tz::Europe::Oslo);
             let end = now
                 .date_naive()
@@ -122,16 +166,16 @@ fn DashboardPage() -> impl IntoView {
         },
     );
     let forecast = Resource::new(
-        move || selected.get(),
-        |place| async move { get_forecast(place, 6).await },
+        move || (selected.get(), refresh_tick.get()),
+        |(place, _)| async move { get_forecast(place, 6).await },
     );
     let hourly = Resource::new(
-        move || selected.get(),
-        |place| async move { get_hourly(place).await },
+        move || (selected.get(), refresh_tick.get()),
+        |(place, _)| async move { get_hourly(place).await },
     );
     let hourly_day = Resource::new(
-        move || (selected.get(), selected_day.get()),
-        |(place, date)| async move {
+        move || (selected.get(), selected_day.get(), refresh_tick.get()),
+        |(place, date, _)| async move {
             match date {
                 Some(date) => Some(get_hourly_day(place, date).await),
                 None => None,
@@ -175,7 +219,10 @@ fn DashboardPage() -> impl IntoView {
             <div class="mt-8 space-y-8">
 
             // ---- current window card ----
-            <Suspense fallback=move || {
+            // `Transition` (not `Suspense`): the auto-refresh tick refetches
+            // these resources in place, and the old card should stay on screen
+            // until fresh data lands — the skeleton is for first load only.
+            <Transition fallback=move || {
                 // Skeleton that mirrors the Recommendation card's shape, so the
                 // layout doesn't jump when the real verdict arrives.
                 view! {
@@ -291,7 +338,7 @@ fn DashboardPage() -> impl IntoView {
                                                 {nowcast.map(|a| view! { <NowcastBanner alert=a/> })}
 
                                                 // ── Time for time ── (the timeline carries its own band header)
-                                                <Suspense fallback=move || view! {
+                                                <Transition fallback=move || view! {
                                                     <div class="h-[290px] animate-pulse rounded-lg bg-gruv-bg0/40"></div>
                                                 }>
                                                     {move || Suspend::new(async move {
@@ -309,7 +356,7 @@ fn DashboardPage() -> impl IntoView {
                                                             _ => ().into_any(),
                                                         }
                                                     })}
-                                                </Suspense>
+                                                </Transition>
 
                                                 // ── Indeks · resten av dagen ──
                                                 <div class="space-y-3">
@@ -355,10 +402,10 @@ fn DashboardPage() -> impl IntoView {
                         }.into_any(),
                     }
                 })}
-            </Suspense>
+            </Transition>
 
             // ---- multi-day strip ----
-            <Suspense>
+            <Transition>
                 {move || Suspend::new(async move {
                     match forecast.await {
                         Ok(mf) => {
@@ -436,7 +483,7 @@ fn DashboardPage() -> impl IntoView {
                                                             }
                                                         >"Lukk"</button>
                                                     </div>
-                                                    <Suspense fallback=move || view! {
+                                                    <Transition fallback=move || view! {
                                                         <div class="h-[290px] animate-pulse rounded-xl bg-gruv-bg0/45 p-4 text-sm text-gruv-fg/70 inset-well">
                                                             "Laster timesvarsel…"
                                                         </div>
@@ -469,7 +516,7 @@ fn DashboardPage() -> impl IntoView {
                                                                 None => ().into_any(),
                                                             }
                                                         })}
-                                                    </Suspense>
+                                                    </Transition>
                                                 </div>
                                             </div>
                                         }
@@ -480,7 +527,7 @@ fn DashboardPage() -> impl IntoView {
                         Err(_) => ().into_any(),
                     }
                 })}
-            </Suspense>
+            </Transition>
 
             </div>
         </section>
