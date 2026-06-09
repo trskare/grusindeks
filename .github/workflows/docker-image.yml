@@ -1,6 +1,11 @@
 name: Build container image
 
+# Pushing a version tag (v0.2.0, …) builds and publishes the image with that
+# tag, e.g. ghcr.io/<owner>/grusindeks-web:v0.2.0. The manual dispatch stays
+# for one-off builds with a free-form tag.
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
@@ -44,6 +49,8 @@ jobs:
           file: ./Dockerfile
           platforms: linux/arm64
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/${{ inputs.image_name }}:${{ inputs.tag }}
+          # Tag pushes have no `inputs`, so the fallbacks pick the image name
+          # and use the git tag (github.ref_name) as the container tag.
+          tags: ghcr.io/${{ github.repository_owner }}/${{ inputs.image_name || 'grusindeks-web' }}:${{ inputs.tag || github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
