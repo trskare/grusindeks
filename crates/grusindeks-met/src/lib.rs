@@ -10,4 +10,5 @@ pub mod cache;
 pub mod client;
 pub mod frost;
 pub mod locationforecast;
+pub mod metalerts;
 pub mod nowcast;

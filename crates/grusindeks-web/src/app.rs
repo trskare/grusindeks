@@ -7,15 +7,15 @@ use leptos_router::components::{Route, Router, Routes, A};
 use leptos_router::path;
 
 use crate::components::{
-    BestWindowHint, DayCard, DaySelect, NowcastBanner, Recommendation, RideTimeline, ScoreGauge,
-    SubscoreBars,
+    AlertChip, BestWindowHint, DayCard, DaySelect, NowcastBanner, Recommendation, RideTimeline,
+    ScoreGauge, SubscoreBars,
 };
 use crate::dto::{PlaceDto, PrefsDto, WorkHoursDto};
 use crate::icons;
 use crate::map::MapView;
 use crate::server::{
-    get_forecast, get_hourly, get_hourly_day, get_prefs, get_score, get_work_hours, list_places,
-    remove_place, save_place, save_prefs, save_work_hours,
+    get_alerts, get_forecast, get_hourly, get_hourly_day, get_prefs, get_score, get_work_hours,
+    list_places, remove_place, save_place, save_prefs, save_work_hours,
 };
 
 /// The HTML document the server renders around the hydrated app.
@@ -296,6 +296,11 @@ fn DashboardPage() -> impl IntoView {
             }
         },
     );
+    // Official MET warnings (MetAlerts) for the place — current and upcoming.
+    let alerts = Resource::new(
+        move || (selected.get(), refresh_tick.get()),
+        |(place, _)| async move { get_alerts(place).await },
+    );
     view! {
         <section class="mx-auto max-w-5xl px-6 py-10 min-[2024px]:max-w-[2200px]">
             // Wordmark lives in the NavBar (so does the place picker, in the
@@ -403,6 +408,23 @@ fn DashboardPage() -> impl IntoView {
                                     let idx_breakdown = rest_center.map_or(c.score.breakdown, |p| p.score.breakdown);
                                     let idx_highlights = rest_center
                                         .map_or_else(|| c.score.highlights.clone(), |p| p.score.highlights.clone());
+                                    // Official MET warnings for the card: active
+                                    // now or starting later today (tomorrow+
+                                    // lives on the day cards instead).
+                                    let day_end = now
+                                        .with_timezone(&chrono_tz::Europe::Oslo)
+                                        .date_naive()
+                                        .succ_opt()
+                                        .and_then(oslo_midnight_utc);
+                                    let card_alerts: Vec<_> = alerts
+                                        .await
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .filter(|a| {
+                                            a.ends > now
+                                                && day_end.is_none_or(|de| a.starts < de)
+                                        })
+                                        .collect();
                                     let place = match selected.get_untracked() {
                                         p if !p.trim().is_empty() => p,
                                         _ => prefs
@@ -419,7 +441,7 @@ fn DashboardPage() -> impl IntoView {
                                         <div class="grid grid-cols-1 gap-6 min-[2024px]:grid-cols-2 min-[2024px]:items-stretch">
                                             // LEFT — verdict + details
                                             <div class="space-y-6">
-                                            <Recommendation total=agg.mean label=c.score.label.clone() penalties=penalties breakdown=breakdown stats=stats place=place best_window=best_window updated=produced_at ground=ground daylight=daylight/>
+                                            <Recommendation total=agg.mean label=c.score.label.clone() penalties=penalties breakdown=breakdown stats=stats place=place best_window=best_window updated=produced_at ground=ground daylight=daylight alerts=card_alerts/>
                                             <div class="emboss space-y-5 rounded-2xl bg-gruv-bg1 p-6">
                                                 {nowcast.map(|a| view! { <NowcastBanner alert=a/> })}
 
@@ -493,6 +515,8 @@ fn DashboardPage() -> impl IntoView {
             // ---- multi-day strip ----
             <Transition>
                 {move || Suspend::new(async move {
+                    let all_alerts = alerts.await.unwrap_or_default();
+                    let popup_alerts = all_alerts.clone();
                     match forecast.await {
                         Ok(mf) => {
                             view! {
@@ -503,15 +527,22 @@ fn DashboardPage() -> impl IntoView {
                                     <div class="flex gap-3 overflow-x-auto pb-2">
                                         {mf.days.into_iter().map(|d| {
                                             let best_window = d.optimal_window.as_ref().map(|ow| ow.window);
+                                            let day_alerts = alerts_for_date(&all_alerts, d.date);
                                             let on_select = Callback::new(move |(date, l, t, w, h): DaySelect| {
                                                 selected_day.set(Some(date.format("%Y-%m-%d").to_string()));
                                                 selected_best_window.set(best_window);
                                                 selected_day_anchor.set((l, t, w, h));
                                             });
-                                            view! { <DayCard day=d on_select=on_select/> }
+                                            view! { <DayCard day=d on_select=on_select alerts=day_alerts/> }
                                         }).collect_view()}
                                     </div>
-                                    {move || selected_day.get().map(|_| {
+                                    {move || selected_day.get().map(|date_str| {
+                                        // Warnings for the opened day — clickable
+                                        // chips with the full details popdown.
+                                        let day_alerts = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
+                                            .ok()
+                                            .map(|d| alerts_for_date(&popup_alerts, d))
+                                            .unwrap_or_default();
                                         let (left, top_c, width, _h) = selected_day_anchor.get();
                                         // Bloom UP out of the clicked card: park the popup just
                                         // above the card's top edge and aim the morph origin at the
@@ -558,7 +589,10 @@ fn DashboardPage() -> impl IntoView {
                                                         }
                                                     }
                                                 >
-                                                    <div class="mb-2 flex justify-end">
+                                                    <div class="mb-2 flex items-start justify-between gap-2">
+                                                        <div class="flex min-w-0 flex-wrap gap-1.5">
+                                                            {day_alerts.into_iter().map(|a| view! { <AlertChip alert=a/> }).collect_view()}
+                                                        </div>
                                                         <button type="button"
                                                             autofocus
                                                             aria-label="Lukk"
@@ -618,6 +652,33 @@ fn DashboardPage() -> impl IntoView {
             </div>
         </section>
     }
+}
+
+/// UTC instant of local (Oslo) midnight starting `date`. `None` only on
+/// calendar overflow — Norway's DST jumps happen at 02:00/03:00, never at
+/// midnight, so `earliest()` is exact.
+fn oslo_midnight_utc(date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+    date.and_hms_opt(0, 0, 0)?
+        .and_local_timezone(chrono_tz::Europe::Oslo)
+        .earliest()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
+/// The MET warnings that overlap the local day `date` (for day cards and the
+/// day popup).
+fn alerts_for_date(
+    alerts: &[grusindeks_core::aggregate::WeatherAlert],
+    date: chrono::NaiveDate,
+) -> Vec<grusindeks_core::aggregate::WeatherAlert> {
+    let bounds = oslo_midnight_utc(date).zip(date.succ_opt().and_then(oslo_midnight_utc));
+    let Some((start, end)) = bounds else {
+        return Vec::new();
+    };
+    alerts
+        .iter()
+        .filter(|a| a.overlaps(start, end))
+        .cloned()
+        .collect()
 }
 
 /// A section header for the details card: an uppercase eyebrow label followed
