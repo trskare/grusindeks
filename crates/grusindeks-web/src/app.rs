@@ -43,9 +43,15 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
     }
 }
 
+/// The selected place name, shared between the NavBar's "Sted" menu and the
+/// dashboard's weather resources. Empty string = the prefs default place.
+#[derive(Clone, Copy)]
+struct SelectedPlace(RwSignal<String>);
+
 #[component]
 pub fn App() -> impl IntoView {
     provide_meta_context();
+    provide_context(SelectedPlace(RwSignal::new(String::new())));
 
     view! {
         <Stylesheet id="leptos" href="/pkg/grusindeks-web.css"/>
@@ -67,6 +73,31 @@ pub fn App() -> impl IntoView {
 
 #[component]
 fn NavBar() -> impl IntoView {
+    let SelectedPlace(selected) = expect_context::<SelectedPlace>();
+    let open = RwSignal::new(false);
+    let places = Resource::new(|| (), |_| async move { list_places().await });
+    let prefs = Resource::new(|| (), |_| async move { get_prefs().await });
+
+    // Close the menu on any outside click or Escape. Client-only (Effect);
+    // the trigger and panel stop propagation so their own clicks don't
+    // immediately re-close it.
+    Effect::new(move |_| {
+        let click = window_event_listener(leptos::ev::click, move |_| {
+            if open.get_untracked() {
+                open.set(false);
+            }
+        });
+        let key = window_event_listener(leptos::ev::keydown, move |ev| {
+            if ev.key() == "Escape" {
+                open.set(false);
+            }
+        });
+        on_cleanup(move || {
+            click.remove();
+            key.remove();
+        });
+    });
+
     view! {
         <header class="sticky top-0 z-30 border-b border-gruv-bg2 bg-gruv-bg0/80 backdrop-blur-sm">
             <nav class="mx-auto flex max-w-5xl items-center justify-between px-6 py-5">
@@ -80,22 +111,105 @@ fn NavBar() -> impl IntoView {
                         </span>
                     </span>
                 </A>
-                <A href="/settings">
-                    <span class="flex items-center gap-1.5 text-sm text-gruv-gray transition-colors hover:text-gruv-fg">
-                        {icons::settings("h-[18px] w-[18px]", None)}
-                        <span class="hidden sm:inline">"Innstillinger"</span>
-                    </span>
-                </A>
+                <div class="flex items-center gap-5">
+                    <div class="relative">
+                        <button
+                            type="button"
+                            aria-haspopup="menu"
+                            aria-expanded=move || open.get().to_string()
+                            aria-label="Velg sted"
+                            class="flex cursor-pointer items-center gap-1.5 text-sm text-gruv-gray transition-colors hover:text-gruv-fg"
+                            on:click=move |ev| {
+                                ev.stop_propagation();
+                                open.update(|o| *o = !*o);
+                            }
+                        >
+                            {icons::map_pin("h-[18px] w-[18px]", None)}
+                            <span class="hidden sm:inline">"Sted"</span>
+                            <span class="flex transition-transform" class:rotate-180=move || open.get()>
+                                {icons::chevron_down("h-3.5 w-3.5", None)}
+                            </span>
+                        </button>
+                        {move || open.get().then(|| view! {
+                            // Same bloom as the day popup, anchored under the
+                            // trigger: origin near the panel's top-right corner.
+                            <div
+                                role="menu"
+                                aria-label="Velg sted"
+                                class="gx-popdown absolute right-0 top-full z-50 mt-2 w-56 rounded-2xl bg-gruv-bg1 p-1.5 shadow-2xl ring-1 ring-gruv-bg2/70"
+                                style="--gx-origin-x:calc(100% - 1.5rem); --gx-origin-y:-8px"
+                                on:click=move |ev| ev.stop_propagation()
+                            >
+                                <Suspense fallback=move || view! {
+                                    <p class="px-3 py-2 text-sm text-gruv-fg/60">"Laster…"</p>
+                                }>
+                                    {move || Suspend::new(async move {
+                                        let opts = places.await.unwrap_or_default();
+                                        let default_label = prefs.await
+                                            .ok()
+                                            .map(|p| p.default_place)
+                                            .filter(|name| !name.trim().is_empty())
+                                            .unwrap_or_else(|| "Velg sted".to_string());
+                                        view! {
+                                            <PlaceMenuItem value=String::new() label=default_label selected=selected open=open/>
+                                            {opts.into_iter().map(|p| {
+                                                view! { <PlaceMenuItem value=p.name.clone() label=p.name selected=selected open=open/> }
+                                            }).collect_view()}
+                                        }
+                                    })}
+                                </Suspense>
+                            </div>
+                        })}
+                    </div>
+                    <A href="/settings">
+                        <span class="flex items-center gap-1.5 text-sm text-gruv-gray transition-colors hover:text-gruv-fg">
+                            {icons::settings("h-[18px] w-[18px]", None)}
+                            <span class="hidden sm:inline">"Innstillinger"</span>
+                        </span>
+                    </A>
+                </div>
             </nav>
         </header>
     }
 }
 
+/// One row in the NavBar's "Sted" menu. `value` is what gets stored in the
+/// shared [`SelectedPlace`] signal (empty = the prefs default place).
+#[component]
+fn PlaceMenuItem(
+    value: String,
+    label: String,
+    selected: RwSignal<String>,
+    open: RwSignal<bool>,
+) -> impl IntoView {
+    let val = value.clone();
+    let active = Signal::derive(move || selected.get() == val);
+    view! {
+        <button
+            type="button"
+            role="menuitemradio"
+            aria-checked=move || active.get().to_string()
+            class=move || if active.get() {
+                "flex w-full cursor-pointer items-center justify-between gap-3 rounded-lg px-3 py-2 text-left text-sm font-semibold text-gruv-fg transition-colors hover:bg-gruv-bg2/50"
+            } else {
+                "flex w-full cursor-pointer items-center justify-between gap-3 rounded-lg px-3 py-2 text-left text-sm text-gruv-fg/75 transition-colors hover:bg-gruv-bg2/50 hover:text-gruv-fg"
+            }
+            on:click=move |_| {
+                selected.set(value.clone());
+                open.set(false);
+            }
+        >
+            <span class="truncate">{label}</span>
+            {move || active.get().then(|| icons::check("h-4 w-4 shrink-0 text-gruv-aqua", None))}
+        </button>
+    }
+}
+
 #[component]
 fn DashboardPage() -> impl IntoView {
-    let places = Resource::new(|| (), |_| async move { list_places().await });
     let prefs = Resource::new(|| (), |_| async move { get_prefs().await });
-    let selected = RwSignal::new(String::new());
+    // Set from the NavBar's "Sted" menu; every weather resource keys off it.
+    let SelectedPlace(selected) = expect_context::<SelectedPlace>();
     let selected_day = RwSignal::new(None::<String>);
     let selected_best_window = RwSignal::new(None::<grusindeks_core::types::RideWindow>);
     // The clicked day card's box in viewport coords: (left, top, width, height).
@@ -184,37 +298,9 @@ fn DashboardPage() -> impl IntoView {
     );
     view! {
         <section class="mx-auto max-w-5xl px-6 py-10 min-[2024px]:max-w-[2200px]">
-            <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                    // Wordmark lives in the NavBar; here we only frame the view.
-                    <p class="text-gruv-fg/70">"Forholdene i dag"</p>
-                </div>
-                <Suspense>
-                    {move || Suspend::new(async move {
-                        let opts = places.await.unwrap_or_default();
-                        let default_label = prefs.await
-                            .ok()
-                            .map(|p| p.default_place)
-                            .filter(|name| !name.trim().is_empty())
-                            .unwrap_or_else(|| "Velg sted".to_string());
-                        view! {
-                            <label class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-gruv-fg/70 sm:items-end">
-                                "Sted"
-                                <select
-                                    class="min-h-[44px] w-full cursor-pointer rounded-lg border border-gruv-bg2 bg-gruv-bg1 px-3 py-2.5 text-sm normal-case tracking-normal text-gruv-fg outline-none transition-colors hover:border-gruv-bg2/40 focus:border-gruv-aqua focus:ring-2 focus:ring-gruv-aqua/70 sm:w-auto"
-                                    on:change=move |ev| selected.set(event_target_value(&ev))
-                                >
-                                    <option value="">{default_label}</option>
-                                    {opts.into_iter().map(|p| {
-                                        let value = p.name.clone();
-                                        view! { <option value=value>{p.name}</option> }
-                                    }).collect_view()}
-                                </select>
-                            </label>
-                        }
-                    })}
-                </Suspense>
-            </div>
+            // Wordmark lives in the NavBar (so does the place picker, in the
+            // "Sted" menu); here we only frame the view.
+            <p class="text-gruv-fg/70">"Forholdene i dag"</p>
 
             <div class="mt-8 space-y-8">
 

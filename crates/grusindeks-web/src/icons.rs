@@ -180,6 +180,29 @@ pub fn settings(class: &'static str, title: Option<&'static str>) -> impl IntoVi
     )
 }
 
+/// Map pin — the NavBar's "Sted" (place) menu trigger.
+pub fn map_pin(class: &'static str, title: Option<&'static str>) -> impl IntoView {
+    base(
+        class,
+        title,
+        view! {
+            <path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0Z"/>
+            <circle cx="12" cy="10" r="3"/>
+        }
+        .into_any(),
+    )
+}
+
+/// Chevron pointing down — the open/close affordance on the "Sted" trigger.
+pub fn chevron_down(class: &'static str, title: Option<&'static str>) -> impl IntoView {
+    base(class, title, view! { <path d="m6 9 6 6 6-6"/> }.into_any())
+}
+
+/// Check mark — the active entry in the "Sted" menu.
+pub fn check(class: &'static str, title: Option<&'static str>) -> impl IntoView {
+    base(class, title, view! { <path d="M20 6 9 17l-5-5"/> }.into_any())
+}
+
 /// The Grusindeks wordmark logo: a gravel-road wedge (the favicon's road,
 /// distilled) with a dashed centre line and a yellow apex dot standing in for
 /// the bike — it reads at once as "gravel road" and "gauge/index". Multi-tone
