@@ -3,7 +3,7 @@
 //! together with the SQLite layer; the macro generates client stubs that fetch
 //! and deserialize the wasm-safe response types.
 
-use grusindeks_core::aggregate::{AggregateScore, HourlyForecast, MultiDayForecast};
+use grusindeks_core::aggregate::{AggregateScore, HourlyForecast, MultiDayForecast, WeatherAlert};
 use leptos::prelude::*;
 
 use crate::dto::{HistoryPoint, PlaceDto, PrefsDto, WorkHoursDto};
@@ -330,6 +330,30 @@ pub async fn get_hourly_day(place: String, date: String) -> Result<HourlyForecas
         location.center.lon,
     ));
     Ok(hf)
+}
+
+/// Official MET weather warnings (MetAlerts) covering a place — current and
+/// upcoming, worst level first. Empty `place` → default place. Alerts are
+/// auxiliary to the dashboard, so fetch/parse failures degrade to an empty
+/// list instead of failing the page.
+#[server]
+pub async fn get_alerts(place: String) -> Result<Vec<WeatherAlert>, ServerFnError> {
+    use crate::db::{load_config, DEFAULT_USER_ID};
+    use crate::state::AppState;
+    use grusindeks_cli::windows::resolve_location;
+
+    let state = expect_context::<AppState>();
+    let cfg = load_config(&state.db, DEFAULT_USER_ID).await.map_err(err)?;
+    let place_arg = (!place.is_empty()).then_some(place);
+    let location = resolve_location(&cfg, None, None, place_arg, None).map_err(err)?;
+
+    match grusindeks_met::metalerts::fetch(&state.client(), location.center).await {
+        Ok(alerts) => Ok(alerts),
+        Err(e) => {
+            tracing::warn!("metalerts fetch failed: {e}");
+            Ok(Vec::new())
+        }
+    }
 }
 
 /// History samples for a place + kind ("score" | "forecast_day"), oldest-first.

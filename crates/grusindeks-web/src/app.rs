@@ -7,15 +7,15 @@ use leptos_router::components::{Route, Router, Routes, A};
 use leptos_router::path;
 
 use crate::components::{
-    BestWindowHint, DayCard, DaySelect, NowcastBanner, Recommendation, RideTimeline, ScoreGauge,
-    SubscoreBars,
+    AlertChip, BestWindowHint, DayCard, DaySelect, NowcastBanner, Recommendation, RideTimeline,
+    ScoreGauge, SubscoreBars,
 };
 use crate::dto::{PlaceDto, PrefsDto, WorkHoursDto};
 use crate::icons;
 use crate::map::MapView;
 use crate::server::{
-    get_forecast, get_hourly, get_hourly_day, get_prefs, get_score, get_work_hours, list_places,
-    remove_place, save_place, save_prefs, save_work_hours,
+    get_alerts, get_forecast, get_hourly, get_hourly_day, get_prefs, get_score, get_work_hours,
+    list_places, remove_place, save_place, save_prefs, save_work_hours,
 };
 
 /// The HTML document the server renders around the hydrated app.
@@ -43,9 +43,15 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
     }
 }
 
+/// The selected place name, shared between the NavBar's "Sted" menu and the
+/// dashboard's weather resources. Empty string = the prefs default place.
+#[derive(Clone, Copy)]
+struct SelectedPlace(RwSignal<String>);
+
 #[component]
 pub fn App() -> impl IntoView {
     provide_meta_context();
+    provide_context(SelectedPlace(RwSignal::new(String::new())));
 
     view! {
         <Stylesheet id="leptos" href="/pkg/grusindeks-web.css"/>
@@ -67,6 +73,31 @@ pub fn App() -> impl IntoView {
 
 #[component]
 fn NavBar() -> impl IntoView {
+    let SelectedPlace(selected) = expect_context::<SelectedPlace>();
+    let open = RwSignal::new(false);
+    let places = Resource::new(|| (), |_| async move { list_places().await });
+    let prefs = Resource::new(|| (), |_| async move { get_prefs().await });
+
+    // Close the menu on any outside click or Escape. Client-only (Effect);
+    // the trigger and panel stop propagation so their own clicks don't
+    // immediately re-close it.
+    Effect::new(move |_| {
+        let click = window_event_listener(leptos::ev::click, move |_| {
+            if open.get_untracked() {
+                open.set(false);
+            }
+        });
+        let key = window_event_listener(leptos::ev::keydown, move |ev| {
+            if ev.key() == "Escape" {
+                open.set(false);
+            }
+        });
+        on_cleanup(move || {
+            click.remove();
+            key.remove();
+        });
+    });
+
     view! {
         <header class="sticky top-0 z-30 border-b border-gruv-bg2 bg-gruv-bg0/80 backdrop-blur-sm">
             <nav class="mx-auto flex max-w-5xl items-center justify-between px-6 py-5">
@@ -80,22 +111,105 @@ fn NavBar() -> impl IntoView {
                         </span>
                     </span>
                 </A>
-                <A href="/settings">
-                    <span class="flex items-center gap-1.5 text-sm text-gruv-gray transition-colors hover:text-gruv-fg">
-                        {icons::settings("h-[18px] w-[18px]", None)}
-                        <span class="hidden sm:inline">"Innstillinger"</span>
-                    </span>
-                </A>
+                <div class="flex items-center gap-5">
+                    <div class="relative">
+                        <button
+                            type="button"
+                            aria-haspopup="menu"
+                            aria-expanded=move || open.get().to_string()
+                            aria-label="Velg sted"
+                            class="flex cursor-pointer items-center gap-1.5 text-sm text-gruv-gray transition-colors hover:text-gruv-fg"
+                            on:click=move |ev| {
+                                ev.stop_propagation();
+                                open.update(|o| *o = !*o);
+                            }
+                        >
+                            {icons::map_pin("h-[18px] w-[18px]", None)}
+                            <span class="hidden sm:inline">"Sted"</span>
+                            <span class="flex transition-transform" class:rotate-180=move || open.get()>
+                                {icons::chevron_down("h-3.5 w-3.5", None)}
+                            </span>
+                        </button>
+                        {move || open.get().then(|| view! {
+                            // Same bloom as the day popup, anchored under the
+                            // trigger: origin near the panel's top-right corner.
+                            <div
+                                role="menu"
+                                aria-label="Velg sted"
+                                class="gx-popdown absolute right-0 top-full z-50 mt-2 w-56 rounded-2xl bg-gruv-bg1 p-1.5 shadow-2xl ring-1 ring-gruv-bg2/70"
+                                style="--gx-origin-x:calc(100% - 1.5rem); --gx-origin-y:-8px"
+                                on:click=move |ev| ev.stop_propagation()
+                            >
+                                <Suspense fallback=move || view! {
+                                    <p class="px-3 py-2 text-sm text-gruv-fg/60">"Laster…"</p>
+                                }>
+                                    {move || Suspend::new(async move {
+                                        let opts = places.await.unwrap_or_default();
+                                        let default_label = prefs.await
+                                            .ok()
+                                            .map(|p| p.default_place)
+                                            .filter(|name| !name.trim().is_empty())
+                                            .unwrap_or_else(|| "Velg sted".to_string());
+                                        view! {
+                                            <PlaceMenuItem value=String::new() label=default_label selected=selected open=open/>
+                                            {opts.into_iter().map(|p| {
+                                                view! { <PlaceMenuItem value=p.name.clone() label=p.name selected=selected open=open/> }
+                                            }).collect_view()}
+                                        }
+                                    })}
+                                </Suspense>
+                            </div>
+                        })}
+                    </div>
+                    <A href="/settings">
+                        <span class="flex items-center gap-1.5 text-sm text-gruv-gray transition-colors hover:text-gruv-fg">
+                            {icons::settings("h-[18px] w-[18px]", None)}
+                            <span class="hidden sm:inline">"Innstillinger"</span>
+                        </span>
+                    </A>
+                </div>
             </nav>
         </header>
     }
 }
 
+/// One row in the NavBar's "Sted" menu. `value` is what gets stored in the
+/// shared [`SelectedPlace`] signal (empty = the prefs default place).
+#[component]
+fn PlaceMenuItem(
+    value: String,
+    label: String,
+    selected: RwSignal<String>,
+    open: RwSignal<bool>,
+) -> impl IntoView {
+    let val = value.clone();
+    let active = Signal::derive(move || selected.get() == val);
+    view! {
+        <button
+            type="button"
+            role="menuitemradio"
+            aria-checked=move || active.get().to_string()
+            class=move || if active.get() {
+                "flex w-full cursor-pointer items-center justify-between gap-3 rounded-lg px-3 py-2 text-left text-sm font-semibold text-gruv-fg transition-colors hover:bg-gruv-bg2/50"
+            } else {
+                "flex w-full cursor-pointer items-center justify-between gap-3 rounded-lg px-3 py-2 text-left text-sm text-gruv-fg/75 transition-colors hover:bg-gruv-bg2/50 hover:text-gruv-fg"
+            }
+            on:click=move |_| {
+                selected.set(value.clone());
+                open.set(false);
+            }
+        >
+            <span class="truncate">{label}</span>
+            {move || active.get().then(|| icons::check("h-4 w-4 shrink-0 text-gruv-aqua", None))}
+        </button>
+    }
+}
+
 #[component]
 fn DashboardPage() -> impl IntoView {
-    let places = Resource::new(|| (), |_| async move { list_places().await });
     let prefs = Resource::new(|| (), |_| async move { get_prefs().await });
-    let selected = RwSignal::new(String::new());
+    // Set from the NavBar's "Sted" menu; every weather resource keys off it.
+    let SelectedPlace(selected) = expect_context::<SelectedPlace>();
     let selected_day = RwSignal::new(None::<String>);
     let selected_best_window = RwSignal::new(None::<grusindeks_core::types::RideWindow>);
     // The clicked day card's box in viewport coords: (left, top, width, height).
@@ -182,39 +296,16 @@ fn DashboardPage() -> impl IntoView {
             }
         },
     );
+    // Official MET warnings (MetAlerts) for the place — current and upcoming.
+    let alerts = Resource::new(
+        move || (selected.get(), refresh_tick.get()),
+        |(place, _)| async move { get_alerts(place).await },
+    );
     view! {
         <section class="mx-auto max-w-5xl px-6 py-10 min-[2024px]:max-w-[2200px]">
-            <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                    // Wordmark lives in the NavBar; here we only frame the view.
-                    <p class="text-gruv-fg/70">"Forholdene i dag"</p>
-                </div>
-                <Suspense>
-                    {move || Suspend::new(async move {
-                        let opts = places.await.unwrap_or_default();
-                        let default_label = prefs.await
-                            .ok()
-                            .map(|p| p.default_place)
-                            .filter(|name| !name.trim().is_empty())
-                            .unwrap_or_else(|| "Velg sted".to_string());
-                        view! {
-                            <label class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-gruv-fg/70 sm:items-end">
-                                "Sted"
-                                <select
-                                    class="min-h-[44px] w-full cursor-pointer rounded-lg border border-gruv-bg2 bg-gruv-bg1 px-3 py-2.5 text-sm normal-case tracking-normal text-gruv-fg outline-none transition-colors hover:border-gruv-bg2/40 focus:border-gruv-aqua focus:ring-2 focus:ring-gruv-aqua/70 sm:w-auto"
-                                    on:change=move |ev| selected.set(event_target_value(&ev))
-                                >
-                                    <option value="">{default_label}</option>
-                                    {opts.into_iter().map(|p| {
-                                        let value = p.name.clone();
-                                        view! { <option value=value>{p.name}</option> }
-                                    }).collect_view()}
-                                </select>
-                            </label>
-                        }
-                    })}
-                </Suspense>
-            </div>
+            // Wordmark lives in the NavBar (so does the place picker, in the
+            // "Sted" menu); here we only frame the view.
+            <p class="text-gruv-fg/70">"Forholdene i dag"</p>
 
             <div class="mt-8 space-y-8">
 
@@ -317,6 +408,23 @@ fn DashboardPage() -> impl IntoView {
                                     let idx_breakdown = rest_center.map_or(c.score.breakdown, |p| p.score.breakdown);
                                     let idx_highlights = rest_center
                                         .map_or_else(|| c.score.highlights.clone(), |p| p.score.highlights.clone());
+                                    // Official MET warnings for the card: active
+                                    // now or starting later today (tomorrow+
+                                    // lives on the day cards instead).
+                                    let day_end = now
+                                        .with_timezone(&chrono_tz::Europe::Oslo)
+                                        .date_naive()
+                                        .succ_opt()
+                                        .and_then(oslo_midnight_utc);
+                                    let card_alerts: Vec<_> = alerts
+                                        .await
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .filter(|a| {
+                                            a.ends > now
+                                                && day_end.is_none_or(|de| a.starts < de)
+                                        })
+                                        .collect();
                                     let place = match selected.get_untracked() {
                                         p if !p.trim().is_empty() => p,
                                         _ => prefs
@@ -333,7 +441,7 @@ fn DashboardPage() -> impl IntoView {
                                         <div class="grid grid-cols-1 gap-6 min-[2024px]:grid-cols-2 min-[2024px]:items-stretch">
                                             // LEFT — verdict + details
                                             <div class="space-y-6">
-                                            <Recommendation total=agg.mean label=c.score.label.clone() penalties=penalties breakdown=breakdown stats=stats place=place best_window=best_window updated=produced_at ground=ground daylight=daylight/>
+                                            <Recommendation total=agg.mean label=c.score.label.clone() penalties=penalties breakdown=breakdown stats=stats place=place best_window=best_window updated=produced_at ground=ground daylight=daylight alerts=card_alerts/>
                                             <div class="emboss space-y-5 rounded-2xl bg-gruv-bg1 p-6">
                                                 {nowcast.map(|a| view! { <NowcastBanner alert=a/> })}
 
@@ -407,6 +515,8 @@ fn DashboardPage() -> impl IntoView {
             // ---- multi-day strip ----
             <Transition>
                 {move || Suspend::new(async move {
+                    let all_alerts = alerts.await.unwrap_or_default();
+                    let popup_alerts = all_alerts.clone();
                     match forecast.await {
                         Ok(mf) => {
                             view! {
@@ -417,15 +527,22 @@ fn DashboardPage() -> impl IntoView {
                                     <div class="flex gap-3 overflow-x-auto pb-2">
                                         {mf.days.into_iter().map(|d| {
                                             let best_window = d.optimal_window.as_ref().map(|ow| ow.window);
+                                            let day_alerts = alerts_for_date(&all_alerts, d.date);
                                             let on_select = Callback::new(move |(date, l, t, w, h): DaySelect| {
                                                 selected_day.set(Some(date.format("%Y-%m-%d").to_string()));
                                                 selected_best_window.set(best_window);
                                                 selected_day_anchor.set((l, t, w, h));
                                             });
-                                            view! { <DayCard day=d on_select=on_select/> }
+                                            view! { <DayCard day=d on_select=on_select alerts=day_alerts/> }
                                         }).collect_view()}
                                     </div>
-                                    {move || selected_day.get().map(|_| {
+                                    {move || selected_day.get().map(|date_str| {
+                                        // Warnings for the opened day — clickable
+                                        // chips with the full details popdown.
+                                        let day_alerts = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
+                                            .ok()
+                                            .map(|d| alerts_for_date(&popup_alerts, d))
+                                            .unwrap_or_default();
                                         let (left, top_c, width, _h) = selected_day_anchor.get();
                                         // Bloom UP out of the clicked card: park the popup just
                                         // above the card's top edge and aim the morph origin at the
@@ -472,7 +589,10 @@ fn DashboardPage() -> impl IntoView {
                                                         }
                                                     }
                                                 >
-                                                    <div class="mb-2 flex justify-end">
+                                                    <div class="mb-2 flex items-start justify-between gap-2">
+                                                        <div class="flex min-w-0 flex-wrap gap-1.5">
+                                                            {day_alerts.into_iter().map(|a| view! { <AlertChip alert=a/> }).collect_view()}
+                                                        </div>
                                                         <button type="button"
                                                             autofocus
                                                             aria-label="Lukk"
@@ -532,6 +652,33 @@ fn DashboardPage() -> impl IntoView {
             </div>
         </section>
     }
+}
+
+/// UTC instant of local (Oslo) midnight starting `date`. `None` only on
+/// calendar overflow — Norway's DST jumps happen at 02:00/03:00, never at
+/// midnight, so `earliest()` is exact.
+fn oslo_midnight_utc(date: chrono::NaiveDate) -> Option<chrono::DateTime<chrono::Utc>> {
+    date.and_hms_opt(0, 0, 0)?
+        .and_local_timezone(chrono_tz::Europe::Oslo)
+        .earliest()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
+/// The MET warnings that overlap the local day `date` (for day cards and the
+/// day popup).
+fn alerts_for_date(
+    alerts: &[grusindeks_core::aggregate::WeatherAlert],
+    date: chrono::NaiveDate,
+) -> Vec<grusindeks_core::aggregate::WeatherAlert> {
+    let bounds = oslo_midnight_utc(date).zip(date.succ_opt().and_then(oslo_midnight_utc));
+    let Some((start, end)) = bounds else {
+        return Vec::new();
+    };
+    alerts
+        .iter()
+        .filter(|a| a.overlaps(start, end))
+        .cloned()
+        .collect()
 }
 
 /// A section header for the details card: an uppercase eyebrow label followed

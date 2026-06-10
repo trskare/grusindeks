@@ -10,7 +10,8 @@ use chrono_tz::Europe::Oslo;
 use leptos::prelude::*;
 
 use grusindeks_core::aggregate::{
-    DayAggregate, HourScore, HourlyDayAggregate, HourlyPrecip, NowcastAlert,
+    AlertLevel, DayAggregate, HourScore, HourlyDayAggregate, HourlyPrecip, NowcastAlert,
+    WeatherAlert,
 };
 use grusindeks_core::daily::{BestWindowReason, Confidence};
 use grusindeks_core::score::{Component, Penalty, ScoreBreakdown, Severity, WindowStats};
@@ -266,6 +267,10 @@ pub fn Recommendation(
     /// Daylight-left for the "dagslys" stats tile: `(value, bar_pct, caption)`.
     /// `None` hides the tile (no sun data).
     daylight: Option<(String, Option<f64>, String)>,
+    /// Official MET warnings relevant to the card (active now or later
+    /// today), rendered as clickable [`AlertChip`]s in the eyebrow row.
+    #[prop(optional)]
+    alerts: Vec<WeatherAlert>,
 ) -> impl IntoView {
     let (default_cta, default_summary) = cta_for(total);
     // Window-aware CTA: when the next 3 h aren't already good but a later
@@ -308,20 +313,24 @@ pub fn Recommendation(
     let positive = penalties.is_empty().then(|| score_reason(breakdown, &[]));
     view! {
         <div class=format!("emboss rounded-2xl bg-gradient-to-br p-6 {}", soft_bg_class(total))>
-            <div class="flex items-stretch justify-between gap-4">
+            // Mobile stacks the verdict text above the score block (side by
+            // side they squeeze each other into heavy wrapping); from `sm` up
+            // it's the original two-column row.
+            <div class="flex flex-col gap-4 sm:flex-row sm:items-stretch sm:justify-between">
                 // Spread the eyebrow / verdict / summary across the row height so
                 // the block balances the taller verdict+gauge stack on the right
                 // (badge stays top-aligned with the pips; summary drops to fill).
                 <div class="flex min-w-0 flex-col justify-between gap-2">
                     // Horizon badge — makes the (otherwise invisible) 3-hour scope explicit.
                     <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                        <span class="inline-flex items-center gap-1 rounded-full bg-gruv-bg0/60 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-gruv-fg/80">
+                        <span class="inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-gruv-bg0/60 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-gruv-fg/80">
                             {icons::clock("h-3 w-3", None)}
                             {format!("neste 3 timer · {horizon}")}
                         </span>
                         <span class="text-xs font-medium text-gruv-gray">
                             {format!("· {place} · oppdatert {updated_str}")}
                         </span>
+                        {alerts.into_iter().map(|a| view! { <AlertChip alert=a/> }).collect_view()}
                     </div>
                     <div>
                         <h2 class="text-3xl font-semibold leading-tight tracking-tight">{cta}</h2>
@@ -330,8 +339,10 @@ pub fn Recommendation(
                 </div>
                 // Verdict stack (top-right): condition pips + label chip, and the
                 // next-3-hour index ring tucked underneath — sits beside the
-                // verdict text without adding a row on the left.
-                <div class="flex shrink-0 flex-col items-end gap-3">
+                // verdict text without adding a row on the left. On mobile it
+                // becomes one horizontal row under the text: pips + chip on the
+                // left, the ring on the right.
+                <div class="flex items-center justify-between gap-3 sm:shrink-0 sm:flex-col sm:items-end sm:justify-start">
                     <div class="flex items-center gap-2.5">
                         {condition_pips(total)}
                         <span class=chip_class(total)>{label}</span>
@@ -538,11 +549,21 @@ pub fn WindowStatsRow(
     let metric = "text-2xl font-bold leading-none tabular-nums text-gruv-fg";
     let cap = "text-xs text-gruv-fg/55";
     let icon = "h-4 w-4 text-gruv-fg/45";
-    // Three base tiles plus whichever optional tiles are present.
-    let grid = match ground.is_some() as usize + daylight.is_some() as usize {
-        2 => "grid grid-cols-5 gap-2.5",
-        1 => "grid grid-cols-4 gap-2.5",
+    // Three base tiles plus whichever optional tiles are present. Mobile gets
+    // two columns (4–5 tiles in one row wrap into unreadable slivers there);
+    // from `sm` up everything sits on the original single row.
+    let extras = ground.is_some() as usize + daylight.is_some() as usize;
+    let grid = match extras {
+        2 => "grid grid-cols-2 gap-2.5 sm:grid-cols-5",
+        1 => "grid grid-cols-2 gap-2.5 sm:grid-cols-4",
         _ => "grid grid-cols-3 gap-2.5",
+    };
+    // With five tiles in two mobile columns the odd one ends up alone — let it
+    // take the full row instead of a stray half-width cell.
+    let last_cell = if extras == 2 {
+        format!("{cell} col-span-2 sm:col-span-1")
+    } else {
+        cell.to_string()
     };
     view! {
         <div class=grid>
@@ -584,7 +605,7 @@ pub fn WindowStatsRow(
             // sunset (none after dark), and the sunset time.
             {daylight.map(|(main, frac, cap_txt)| {
                 view! {
-                    <div class=cell>
+                    <div class=last_cell>
                         {icons::sunset(icon, Some("Dagslys"))}
                         <span class=metric>{main}</span>
                         {frac.map(|pct| view! {
@@ -735,6 +756,198 @@ pub fn NowcastBanner(alert: NowcastAlert) -> impl IntoView {
     }
 }
 
+/// Chip/badge colour recipe per MET danger level (yr's yellow/orange/red).
+fn alert_level_classes(level: AlertLevel) -> &'static str {
+    match level {
+        AlertLevel::Red => "bg-gruv-red/15 text-gruv-red ring-1 ring-inset ring-gruv-red/30",
+        AlertLevel::Orange => {
+            "bg-gruv-orange/15 text-gruv-orange ring-1 ring-inset ring-gruv-orange/30"
+        }
+        AlertLevel::Yellow => {
+            "bg-gruv-yellow/15 text-gruv-yellow ring-1 ring-inset ring-gruv-yellow/30"
+        }
+    }
+}
+
+fn alert_text_class(level: AlertLevel) -> &'static str {
+    match level {
+        AlertLevel::Red => "text-gruv-red",
+        AlertLevel::Orange => "text-gruv-orange",
+        AlertLevel::Yellow => "text-gruv-yellow",
+    }
+}
+
+/// Halo colour for the chip's `gx-alert` glow pulse — the level colour at a
+/// whisper. Red breathes a touch brighter than yellow: more serious, more
+/// noticeable.
+fn alert_glow_style(level: AlertLevel) -> &'static str {
+    match level {
+        AlertLevel::Red => "--gx-alert-glow: rgba(204, 36, 29, 0.5)",
+        AlertLevel::Orange => "--gx-alert-glow: rgba(254, 128, 25, 0.42)",
+        AlertLevel::Yellow => "--gx-alert-glow: rgba(250, 189, 47, 0.35)",
+    }
+}
+
+/// Event-specific icon for a MET warning; the generic triangle covers events
+/// we don't have a dedicated glyph for (forest fire, ice, …).
+fn alert_event_icon(event: &str, class: &'static str) -> AnyView {
+    let e = event.to_ascii_lowercase();
+    if e.contains("lightning") || e.contains("thunder") {
+        icons::zap(class, None).into_any()
+    } else if e.contains("wind") || e.contains("gale") {
+        icons::wind(class, None).into_any()
+    } else if e.contains("rain") || e.contains("flood") {
+        icons::cloud_rain(class, None).into_any()
+    } else {
+        icons::alert_triangle(class, None).into_any()
+    }
+}
+
+/// "10.06 kl. 15:00–23:00" (or with both dates when the warning spans days).
+fn alert_period(a: &WeatherAlert) -> String {
+    let s = a.starts.with_timezone(&Oslo);
+    let e = a.ends.with_timezone(&Oslo);
+    if s.date_naive() == e.date_naive() {
+        format!(
+            "{} kl. {}–{}",
+            s.format("%d.%m"),
+            s.format("%H:%M"),
+            e.format("%H:%M")
+        )
+    } else {
+        format!(
+            "{} kl. {} – {} kl. {}",
+            s.format("%d.%m"),
+            s.format("%H:%M"),
+            e.format("%d.%m"),
+            e.format("%H:%M")
+        )
+    }
+}
+
+/// Small non-interactive warning badge for day cards. The cards are already
+/// `<button>`s (nesting interactive elements is invalid HTML), so the full
+/// clickable details live in [`AlertChip`] inside the day popup instead.
+pub fn alert_badge(a: &WeatherAlert) -> impl IntoView {
+    view! {
+        <span class=format!(
+            "inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-semibold {}",
+            alert_level_classes(a.level)
+        )>
+            {alert_event_icon(&a.event, "h-3 w-3 shrink-0")}
+            {a.event_name.clone()}
+        </span>
+    }
+}
+
+/// An official MET weather warning as a level-coloured chip. Clicking blooms a
+/// `gx-popdown` panel (same transition as the day popup / Sted menu) with the
+/// full CAP text: description, consequences, advice, area and time period.
+#[component]
+pub fn AlertChip(alert: WeatherAlert) -> impl IntoView {
+    let open = RwSignal::new(false);
+    let a = StoredValue::new(alert);
+
+    // Close on any outside click or Escape. Client-only (Effect); the chip
+    // and panel stop propagation so their own clicks don't re-close.
+    Effect::new(move |_| {
+        let click = window_event_listener(leptos::ev::click, move |_| {
+            if open.get_untracked() {
+                open.set(false);
+            }
+        });
+        let key = window_event_listener(leptos::ev::keydown, move |ev| {
+            if ev.key() == "Escape" {
+                open.set(false);
+            }
+        });
+        on_cleanup(move || {
+            click.remove();
+            key.remove();
+        });
+    });
+
+    let (chip_icon, chip_name, chip_cls, chip_glow) = a.with_value(|al| {
+        (
+            alert_event_icon(&al.event, "h-3.5 w-3.5 shrink-0"),
+            al.event_name.clone(),
+            alert_level_classes(al.level),
+            alert_glow_style(al.level),
+        )
+    });
+
+    view! {
+        <span class="relative inline-flex">
+            <button
+                type="button"
+                aria-haspopup="dialog"
+                aria-expanded=move || open.get().to_string()
+                class=format!(
+                    "gx-alert inline-flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold normal-case tracking-normal transition-[filter] hover:brightness-125 {chip_cls}"
+                )
+                style=chip_glow
+                on:click=move |ev| {
+                    ev.stop_propagation();
+                    open.update(|o| *o = !*o);
+                }
+            >
+                {chip_icon}
+                <span>{chip_name}</span>
+            </button>
+            {move || open.get().then(|| {
+                let al = a.get_value();
+                let active = al.is_active(Utc::now());
+                let headline = if active {
+                    format!("Pågår: {}", al.event_name)
+                } else {
+                    al.event_name.clone()
+                };
+                let period = alert_period(&al);
+                view! {
+                    <div
+                        role="dialog"
+                        aria-label="Farevarsel"
+                        class="gx-popdown absolute left-0 top-full z-40 mt-2 w-[min(24rem,calc(100vw-3rem))] cursor-auto rounded-2xl bg-gruv-bg1 p-4 text-left font-normal normal-case tracking-normal shadow-2xl ring-1 ring-gruv-bg2/70"
+                        style="--gx-origin-x:1.25rem; --gx-origin-y:-8px"
+                        on:click=move |ev| ev.stop_propagation()
+                    >
+                        <div class="flex items-start gap-2.5">
+                            <span class=format!("mt-0.5 {}", alert_text_class(al.level))>
+                                {alert_event_icon(&al.event, "h-5 w-5 shrink-0")}
+                            </span>
+                            <div>
+                                <p class="text-sm font-bold leading-tight text-gruv-fg">{headline}</p>
+                                <p class=format!("text-xs font-semibold {}", alert_text_class(al.level))>
+                                    {al.level.label_no()}
+                                </p>
+                            </div>
+                        </div>
+                        <p class="mt-3 text-sm leading-relaxed text-gruv-fg/85">{al.description}</p>
+                        {al.consequences.map(|c| view! {
+                            <div class="mt-3">
+                                <p class="text-[11px] font-semibold uppercase tracking-wide text-gruv-fg/55">"Konsekvenser"</p>
+                                <p class="mt-0.5 text-sm leading-relaxed text-gruv-fg/85">{c}</p>
+                            </div>
+                        })}
+                        {al.instruction.map(|i| view! {
+                            <div class="mt-3">
+                                <p class="text-[11px] font-semibold uppercase tracking-wide text-gruv-fg/55">"Råd"</p>
+                                <p class="mt-0.5 text-sm leading-relaxed text-gruv-fg/85">{i}</p>
+                            </div>
+                        })}
+                        <div class="mt-3 space-y-0.5 border-t border-gruv-bg2/60 pt-2.5 text-xs text-gruv-fg/70">
+                            {(!al.area.trim().is_empty()).then(|| view! {
+                                <p>{format!("Gjelder for {}", al.area)}</p>
+                            })}
+                            <p class="tabular-nums">{period}</p>
+                        </div>
+                    </div>
+                }
+            })}
+        </span>
+    }
+}
+
 /// Trend sparkline of mean scores over time (0–100 fixed y-scale). Renders an
 /// SVG polyline coloured by the most recent value; the last point gets a dot.
 #[component]
@@ -817,6 +1030,10 @@ pub type DaySelect = (chrono::NaiveDate, i32, i32, i32, i32);
 pub fn DayCard(
     day: DayAggregate,
     #[prop(optional)] on_select: Option<Callback<DaySelect>>,
+    /// Official MET warnings overlapping this day, shown as small badges
+    /// (full details open from the day popup's chips).
+    #[prop(optional)]
+    alerts: Vec<WeatherAlert>,
 ) -> impl IntoView {
     let mean = day.mean;
     let date = day.date.format("%a %d.%m").to_string();
@@ -903,6 +1120,11 @@ pub fn DayCard(
             <div class="text-xs text-gruv-fg/70">{format!("{}–{}", day.min, day.max)}</div>
             {weather.map(|w| view! { <div class="mt-1 text-xs text-gruv-fg/70">{w}</div> })}
             {best.map(|b| view! { <div class="mt-1 text-xs text-gruv-aqua">{b}</div> })}
+            {(!alerts.is_empty()).then(|| view! {
+                <div class="mt-1.5 flex flex-wrap gap-1">
+                    {alerts.iter().map(alert_badge).collect_view()}
+                </div>
+            })}
             <div class="mt-2 flex items-center gap-1.5 text-xs text-gruv-fg/70">
                 <span class=format!("h-2 w-2 rounded-full ring-1 ring-offset-1 ring-current ring-offset-gruv-bg1 {}", confidence_dot(day.confidence))></span>
                 {confidence_label(day.confidence)}

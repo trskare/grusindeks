@@ -103,6 +103,64 @@ pub struct NowcastAlert {
     pub peak_mm_h: f64,
 }
 
+/// MET danger level for an official weather warning, from the CAP alert's
+/// risk-matrix colour. Ordered so `Red > Orange > Yellow` — sorting
+/// descending puts the most serious warning first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum AlertLevel {
+    Yellow,
+    Orange,
+    Red,
+}
+
+impl AlertLevel {
+    /// Norwegian level phrase, matching yr's wording ("Gult nivå").
+    pub fn label_no(self) -> &'static str {
+        match self {
+            AlertLevel::Yellow => "Gult nivå",
+            AlertLevel::Orange => "Oransje nivå",
+            AlertLevel::Red => "Rødt nivå",
+        }
+    }
+}
+
+/// One official MET weather warning (MetAlerts CAP feature) intersecting the
+/// requested location — the same warnings yr shows ("Mye lyn", "Kraftige
+/// vindkast", …). Parsed in `grusindeks-met`, rendered as a clickable chip in
+/// the web UI.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WeatherAlert {
+    /// Machine event token, e.g. `lightning`, `wind`, `rainFlood`.
+    pub event: String,
+    /// Human headline for the event, e.g. "Mye lyn".
+    pub event_name: String,
+    pub level: AlertLevel,
+    /// Long-form "what is happening" text.
+    pub description: String,
+    /// "What can it lead to" text, when MET provides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consequences: Option<String>,
+    /// "What should you do" text, when MET provides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction: Option<String>,
+    /// Affected-area name, e.g. "Deler av Østlandet".
+    pub area: String,
+    pub starts: DateTime<Utc>,
+    pub ends: DateTime<Utc>,
+}
+
+impl WeatherAlert {
+    /// Active right now (half-open `[starts, ends)`).
+    pub fn is_active(&self, now: DateTime<Utc>) -> bool {
+        self.starts <= now && now < self.ends
+    }
+
+    /// Overlaps the half-open interval `[from, to)`.
+    pub fn overlaps(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> bool {
+        self.starts < to && self.ends > from
+    }
+}
+
 /// Aggregate stats over the past N hours of Frost observations. Surfaced
 /// to the renderer as the "Regn 7d" footer chip and to JSON consumers as
 /// a top-level `rain_history` field. `None` (the wrapping `Option`) means
