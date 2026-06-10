@@ -226,7 +226,11 @@ pub fn chevron_down(class: &'static str, title: Option<&'static str>) -> impl In
 
 /// Check mark — the active entry in the "Sted" menu.
 pub fn check(class: &'static str, title: Option<&'static str>) -> impl IntoView {
-    base(class, title, view! { <path d="M20 6 9 17l-5-5"/> }.into_any())
+    base(
+        class,
+        title,
+        view! { <path d="M20 6 9 17l-5-5"/> }.into_any(),
+    )
 }
 
 /// The Grusindeks wordmark logo: a gravel-road wedge (the favicon's road,

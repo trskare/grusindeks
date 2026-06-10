@@ -195,13 +195,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
-    fn feature_msg(
-        level_color: &str,
-        start: &str,
-        end: &str,
-        id: &str,
-        msg_type: &str,
-    ) -> String {
+    fn feature_msg(level_color: &str, start: &str, end: &str, id: &str, msg_type: &str) -> String {
         format!(
             r#"{{
                 "properties": {{
@@ -249,7 +243,10 @@ mod tests {
         assert_eq!(a.area, "Deler av Østlandet");
         assert!(a.consequences.is_some());
         assert!(a.instruction.is_some());
-        assert_eq!(a.starts, Utc.with_ymd_and_hms(2026, 6, 10, 13, 0, 0).unwrap());
+        assert_eq!(
+            a.starts,
+            Utc.with_ymd_and_hms(2026, 6, 10, 13, 0, 0).unwrap()
+        );
         assert_eq!(a.ends, Utc.with_ymd_and_hms(2026, 6, 10, 21, 0, 0).unwrap());
     }
 
