@@ -308,14 +308,17 @@ pub fn Recommendation(
     let positive = penalties.is_empty().then(|| score_reason(breakdown, &[]));
     view! {
         <div class=format!("emboss rounded-2xl bg-gradient-to-br p-6 {}", soft_bg_class(total))>
-            <div class="flex items-stretch justify-between gap-4">
+            // Mobile stacks the verdict text above the score block (side by
+            // side they squeeze each other into heavy wrapping); from `sm` up
+            // it's the original two-column row.
+            <div class="flex flex-col gap-4 sm:flex-row sm:items-stretch sm:justify-between">
                 // Spread the eyebrow / verdict / summary across the row height so
                 // the block balances the taller verdict+gauge stack on the right
                 // (badge stays top-aligned with the pips; summary drops to fill).
                 <div class="flex min-w-0 flex-col justify-between gap-2">
                     // Horizon badge — makes the (otherwise invisible) 3-hour scope explicit.
                     <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                        <span class="inline-flex items-center gap-1 rounded-full bg-gruv-bg0/60 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-gruv-fg/80">
+                        <span class="inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-gruv-bg0/60 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-gruv-fg/80">
                             {icons::clock("h-3 w-3", None)}
                             {format!("neste 3 timer · {horizon}")}
                         </span>
@@ -330,8 +333,10 @@ pub fn Recommendation(
                 </div>
                 // Verdict stack (top-right): condition pips + label chip, and the
                 // next-3-hour index ring tucked underneath — sits beside the
-                // verdict text without adding a row on the left.
-                <div class="flex shrink-0 flex-col items-end gap-3">
+                // verdict text without adding a row on the left. On mobile it
+                // becomes one horizontal row under the text: pips + chip on the
+                // left, the ring on the right.
+                <div class="flex items-center justify-between gap-3 sm:shrink-0 sm:flex-col sm:items-end sm:justify-start">
                     <div class="flex items-center gap-2.5">
                         {condition_pips(total)}
                         <span class=chip_class(total)>{label}</span>
@@ -538,11 +543,21 @@ pub fn WindowStatsRow(
     let metric = "text-2xl font-bold leading-none tabular-nums text-gruv-fg";
     let cap = "text-xs text-gruv-fg/55";
     let icon = "h-4 w-4 text-gruv-fg/45";
-    // Three base tiles plus whichever optional tiles are present.
-    let grid = match ground.is_some() as usize + daylight.is_some() as usize {
-        2 => "grid grid-cols-5 gap-2.5",
-        1 => "grid grid-cols-4 gap-2.5",
+    // Three base tiles plus whichever optional tiles are present. Mobile gets
+    // two columns (4–5 tiles in one row wrap into unreadable slivers there);
+    // from `sm` up everything sits on the original single row.
+    let extras = ground.is_some() as usize + daylight.is_some() as usize;
+    let grid = match extras {
+        2 => "grid grid-cols-2 gap-2.5 sm:grid-cols-5",
+        1 => "grid grid-cols-2 gap-2.5 sm:grid-cols-4",
         _ => "grid grid-cols-3 gap-2.5",
+    };
+    // With five tiles in two mobile columns the odd one ends up alone — let it
+    // take the full row instead of a stray half-width cell.
+    let last_cell = if extras == 2 {
+        format!("{cell} col-span-2 sm:col-span-1")
+    } else {
+        cell.to_string()
     };
     view! {
         <div class=grid>
@@ -584,7 +599,7 @@ pub fn WindowStatsRow(
             // sunset (none after dark), and the sunset time.
             {daylight.map(|(main, frac, cap_txt)| {
                 view! {
-                    <div class=cell>
+                    <div class=last_cell>
                         {icons::sunset(icon, Some("Dagslys"))}
                         <span class=metric>{main}</span>
                         {frac.map(|pct| view! {
