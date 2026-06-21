@@ -18,8 +18,10 @@ pub mod thresholds {
     // ---- Temperature (°C, on felt-T) ----
     /// Bottom of the comfortable plateau — felt-T at or above this scores 100.
     pub const TEMP_OPTIMAL_LOW: f64 = 16.0;
-    /// Top of the comfortable plateau.
-    pub const TEMP_OPTIMAL_HIGH: f64 = 22.0;
+    /// Top of the comfortable plateau. Set at 25 °C, not 22: for a trained
+    /// rider on gravel, dry sunny 24–25 °C is prime conditions, not
+    /// something to dock points for. The warm penalty only bites past here.
+    pub const TEMP_OPTIMAL_HIGH: f64 = 25.0;
     /// Below this we're in the "needs layering" band — score breaks below
     /// the no-penalty threshold (12 °C → 75 → just into Minor severity).
     /// The break models the gear-changeover cliff: below ~12 °C a rider
@@ -30,8 +32,11 @@ pub mod thresholds {
     pub const TEMP_LAYERED_SCORE: u8 = 75;
     /// Cold floor — felt-T at or below this scores 0.
     pub const TEMP_ZERO_LOW: f64 = -5.0;
-    /// Hot ceiling — felt-T at or above this scores 0.
-    pub const TEMP_ZERO_HIGH: f64 = 35.0;
+    /// Hot ceiling — felt-T at or above this scores 0. Shifted 35 → 38 in
+    /// step with the higher plateau top, so the warm slope keeps the same
+    /// gentle ~7.7 pts/°C gradient instead of steepening. Genuine heat
+    /// still registers: ~28 °C → 77 (Minor), ~32 °C → 46 (Major).
+    pub const TEMP_ZERO_HIGH: f64 = 38.0;
 
     // ---- Wind (m/s) ----
     pub const WIND_PERFECT_MAX: f64 = 3.0;
@@ -40,19 +45,25 @@ pub mod thresholds {
     pub const WIND_OK_AT_OK_MAX: u8 = 50;
     pub const WIND_POOR_AT_POOR_MAX: u8 = 12;
     /// Penalty (subtracted from wind sub-score) when gust > 1.5 × mean wind.
-    pub const GUST_PENALTY: i32 = 20;
+    /// Trimmed 20 → 14: gusts genuinely matter — they shove the bike on
+    /// gravel and bite harder on the asphalt links many gravel rides
+    /// include — so the penalty stays firm, just no longer overweight for
+    /// an otherwise calm day with occasional kast.
+    pub const GUST_PENALTY: i32 = 14;
     pub const GUST_RATIO_THRESHOLD: f64 = 1.5;
 
     // ---- Precipitation (mm/h, blended 50/50 mean+peak over ride window) ----
-    // Four-segment curve: light yrsk drops fast, drizzle and moderate
-    // each take a clear bite, heavy saturates well below the old 5 mm/h
-    // ceiling. The previous curve (drizzle 0.5→60, heavy 2.0→20) let a
-    // genuinely wet ride still score "bra" once the other axes were
-    // good — these breakpoints fix that without touching weights.
-    pub const PRECIP_LIGHT: f64 = 0.2; // 100 -> 70 (yrsk)
-    pub const PRECIP_DRIZZLE: f64 = 0.5; // 70  -> 40 (skikkelig duskregn)
-    pub const PRECIP_MODERATE: f64 = 1.5; // 40  -> 10 (våt sykkeltur)
-    pub const PRECIP_HEAVY: f64 = 3.0; // 10  -> 0  (dårlig idé)
+    // Four-segment curve, recalibrated to bite earlier than a road-comfort
+    // curve would: on gravel even a light yrsk costs cornering grip and
+    // grinds an abrasive grit-slurry through the drivetrain, so the
+    // breakpoints sit low. Subscore reaches 0 at PRECIP_HEAVY (2 mm/h) —
+    // exactly where the hard-cap clamps the whole score and the active-rain
+    // ground ceiling bottoms out — so a genuinely wet ride can never read
+    // "bra" no matter how good the other axes are.
+    pub const PRECIP_LIGHT: f64 = 0.1; // 100 -> 70 (yrsk)
+    pub const PRECIP_DRIZZLE: f64 = 0.3; // 70  -> 40 (skikkelig duskregn)
+    pub const PRECIP_MODERATE: f64 = 1.0; // 40  -> 10 (våt sykkeltur)
+    pub const PRECIP_HEAVY: f64 = 2.0; // 10  -> 0  (dårlig idé)
     pub const PRECIP_LIGHT_AT: u8 = 70;
     pub const PRECIP_DRIZZLE_AT: u8 = 40;
     pub const PRECIP_MODERATE_AT: u8 = 10;
@@ -66,39 +77,63 @@ pub mod thresholds {
     /// grus pakker seg og ruller best — bone-dry is slightly worse, very
     /// wet is much worse.
     pub const GROUND_OPTIMAL_MM: f64 = 0.4;
-    /// Subscore at exactly 0 mm accumulated water — bone-dry loose gravel
-    /// is genuinely 60–80 % slower (Crr) than lightly damp packed gravel,
-    /// so the dry floor sits a few points below the optimum even before
-    /// the drought ramp kicks in.
-    pub const GROUND_DRY_FLOOR_SCORE: u8 = 92;
+    /// Subscore at exactly 0 mm accumulated water. The 60–80 % Crr penalty
+    /// cited for bone-dry gravel applies to genuinely loose, deep "moondust"
+    /// — typical compacted Norwegian summer grus stays fast and firm when
+    /// dry, so bone-dry is only a whisker below the lightly-damp optimum.
+    pub const GROUND_DRY_FLOOR_SCORE: u8 = 95;
 
     /// Hours-since-meaningful-rain at which the drought penalty starts to
-    /// kick in (3 døgn).
-    pub const DROUGHT_TRIGGER_HOURS: f64 = 72.0;
+    /// kick in. Pushed to 5 døgn (was 3): three dry days is still prime
+    /// gravel, not a parched surface — dryness only starts to matter once
+    /// it has had the better part of a week to loosen the top layer.
+    pub const DROUGHT_TRIGGER_HOURS: f64 = 120.0;
     /// Hours at which the drought penalty saturates (7 døgn).
     pub const DROUGHT_FULL_HOURS: f64 = 168.0;
     /// Maximum points the drought penalty can subtract from the ground
-    /// subscore. Calibrated against gravel-tire Crr data (≈ 60–80 %
-    /// rolling-resistance hit on bone-dry loose gravel) — wet ground is
-    /// still the dominant negative factor, but a week of drought now
-    /// shows up as a clearly worse ride.
-    pub const DROUGHT_MAX_PENALTY: u8 = 15;
+    /// subscore. Trimmed 15 → 8: long drought does loosen and dust up the
+    /// surface, so a real but modest ding is warranted — but a dry summer
+    /// week is a fast, clean ride, not a meaningfully worse one. Wet ground
+    /// remains by far the dominant ground-axis negative.
+    pub const DROUGHT_MAX_PENALTY: u8 = 8;
 
     // ---- Hard caps ----
-    // Lowered from 5.0 to 3.0 mm/h: 5 mm/h is tropical-storm-grade
-    // intensity; 3 mm/h is already a soaking ride. The cap value
-    // (HARD_CAP_TOTAL) stays at 25 — the threshold change is what makes
-    // the cap actually fire in real-world wet weather.
-    pub const HARD_CAP_PRECIP_MM_PER_HOUR: f64 = 3.0;
+    // Lowered to 2.0 mm/h (was 3.0, originally 5.0): 5 mm/h is
+    // tropical-storm-grade and 3 mm/h is already a soaking ride, but on
+    // gravel the surface and drivetrain are wrecked well before that. At
+    // 2 mm/h the precip subscore has just reached 0 and the active-rain
+    // ground ceiling has bottomed out, so capping the total here keeps the
+    // three rain signals aligned. The cap value (HARD_CAP_TOTAL) stays 25.
+    pub const HARD_CAP_PRECIP_MM_PER_HOUR: f64 = 2.0;
     pub const HARD_CAP_WIND_MS: f64 = 15.0;
     pub const HARD_CAP_TOTAL: u8 = 25;
 
     // ---- Active-rain ground-axis cap ----
     // Floor that the active-rain ceiling decays toward. Below 30 the
-    // hard-cap takes over anyway (≥ 3 mm/h triggers HARD_CAP_TOTAL=25),
+    // hard-cap takes over anyway (> 2 mm/h triggers HARD_CAP_TOTAL=25),
     // so the active-rain mechanism only needs to bite in the lighter
     // sone where hard-cap doesn't fire.
     pub const ACTIVE_RAIN_GROUND_FLOOR: u8 = 30;
+
+    // ---- Wet-chill coupling (rain × cold) ----
+    // Rain and cold are far worse together than the independent weighted
+    // average of the temperature and precipitation axes implies: soaked
+    // kit loses its insulation, and a wet descent into a headwind is where
+    // hypothermia — and the day's genuine misery — actually happens. This
+    // cap pulls the total down when real rain coincides with a low felt-T,
+    // scaling from a soft ceiling at WET_CHILL_FELT_TEMP_C toward the
+    // heavy-rain hard-cap as felt-T drops to freezing. It needs at least
+    // WET_CHILL_PRECIP_MM_PER_HOUR so a stray trace on a cold day, or a
+    // warm-weather downpour, doesn't trip it.
+    pub const WET_CHILL_PRECIP_MM_PER_HOUR: f64 = 0.5;
+    pub const WET_CHILL_FELT_TEMP_C: f64 = 10.0;
+    pub const WET_CHILL_FELT_TEMP_FLOOR_C: f64 = 0.0;
+    /// Total-score ceiling at the warm edge of the band (felt ≈ 10 °C with
+    /// rain falling) — a clear "this won't be nice" without slamming to 0.
+    pub const WET_CHILL_CAP_WARM: u8 = 45;
+    /// Ceiling once felt-T is at/below freezing: as punishing as the
+    /// heavy-rain hard-cap, because it's the same misery by another route.
+    pub const WET_CHILL_CAP_COLD: u8 = 25;
 
     // ---- Weights (must sum to 100) ----
     // Temperature is the apparent ("felt-T") axis: it already folds in
@@ -127,6 +162,14 @@ pub mod thresholds {
     const _: () = assert!(
         GROUND_OPTIMAL_MM < GROUND_SATURATED,
         "ground optimum must lie below the saturation cap",
+    );
+    const _: () = assert!(
+        WET_CHILL_CAP_COLD <= WET_CHILL_CAP_WARM,
+        "wet-chill cap must tighten (or hold) as it gets colder",
+    );
+    const _: () = assert!(
+        WET_CHILL_FELT_TEMP_FLOOR_C < WET_CHILL_FELT_TEMP_C,
+        "wet-chill felt-T ramp must be positive (floor < trigger)",
     );
 }
 
@@ -457,14 +500,20 @@ pub fn score(
         + u32::from(breakdown.ground) * u32::from(thresholds::W_GROUND);
     let raw_total = (weighted / u32::from(thresholds::weights_sum())) as u8;
 
-    let hard_capped = max_precip.is_finite()
-        && max_precip > thresholds::HARD_CAP_PRECIP_MM_PER_HOUR
-        || max_wind.is_finite() && max_wind > thresholds::HARD_CAP_WIND_MS;
-    let total = if hard_capped {
-        raw_total.min(thresholds::HARD_CAP_TOTAL)
-    } else {
-        raw_total
-    };
+    let heavy_rain_cap =
+        max_precip.is_finite() && max_precip > thresholds::HARD_CAP_PRECIP_MM_PER_HOUR;
+    let storm_wind_cap = max_wind.is_finite() && max_wind > thresholds::HARD_CAP_WIND_MS;
+    let wet_chill = wet_chill_cap(effective_precip, felt_temp);
+    // Wet-chill is a genuine deal-breaker too, so it flags `hard_capped`
+    // alongside heavy rain and storm wind — the UI treats all three the same.
+    let hard_capped = heavy_rain_cap || storm_wind_cap || wet_chill.is_some();
+    let mut total = raw_total;
+    if heavy_rain_cap || storm_wind_cap {
+        total = total.min(thresholds::HARD_CAP_TOTAL);
+    }
+    if let Some(cap) = wet_chill {
+        total = total.min(cap);
+    }
 
     let mut penalties = Vec::new();
     if let Some(p) = temp_penalty(breakdown.temperature, mean_temp, felt_temp, lang) {
@@ -525,6 +574,30 @@ pub fn score(
                 message,
             });
         }
+    }
+    if let Some(cap) = wet_chill {
+        // Critical once felt-T is genuinely cold (≤ 5 °C, where soaked kit
+        // turns dangerous), Major in the chilly-but-tolerable band above it.
+        let severity = if felt_temp <= 5.0 {
+            Severity::Critical
+        } else {
+            Severity::Major
+        };
+        let message = match lang {
+            Language::Norwegian => {
+                format!("regn ved {felt_temp:.0} °C følt — vått og kaldt, score cappet til {cap}")
+            }
+            Language::Swedish => {
+                format!(
+                    "regn vid {felt_temp:.0} °C upplevt — blött och kallt, poäng cappad till {cap}"
+                )
+            }
+        };
+        penalties.push(Penalty {
+            component: Component::HardCap,
+            severity,
+            message,
+        });
     }
     // Worst penalty first so the renderer can take the head.
     penalties.sort_by_key(|p| std::cmp::Reverse(p.severity));
@@ -984,13 +1057,38 @@ pub fn ground_subscore(accumulated_mm: f64) -> u8 {
 /// This cap closes that hole: the ground subscore can never exceed
 /// `100` at zero rain, and decays linearly to `ACTIVE_RAIN_GROUND_FLOOR`
 /// at 2 mm/h. Above 2 mm/h we let the floor stand — the hard-cap fires
-/// at 3 mm/h anyway and clamps the whole score to 25.
+/// at 2 mm/h anyway and clamps the whole score to 25.
 pub fn active_rain_ground_ceiling(max_precip: f64) -> u8 {
     use thresholds::*;
     if !max_precip.is_finite() || max_precip <= 0.0 {
         return 100;
     }
     lerp_clamped(max_precip, 0.0, 2.0, 100, ACTIVE_RAIN_GROUND_FLOOR)
+}
+
+/// Optional total-score ceiling for the rain-on-a-cold-day case. Returns
+/// `None` unless real rain (`>= WET_CHILL_PRECIP_MM_PER_HOUR`) coincides
+/// with a felt-T at or below `WET_CHILL_FELT_TEMP_C`. When it does, the cap
+/// scales from `WET_CHILL_CAP_WARM` at the trigger temperature down to
+/// `WET_CHILL_CAP_COLD` at (or below) freezing. The weighted average treats
+/// wet and cold as independent axes, but on the bike they compound — soaked
+/// kit stops insulating exactly when you need it most — and this closes
+/// that gap without distorting the dry-cold or warm-wet cases.
+pub fn wet_chill_cap(effective_precip: f64, felt_temp: f64) -> Option<u8> {
+    use thresholds::*;
+    if !effective_precip.is_finite() || !felt_temp.is_finite() {
+        return None;
+    }
+    if effective_precip < WET_CHILL_PRECIP_MM_PER_HOUR || felt_temp > WET_CHILL_FELT_TEMP_C {
+        return None;
+    }
+    Some(lerp_clamped(
+        felt_temp,
+        WET_CHILL_FELT_TEMP_FLOOR_C,
+        WET_CHILL_FELT_TEMP_C,
+        WET_CHILL_CAP_COLD,
+        WET_CHILL_CAP_WARM,
+    ))
 }
 
 /// Subtract drought points from `ground_score`. Zero effect under the
@@ -1054,8 +1152,10 @@ mod tests {
     #[case(14.0, 88)] // mid-shoulder ramp 12 → 16
     #[case(16.0, 100)] // plateau bottom
     #[case(17.0, 100)] // mid-plateau
-    #[case(22.0, 100)] // plateau top
-    #[case(35.0, 0)] // hot floor
+    #[case(22.0, 100)] // mid-plateau (plateau now spans 16–25)
+    #[case(25.0, 100)] // plateau top
+    #[case(28.0, 77)] // warm ramp: 100 − (3/13)·100 ≈ 77
+    #[case(38.0, 0)] // hot floor
     #[case(40.0, 0)] // beyond hot
     fn temperature_subscore(#[case] t_c: f64, #[case] expected: u8) {
         assert_eq!(temp_subscore(t_c), expected);
@@ -1079,7 +1179,7 @@ mod tests {
         // Mean 4 m/s, gust 7 m/s = 1.75× → penalty.
         let with_gust = wind_subscore(4.0, Some(7.0));
         let no_gust = wind_subscore(4.0, None);
-        assert_eq!(with_gust as i32, no_gust as i32 - 20);
+        assert_eq!(with_gust as i32, no_gust as i32 - 14);
     }
 
     #[test]
@@ -1093,14 +1193,14 @@ mod tests {
 
     #[rstest]
     #[case(0.0, 100)]
-    #[case(0.1, 85)] // halfway through the light band (0 → 0.2)
-    #[case(0.2, 70)] // PRECIP_LIGHT
-    #[case(0.5, 40)] // PRECIP_DRIZZLE
-    #[case(1.0, 25)] // halfway through the moderate band (0.5 → 1.5)
-    #[case(1.5, 10)] // PRECIP_MODERATE
-    #[case(2.0, 7)] // 1/3 through the heavy band (1.5 → 3.0); 10 - 10/3 ≈ 7
-    #[case(3.0, 0)] // PRECIP_HEAVY — also where hard-cap fires
-    #[case(5.0, 0)] // saturated past PRECIP_HEAVY
+    #[case(0.05, 85)] // halfway through the light band (0 → 0.1)
+    #[case(0.1, 70)] // PRECIP_LIGHT
+    #[case(0.3, 40)] // PRECIP_DRIZZLE
+    #[case(0.65, 25)] // halfway through the moderate band (0.3 → 1.0)
+    #[case(1.0, 10)] // PRECIP_MODERATE
+    #[case(1.5, 5)] // halfway through the heavy band (1.0 → 2.0)
+    #[case(2.0, 0)] // PRECIP_HEAVY — also where hard-cap fires
+    #[case(3.0, 0)] // saturated past PRECIP_HEAVY
     #[case(10.0, 0)] // still saturated
     fn precipitation_subscore(#[case] mm_h: f64, #[case] expected: u8) {
         assert_eq!(precip_subscore(mm_h), expected);
@@ -1122,8 +1222,8 @@ mod tests {
     #[rstest]
     // Bone-dry sits at the dry-side floor (lett fuktig is the optimum).
     #[case(0.0, thresholds::GROUND_DRY_FLOOR_SCORE)]
-    // Halfway between 0 mm and the optimum: 92 → 100 lerp at midpoint.
-    #[case(0.2, 96)]
+    // Halfway between 0 mm and the optimum: 95 → 100 lerp at midpoint.
+    #[case(0.2, 98)]
     // Optimum.
     #[case(thresholds::GROUND_OPTIMAL_MM, 100)]
     // Wet side: linear from 100 at 0.4 mm to 0 at 5 mm — 2.5 mm is at
@@ -1151,7 +1251,7 @@ mod tests {
     #[test]
     fn score_caps_ground_when_actively_raining_on_dry_surface() {
         // Dry surface state (0 mm accumulated, no drought) — ground
-        // subscore would normally read GROUND_DRY_FLOOR_SCORE (92).
+        // subscore would normally read GROUND_DRY_FLOOR_SCORE (95).
         // With 1 mm/h rain falling during the window, the ceiling
         // should kick in and clamp ground to ≈ 65 (active-rain-cap).
         let win = RideWindow::from_hours(t(14), 3);
@@ -1209,34 +1309,39 @@ mod tests {
 
     #[test]
     fn precip_curve_drops_faster_in_drizzle_band() {
-        // Regression guard for the calibration change: the old curve
-        // had 0.5 mm/h at 60 and 0.2 mm/h at 80. The new curve sits at
-        // 40 and 70 respectively — the drizzle band must bite harder.
-        assert!(precip_subscore(0.5) <= 40);
-        assert_eq!(precip_subscore(0.2), 70);
+        // Regression guard for the gravel recalibration: light yrsk now
+        // bites hard. 0.1 mm/h anchors the light/drizzle break at 70, and
+        // by 0.3 mm/h (PRECIP_DRIZZLE) we're already at 40 — well into a
+        // real penalty where the old curve still read "bra".
+        assert_eq!(precip_subscore(0.1), 70);
+        assert!(precip_subscore(0.3) <= 40);
         assert!(
-            precip_subscore(1.0) < 30,
-            "1 mm/h should now sit firmly in the moderate sone"
+            precip_subscore(0.5) <= 35,
+            "0.5 mm/h should sit firmly below the no-penalty band"
+        );
+        assert!(
+            precip_subscore(1.0) <= 10,
+            "1 mm/h is now PRECIP_MODERATE — a wet ride, not a damp one"
         );
     }
 
     #[test]
-    fn hard_cap_now_fires_at_three_mm_per_hour() {
-        // Old threshold was 5 mm/h; new is 3 mm/h. A single hour at
-        // 3.5 mm/h should hard-cap a tour that would otherwise score
-        // well above 25.
+    fn hard_cap_now_fires_at_two_mm_per_hour() {
+        // Threshold history: 5 → 3 → 2 mm/h. A single hour at 2.5 mm/h
+        // (warm enough that wet-chill stays out of it) should hard-cap a
+        // tour that would otherwise score well above 25.
         let win = RideWindow::from_hours(t(14), 3);
         let mut hours: Vec<HourlyConditions> = (14..17)
             .map(|h| HourlyConditions::minimal(t(h), 17.0, 2.0, 0.0))
             .collect();
-        hours[1].precipitation_mm = 3.5;
+        hours[1].precipitation_mm = 2.5;
         let s = score(
             &hours,
             win,
             Some(SurfaceState::default()),
             Language::Norwegian,
         );
-        assert!(s.hard_capped, "3.5 mm/h should fire the hard-cap");
+        assert!(s.hard_capped, "2.5 mm/h should fire the hard-cap");
         assert!(
             s.total <= thresholds::HARD_CAP_TOTAL,
             "total {} should be ≤ HARD_CAP_TOTAL",
@@ -1244,15 +1349,93 @@ mod tests {
         );
     }
 
+    // ---- wet_chill_cap (rain × cold coupling) ----
+
+    #[rstest]
+    // Dry: never caps, whatever the temperature.
+    #[case(0.0, -5.0, None)]
+    // Warm rain: above the felt-T trigger → no cap.
+    #[case(2.0, 18.0, None)]
+    // Trace of rain on a cold day: below the precip trigger → no cap.
+    #[case(0.2, 2.0, None)]
+    // Rain at the warm edge of the band (felt 10 °C) → soft ceiling.
+    #[case(0.6, 10.0, Some(thresholds::WET_CHILL_CAP_WARM))]
+    // Rain at freezing → as harsh as the heavy-rain hard-cap.
+    #[case(0.6, 0.0, Some(thresholds::WET_CHILL_CAP_COLD))]
+    // Below freezing saturates at the cold cap (no undershoot).
+    #[case(0.6, -8.0, Some(thresholds::WET_CHILL_CAP_COLD))]
+    // Midpoint (felt 5 °C) lands halfway between the two caps: (25+45)/2.
+    #[case(0.6, 5.0, Some(35))]
+    fn wet_chill_cap_curve(#[case] precip: f64, #[case] felt: f64, #[case] expected: Option<u8>) {
+        assert_eq!(wet_chill_cap(precip, felt), expected);
+    }
+
+    #[test]
+    fn cold_rain_caps_total_and_emits_penalty() {
+        // 3 °C with steady 0.8 mm/h drizzle: not heavy enough to trip the
+        // heavy-rain hard-cap on its own (0.8 < 2.0), but cold + wet must
+        // still drag the total down via the wet-chill coupling and flag it.
+        let win = RideWindow::from_hours(t(14), 3);
+        let hours: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions::minimal(t(h), 3.0, 2.0, 0.8))
+            .collect();
+        let s = score(
+            &hours,
+            win,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert!(s.hard_capped, "cold rain should flag hard_capped");
+        assert!(
+            s.total <= thresholds::WET_CHILL_CAP_WARM,
+            "total {} should be pulled down by the wet-chill cap",
+            s.total
+        );
+        assert!(
+            s.penalties
+                .iter()
+                .any(|p| p.component == Component::HardCap && p.message.contains("vått og kaldt")),
+            "a wet-chill penalty should be surfaced, got {:?}",
+            s.penalties
+        );
+    }
+
+    #[test]
+    fn warm_drizzle_is_not_wet_chill_capped() {
+        // Same 0.8 mm/h drizzle but at 20 °C: the wet-chill coupling must
+        // stay out of it — a warm light-rain ride is penalized only by the
+        // ordinary precip axis, not capped.
+        let win = RideWindow::from_hours(t(14), 3);
+        let hours: Vec<HourlyConditions> = (14..17)
+            .map(|h| HourlyConditions::minimal(t(h), 20.0, 2.0, 0.8))
+            .collect();
+        let s = score(
+            &hours,
+            win,
+            Some(SurfaceState::default()),
+            Language::Norwegian,
+        );
+        assert!(
+            !s.hard_capped,
+            "warm 0.8 mm/h drizzle should not hard-cap, total {}",
+            s.total
+        );
+        assert!(
+            wet_chill_cap(0.8, s.stats.felt_temp_c).is_none(),
+            "felt-T {} should be above the wet-chill trigger",
+            s.stats.felt_temp_c
+        );
+    }
+
     // ---- apply_drought_penalty ----
 
     #[rstest]
     #[case(60.0, 100, 100)] // under trigger → no change
-    #[case(72.0, 100, 100)] // exactly at trigger → no change
-    #[case(120.0, 100, 92)] // halfway through → -8 (round of 7.5)
-    #[case(168.0, 100, 85)] // saturates at -15
-    #[case(240.0, 100, 85)] // beyond → still -15
-    #[case(120.0, 3, 0)] // saturating subtract floors at 0
+    #[case(120.0, 100, 100)] // exactly at trigger → no change
+    #[case(144.0, 100, 96)] // halfway through (120→168) → -4 (round of 4.0)
+    #[case(168.0, 100, 92)] // saturates at -8
+    #[case(240.0, 100, 92)] // beyond → still -8
+    #[case(168.0, 5, 0)] // saturating subtract floors at 0
     fn drought_penalty_examples(#[case] hours: f64, #[case] base: u8, #[case] expected: u8) {
         assert_eq!(apply_drought_penalty(base, hours), expected);
     }
@@ -1330,7 +1513,7 @@ mod tests {
         let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         let surface = SurfaceState {
             accumulated_mm: 0.0,
-            hours_since_meaningful_rain: 96.0, // 4 days
+            hours_since_meaningful_rain: 150.0, // 6+ days, past the 5-day trigger
             drought_at_lookback_cap: false,
         };
         let s = score(
@@ -1343,7 +1526,7 @@ mod tests {
             .penalties
             .iter()
             .find(|p| p.message.contains("torrt"))
-            .expect("expected Swedish drought penalty after 96h");
+            .expect("expected Swedish drought penalty after 150h");
         assert!(
             drought.message.contains("dygn"),
             "swedish drought should use 'dygn': {:?}",
@@ -1406,9 +1589,9 @@ mod tests {
         assert!(!s.hard_capped);
         // 17 °C is inside the felt-T pass-through band (10 < T < 27 with
         // RH unset), so apparent_temp == mean_temp. Sub-scores: temp=100,
-        // wind=100, precip=100, prob=95, ground=92 (bone-dry floor).
-        // Weighted: 18*100 + 17*100 + 25*100 + 10*95 + 30*92 = 9710 / 100 = 97
-        assert_eq!(s.total, 97);
+        // wind=100, precip=100, prob=95, ground=95 (bone-dry floor).
+        // Weighted: 18*100 + 17*100 + 25*100 + 10*95 + 30*95 = 9800 / 100 = 98
+        assert_eq!(s.total, 98);
         assert_eq!(s.label, "Strålende");
     }
 
@@ -1460,10 +1643,10 @@ mod tests {
         ); // ground saturated
         assert!(!wet.hard_capped);
         assert!(wet.total < dry.total);
-        // Ground axis is 30 % weight. Bone-dry floor sits at 92 and
-        // saturated at 0, so the swing is 92 of 30, ≈ 27.6 → 28 after
+        // Ground axis is 30 % weight. Bone-dry floor sits at 95 and
+        // saturated at 0, so the swing is 95 of 30, ≈ 28.5 → 29 after
         // integer rounding.
-        assert_eq!(dry.total - wet.total, 28);
+        assert_eq!(dry.total - wet.total, 29);
     }
 
     #[test]
@@ -1482,7 +1665,7 @@ mod tests {
             Language::Norwegian,
         );
         assert!(!s.hard_capped);
-        assert_eq!(s.total, 97);
+        assert_eq!(s.total, 98);
     }
 
     #[test]
@@ -1792,7 +1975,7 @@ mod tests {
         let hours = (14..17).map(nice_hour).collect::<Vec<_>>();
         let surface = SurfaceState {
             accumulated_mm: 0.0,
-            hours_since_meaningful_rain: 96.0, // 4 days
+            hours_since_meaningful_rain: 150.0, // 6+ days, past the 5-day trigger
             drought_at_lookback_cap: false,
         };
         let s = score(
@@ -1805,11 +1988,11 @@ mod tests {
             .penalties
             .iter()
             .find(|p| p.component == Component::Ground && p.message.to_lowercase().contains("tørt"))
-            .expect("expected a tørke penalty after 96h drought");
+            .expect("expected a tørke penalty after 150h drought");
         assert_eq!(drought.severity, Severity::Minor);
         assert!(
-            drought.message.contains("4 døgn"),
-            "expected '4 døgn' in {:?}",
+            drought.message.contains("6 døgn"),
+            "expected '6 døgn' in {:?}",
             drought.message
         );
     }
@@ -2059,7 +2242,7 @@ mod tests {
             Language::Norwegian,
         );
         // Same expected total as `perfect_conditions_yield_high_score`.
-        assert_eq!(s.total, 97);
+        assert_eq!(s.total, 98);
     }
 
     // ---- WindowStats population ----
