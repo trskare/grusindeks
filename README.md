@@ -509,6 +509,44 @@ Penalty-listen, ikke et tall som ødelegger scoren — selv om vi nå
 straffer den hardere enn før (15 poeng på bakke-aksen, opp fra 10) for
 å reflektere de faktiske rolling-resistance-tapene.
 
+## Web-API
+
+Web-GUI-en (`crates/grusindeks-web`) eksponerer ett maskinlesbart
+JSON-endepunkt ved siden av selve siden:
+
+### `GET /api/index/today`
+
+«Resten av dagen»-indeksen for konfigurert standardsted — samme beregning som
+dashbordets Indeks-kort: score over et vindu fra nå til lokal (Oslo) midnatt
+(hele timer, klemt til 1–24).
+
+**200 OK:**
+
+```json
+{
+  "score": 73,
+  "date": "2026-09-09",
+  "produced_at": "2026-09-09T13:37:42Z"
+}
+```
+
+| Felt          | Betydning                                        |
+| ------------- | ------------------------------------------------ |
+| `score`       | Samlet score, 0–100                              |
+| `date`        | Lokal (Oslo) dato indeksen gjelder, `YYYY-MM-DD` |
+| `produced_at` | UTC-tidspunkt for beregningen, RFC 3339          |
+
+**503 Service Unavailable** når prognose-/observasjonsdata ikke kan hentes —
+med en generisk melding; årsaken logges bare på serveren:
+
+```json
+{ "error": "Score er midlertidig utilgjengelig" }
+```
+
+Endepunktet krever ingen autentisering og er ment for maskinell lesing
+(f.eks. et annet dashbord som poller hvert femte minutt); det belaster MET
+lik en sidevisning og deler samme disk-cache.
+
 ## Utvikling
 
 ```sh

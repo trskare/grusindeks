@@ -22,12 +22,44 @@ fn err<E: std::fmt::Display>(e: E) -> ServerFnError {
     ServerFnError::new(e.to_string())
 }
 
+/// Whole hours from the `now` instant to the upcoming local (Oslo) midnight —
+/// the scoring window behind the dashboard's rest-of-day card and
+/// `GET /api/index/today`, so both always agree. Subtracts on the naive
+/// wall clock and clamps to 1..=24 (falling back to 3 on calendar overflow),
+/// mirroring the dashboard arithmetic this was extracted from; on DST
+/// transition days the naive subtraction can be off by an hour, which is
+/// acceptable for a forecast horizon.
+pub fn hours_until_local_midnight(now: chrono::DateTime<chrono::Utc>) -> i64 {
+    use chrono_tz::Europe::Oslo;
+
+    let local = now.with_timezone(&Oslo);
+    local
+        .date_naive()
+        .succ_opt()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|m| (m - local.naive_local()).num_hours())
+        .unwrap_or(3)
+        .clamp(1, 24)
+}
+
 /// Score a place over the next `hours` hours. Empty `place` → configured
 /// default place.
 #[server]
 pub async fn get_score(place: String, hours: i64) -> Result<AggregateScore, ServerFnError> {
+    let state = expect_context::<crate::state::AppState>();
+    score_for_window(&state, place, hours).await
+}
+
+/// Core of [`get_score`], shared verbatim with the plain Axum JSON route
+/// `GET /api/index/today` (ssr-only `crate::api`), which has no Leptos
+/// reactive owner to provide `AppState` via `expect_context`.
+#[cfg(feature = "ssr")]
+pub(crate) async fn score_for_window(
+    state: &crate::state::AppState,
+    place: String,
+    hours: i64,
+) -> Result<AggregateScore, ServerFnError> {
     use crate::db::{load_config, DEFAULT_USER_ID};
-    use crate::state::AppState;
     use chrono::Utc;
     use grusindeks_cli::run::{run_score, ScoreInputs};
     use grusindeks_cli::windows::{
@@ -38,7 +70,6 @@ pub async fn get_score(place: String, hours: i64) -> Result<AggregateScore, Serv
     use crate::db::{log_score, place_id_by_name, HistoryInsert};
     use chrono::DurationRound;
 
-    let state = expect_context::<AppState>();
     let cfg = load_config(&state.db, DEFAULT_USER_ID).await.map_err(err)?;
 
     let place_arg = (!place.is_empty()).then_some(place);

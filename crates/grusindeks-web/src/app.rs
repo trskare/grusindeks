@@ -15,7 +15,7 @@ use crate::icons;
 use crate::map::MapView;
 use crate::server::{
     get_alerts, get_forecast, get_hourly, get_hourly_day, get_prefs, get_score, get_work_hours,
-    list_places, remove_place, save_place, save_prefs, save_work_hours,
+    hours_until_local_midnight, list_places, remove_place, save_place, save_prefs, save_work_hours,
 };
 
 /// The HTML document the server renders around the hydrated app.
@@ -264,18 +264,13 @@ fn DashboardPage() -> impl IntoView {
         |(place, _)| async move { get_score(place, 3).await },
     );
     // Rest-of-day aggregate for the Indeks section: a window from now to local
-    // midnight (≥1 h). The 3-hour `score` above still drives the "Kjør nå" card.
+    // midnight (≥1 h) — same arithmetic as `GET /api/index/today`, via the
+    // shared [`crate::server::hours_until_local_midnight`]. The 3-hour `score`
+    // above still drives the "Kjør nå" card.
     let rest_score = Resource::new(
         move || (selected.get(), refresh_tick.get()),
         |(place, _)| async move {
-            let now = chrono::Utc::now().with_timezone(&chrono_tz::Europe::Oslo);
-            let end = now
-                .date_naive()
-                .succ_opt()
-                .and_then(|d| d.and_hms_opt(0, 0, 0))
-                .map(|m| (m - now.naive_local()).num_hours())
-                .unwrap_or(3)
-                .clamp(1, 24);
+            let end = hours_until_local_midnight(chrono::Utc::now());
             get_score(place, end).await
         },
     );

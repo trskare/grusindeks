@@ -18,7 +18,10 @@ pub mod icons;
 pub mod map;
 pub mod server;
 
-// Server-only modules (HTTP client, SQLite). Never compiled for wasm.
+// Server-only modules (Axum JSON routes, HTTP client, SQLite). Never compiled
+// for wasm.
+#[cfg(feature = "ssr")]
+pub mod api;
 #[cfg(feature = "ssr")]
 pub mod db;
 #[cfg(feature = "ssr")]

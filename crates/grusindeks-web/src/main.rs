@@ -7,6 +7,7 @@
 #[cfg(feature = "ssr")]
 #[tokio::main]
 async fn main() {
+    use axum::routing::get;
     use axum::Router;
     use grusindeks_web::app::{shell, App};
     use grusindeks_web::state::AppState;
@@ -30,6 +31,10 @@ async fn main() {
     let app_state = AppState::init().await.expect("build application state");
 
     let app = Router::new()
+        .route(
+            "/api/index/today",
+            get(grusindeks_web::api::index_today).with_state(app_state.clone()),
+        )
         .leptos_routes_with_context(
             &leptos_options,
             routes,

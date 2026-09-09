@@ -1,9 +1,11 @@
-//! Plain data-transfer types for the settings server functions.
+//! Plain data-transfer types for the settings server functions and the
+//! plain JSON API.
 //!
 //! These are wasm-safe (only `String`/numbers/bool/`Vec`) so they cross the
 //! server-fn boundary and drive the settings forms on the client. Optional
 //! fields use empty strings rather than `Option` to keep the HTML forms simple.
 
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -47,4 +49,25 @@ pub struct WorkHoursDto {
     pub days: Vec<String>,
     pub window_start: String,
     pub window_end: String,
+}
+
+/// Response of `GET /api/index/today` (served by the ssr-only `api` module) —
+/// the "rest of today" index for the configured default place. This struct
+/// *is* the wire contract: `date` serializes as `YYYY-MM-DD` and `produced_at`
+/// as RFC 3339 UTC, so external consumers (e.g. homedash) can mirror it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IndexToday {
+    /// Aggregate mean score, 0–100.
+    pub score: u8,
+    /// Local (Oslo) date the index applies to.
+    pub date: NaiveDate,
+    /// UTC instant the score was computed.
+    pub produced_at: DateTime<Utc>,
+}
+
+/// Error body for the JSON API. Deliberately generic — causes are logged
+/// server-side and never echoed to API consumers.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApiError {
+    pub error: String,
 }
