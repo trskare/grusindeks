@@ -33,11 +33,13 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --from=builder /app/target/release/grusindeks-web /app/grusindeks-web
+COPY --from=builder /app/target/release/hash.txt /app/hash.txt
 COPY --from=builder /app/target/site /app/site
 
 ENV LEPTOS_OUTPUT_NAME=grusindeks-web \
     LEPTOS_SITE_ROOT=/app/site \
     LEPTOS_SITE_PKG_DIR=pkg \
+    LEPTOS_HASH_FILES=true \
     LEPTOS_SITE_ADDR=0.0.0.0:3000 \
     GRUSINDEKS_DB=sqlite:///data/grusindeks.db \
     GRUSINDEKS_CACHE_DIR=/data/cache

@@ -89,6 +89,7 @@ ssr = [
 output-name = "grusindeks-web"
 site-root = "target/site"
 site-pkg-dir = "pkg"
+hash-files = true
 tailwind-input-file = "style/tailwind.css"
 assets-dir = "assets"
 site-addr = "127.0.0.1:3000"

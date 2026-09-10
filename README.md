@@ -57,6 +57,19 @@ grusindeks --version
 `./target/debug/grusindeks` — fint mens du eksperimenterer, men
 ~10× tregere ved kjøring.
 
+### Web-GUI: produksjonsbygg og cache
+
+`just web-build` bygger serveren og nettleserklienten. Generert JavaScript,
+WebAssembly og CSS får innholdsbaserte filnavn, slik at endrede klientfiler
+får nye URL-er ved deploy.
+
+Ved manuell deploy må `target/release/grusindeks-web`,
+`target/release/hash.txt` og `target/site/` komme fra samme bygg. Legg
+`hash.txt` ved siden av serverbinæren, sett `LEPTOS_HASH_FILES=true`, og
+pek `LEPTOS_SITE_ROOT` på den deployede `site/`-mappen.
+Dockerfile håndterer dette automatisk; en konfigurert Compose-installasjon
+oppdateres med `docker compose up -d --build grusindeks`.
+
 ## Bruk
 
 ```sh

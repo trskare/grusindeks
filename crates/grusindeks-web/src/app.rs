@@ -2,7 +2,7 @@
 //! and the settings page (prefs / places / work-hours CRUD).
 
 use leptos::prelude::*;
-use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
+use leptos_meta::{provide_meta_context, HashedStylesheet, MetaTags, Title};
 use leptos_router::components::{Route, Router, Routes, A};
 use leptos_router::path;
 
@@ -33,6 +33,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <script src="/maplibre-gl.js"></script>
                 <script src="/map_glue.js"></script>
                 <AutoReload options=options.clone()/>
+                <HashedStylesheet id="leptos" options=options.clone()/>
                 <HydrationScripts options/>
                 <MetaTags/>
             </head>
@@ -54,7 +55,6 @@ pub fn App() -> impl IntoView {
     provide_context(SelectedPlace(RwSignal::new(String::new())));
 
     view! {
-        <Stylesheet id="leptos" href="/pkg/grusindeks-web.css"/>
         <Title text="Grusindeks"/>
 
         <Router>
