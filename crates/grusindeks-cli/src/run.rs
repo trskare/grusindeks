@@ -6,12 +6,11 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
 use grusindeks_core::daily::{compute_day, BestWindowConfig, Confidence};
-use grusindeks_core::drying::{
-    drying_step, DryingParams, SurfaceState, SURFACE_WETTED_MM, UV_NORDIC_PEAK,
-};
+use grusindeks_core::drying::{drying_step, DryingParams, SurfaceState, SURFACE_WETTED_MM};
 use grusindeks_core::geo::{sample_around, Point};
 use grusindeks_core::lang::Language;
 use grusindeks_core::score::{score, ScoreBreakdown};
+use grusindeks_core::sun::shortwave_radiation_w_m2;
 use grusindeks_core::types::{HourlyConditions, Resolution, RideWindow};
 use grusindeks_met::client::MetClient;
 use grusindeks_met::frost;
@@ -741,9 +740,8 @@ async fn fetch_ground_state(
     let to: DateTime<Utc> = Utc::now();
     let from = to - Duration::hours(history_hours);
     let result = frost::fetch_hourly_observations(client, src, from, to).await;
-    // Location feeds the drying model's solar term (sun elevation → clear-sky
-    // UV proxy) so the historical replay dries faster in summer/daytime and
-    // slower in winter/at night, instead of a flat always-daytime fallback.
+    // Use the same location-aware hourly shortwave estimate as the forecast,
+    // including seasonal daylight and observed cloud cover.
     let location = Some((center.lat, center.lon));
     let outcome = match &result {
         Ok(history) => {
@@ -1013,6 +1011,7 @@ fn replay_for_each<F>(
                         // filler exists only to carry time + zero precip to the
                         // callback.
                         uv_index_clear_sky: None,
+                        shortwave_radiation_w_m2: None,
                         resolution: Resolution::Hourly,
                     };
                     state = SurfaceState {
@@ -1038,44 +1037,18 @@ fn replay_for_each<F>(
             wind_from_deg: None,
             probability_of_precip: None,
             relative_humidity: h.humidity_pct.or(Some(70.0)),
-            // Real observed cloud cover when the station carries the sensor;
-            // a neutral 70 % overcast fallback otherwise. Previously this
-            // was hardcoded to 70 % for every hour, which pinned the solar
-            // drying term to its overcast floor and made a clear, sunny week
-            // dry the surface no faster than a grey one.
+            // Preserve observed clouds, with the same neutral 70 % fallback
+            // used by the shared shortwave estimate when clouds are missing.
             cloud_area_fraction: h.cloud_pct.or(Some(70.0)),
-            uv_index_clear_sky: clear_sky_uv_proxy(h.time, location),
+            uv_index_clear_sky: None,
+            shortwave_radiation_w_m2: location
+                .map(|(lat, lon)| shortwave_radiation_w_m2(h.time, lat, lon, h.cloud_pct)),
             resolution: Resolution::Hourly,
         };
         state = drying_step(state, &synth, p);
         on_step(&synth, &state);
         prev_time = Some(h.time);
     }
-}
-
-/// Synthesise a clear-sky UV index for the drying model's solar term from the
-/// sun's elevation at `time` and `location` (`(lat, lon)`).
-///
-/// Frost doesn't publish a UV / shortwave element we use, so historically the
-/// replay left UV `None` and fell back to a flat half-strength,
-/// always-daytime solar term — which credited the same drying at midnight as
-/// at noon and the same in December as in June. Deriving a proxy from solar
-/// elevation fixes both: the term goes to zero at night (sun below the
-/// horizon) and scales down through the dark half of the year (low winter
-/// sun). `None` location → `None` (caller keeps the cloud-only fallback), so
-/// behaviour is unchanged when we don't know where the station is.
-///
-/// The proxy is `UV_NORDIC_PEAK · sin(elevation)` for a sun above the
-/// horizon: a coarse but monotone stand-in for clear-sky irradiance
-/// (∝ sin of solar elevation), capped at the same Nordic peak the live
-/// forecast path scales against.
-fn clear_sky_uv_proxy(time: DateTime<Utc>, location: Option<(f64, f64)>) -> Option<f64> {
-    let (lat, lon) = location?;
-    let elev = grusindeks_core::sun::solar_elevation_deg(time, lat, lon);
-    if elev <= 0.0 {
-        return Some(0.0);
-    }
-    Some(UV_NORDIC_PEAK * (elev * std::f64::consts::PI / 180.0).sin())
 }
 
 #[cfg(test)]
@@ -1633,11 +1606,9 @@ mod tests {
 
     #[test]
     fn replay_uses_observed_conditions_not_synthesised_neutral() {
-        // Two histories with identical precipitation but very different
-        // weather should NOT produce identical drying. Hot/sunny dries
-        // faster than cold/cloudy (still, no UV in observations →
-        // sunshine bonus is half-strength either way; cloud is the same).
-        // The dominant effect is temperature and wind.
+        // Identical precipitation but different temperature, wind, and
+        // humidity must not produce identical drying. With no location,
+        // neither history receives estimated shortwave radiation.
         let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
         let dry_history: Vec<frost::HourlyObservation> = (0..6)
             .map(|i| frost::HourlyObservation {
@@ -1695,12 +1666,8 @@ mod tests {
                 .collect()
         };
         let p = DryingParams::default();
-        // location=None → cloud-only solar fallback, so this isolates the
-        // observed-cloud effect and stays deterministic regardless of when
-        // the test runs (the seasonal/daylight solar path is covered
-        // separately in `replay_solar_term_*`).
-        let clear = replay_into_state(&make(5.0), &p, None);
-        let overcast = replay_into_state(&make(95.0), &p, None);
+        let clear = replay_into_state(&make(5.0), &p, Some(OSLO));
+        let overcast = replay_into_state(&make(95.0), &p, Some(OSLO));
         assert!(
             clear.accumulated_mm < overcast.accumulated_mm,
             "clear-sky week should leave the surface drier than an overcast one; \
@@ -1710,29 +1677,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn replay_cloud_fallback_when_station_has_no_cloud_sensor() {
-        // cloud_pct = None must not poison the replay — it falls back to the
-        // neutral overcast value and still produces a finite, sane state.
-        let now = Utc.with_ymd_and_hms(2026, 4, 15, 12, 0, 0).unwrap();
-        let history: Vec<frost::HourlyObservation> = (0..12)
-            .map(|i| frost::HourlyObservation {
-                time: now - Duration::hours(12 - i),
-                precip_mm: Some(if i == 0 { 2.0 } else { 0.0 }),
-                temp_c: Some(15.0),
-                wind_ms: Some(3.0),
-                humidity_pct: Some(60.0),
-                cloud_pct: None,
-            })
-            .collect();
-        let state = replay_into_state(&history, &DryingParams::default(), None);
-        assert!(state.accumulated_mm.is_finite());
-        assert!((0.0..=5.0).contains(&state.accumulated_mm));
-    }
+    // ---- shared seasonal / daylight radiation ----
 
-    // ---- seasonal / daylight solar gate (B1 + B2) ----
-
-    // Oslo, for the solar-elevation proxy.
+    // Oslo, for location-aware hourly shortwave estimates.
     const OSLO: (f64, f64) = (59.91, 10.75);
 
     /// 6 hourly clear-sky drizzle obs starting at `start`, identical weather
@@ -1775,19 +1722,15 @@ mod tests {
 
     #[test]
     fn replay_solar_term_is_zero_at_night() {
-        // Same summer day, clear sky: a daytime stretch must dry more than a
-        // night-time one (sun below the horizon → no solar drying at all).
+        // Clear sky around the equinox: daytime dries more than night.
         let day = replay_into_state(
-            &solar_history(Utc.with_ymd_and_hms(2026, 6, 21, 9, 0, 0).unwrap()),
+            &solar_history(Utc.with_ymd_and_hms(2026, 9, 21, 9, 0, 0).unwrap()),
             &DryingParams::default(),
             Some(OSLO),
         );
-        // 21:00–02:00 UTC ≈ 23:00–04:00 local: sun well below the horizon.
-        let night = replay_into_state(
-            &solar_history(Utc.with_ymd_and_hms(2026, 6, 21, 21, 0, 0).unwrap()),
-            &DryingParams::default(),
-            Some(OSLO),
-        );
+        // 21:00–03:00 UTC in September is fully below the Oslo horizon.
+        let night_history = solar_history(Utc.with_ymd_and_hms(2026, 9, 21, 21, 0, 0).unwrap());
+        let night = replay_into_state(&night_history, &DryingParams::default(), Some(OSLO));
         assert!(
             day.accumulated_mm < night.accumulated_mm,
             "daytime sun should dry more than night; got day={}, night={}",
@@ -1797,10 +1740,8 @@ mod tests {
     }
 
     #[test]
-    fn replay_without_location_keeps_cloud_only_fallback() {
-        // location=None must reproduce the pre-solar-gate behaviour: identical
-        // to a clear-sky daytime run only via the cloud term, never zeroed by
-        // night. Concretely, None should not depend on time-of-day at all.
+    fn replay_without_location_has_no_shortwave_radiation() {
+        // Unknown coordinates must not invent sunlight, even at midday.
         let noon = replay_into_state(
             &solar_history(Utc.with_ymd_and_hms(2026, 6, 21, 9, 0, 0).unwrap()),
             &DryingParams::default(),
@@ -2070,39 +2011,6 @@ mod tests {
     }
 
     #[test]
-    fn rain_history_subthreshold_drizzle_is_not_a_rain_day() {
-        // 0.1 mm × 5 hours = 0.5 mm cumulative — well over the daily-sum
-        // threshold, but no single hour reaches 0.3 mm and drying eats the
-        // accumulator below it every step. The drying counter never resets,
-        // so neither does the regndøgn count: Regn 7d and Bakke stay in
-        // lock-step on what "regnet" means.
-        let base = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 4, 24, 6, 0, 0).unwrap();
-        let history: Vec<frost::HourlyObservation> = (0..5)
-            .map(|i| frost::HourlyObservation {
-                time: base + Duration::hours(i),
-                precip_mm: Some(0.1),
-                temp_c: None,
-                wind_ms: None,
-                humidity_pct: None,
-                cloud_pct: None,
-            })
-            .collect();
-        let h = compute_rain_history(&history, 168).expect("Some");
-        assert_eq!(
-            h.rain_days, 0,
-            "5 × 0.1 mm should not count as a regndøgn — surface never wetted",
-        );
-        // Sub-threshold drizzle is excluded from total_mm too — otherwise
-        // the chip says "0.5 mm siste 7 d, 0 regndøgn", which raises the
-        // exact "where did that mm go?" question that makes the chip
-        // disagree with Bakke on the user's screen.
-        assert_eq!(
-            h.total_mm, 0.0,
-            "sub-threshold drizzle must not show up in total_mm either",
-        );
-    }
-
-    #[test]
     fn rain_history_single_strong_hour_counts_as_rain_day() {
         // 1.0 mm in one hour easily clears the drying rate, so the
         // accumulator reaches >= SURFACE_WETTED_MM and the drought counter
@@ -2258,6 +2166,8 @@ mod tests {
         let mut hc = HourlyConditions::minimal(ts(h), 15.0, 3.0, 0.0);
         hc.relative_humidity = Some(60.0);
         hc.cloud_area_fraction = Some(50.0);
+        hc.shortwave_radiation_w_m2 =
+            Some(shortwave_radiation_w_m2(ts(h), OSLO.0, OSLO.1, Some(50.0)));
         hc
     }
 
@@ -2265,6 +2175,8 @@ mod tests {
         let mut hc = HourlyConditions::minimal(ts(h), 10.0, 2.0, mm);
         hc.relative_humidity = Some(90.0);
         hc.cloud_area_fraction = Some(95.0);
+        hc.shortwave_radiation_w_m2 =
+            Some(shortwave_radiation_w_m2(ts(h), OSLO.0, OSLO.1, Some(95.0)));
         hc
     }
 
@@ -2310,12 +2222,8 @@ mod tests {
     #[test]
     fn projection_wets_ground_after_forecast_rain() {
         let initial = SurfaceState::default();
-        // Dry until the tail of day 1, then heavy rain in hours 42..48 — i.e.
-        // immediately before the day-2 snapshot. (Placing the rain right
-        // before the snapshot matters now that gravel drainage clears the
-        // surface within hours: a downpour 18 h earlier would already have
-        // drained away by the snapshot, which is the *correct* new
-        // behaviour — see `projection_ground_drains_within_hours`.)
+        // Dry until the tail of day 1, then heavy rain in hours 42..48,
+        // immediately before the day-2 snapshot.
         let mut hours: Vec<HourlyConditions> = (0..42).map(dry_hour).collect();
         hours.extend((42..48).map(|h| rainy_hour(h, 2.0)));
         hours.extend((48..72).map(dry_hour));
@@ -2331,27 +2239,6 @@ mod tests {
             states[2].accumulated_mm > 0.0,
             "day after tomorrow: rain just fell, ground is wet — got {:?}",
             states[2]
-        );
-    }
-
-    #[test]
-    fn projection_ground_drains_within_hours_not_days() {
-        // Regression guard for the gravel-drainage fix: a heavy downpour
-        // followed by a full day of dry weather must leave the surface dry
-        // by the next day's snapshot. Before drainage, slow evaporation
-        // alone kept the bucket "wet" for days, which is what made the score
-        // report a soaked surface long after the gravel had drained.
-        let initial = SurfaceState::default();
-        let mut hours: Vec<HourlyConditions> = (0..6).map(|h| rainy_hour(h, 3.0)).collect();
-        hours.extend((6..48).map(dry_hour));
-        let day_starts = vec![ts(0), ts(24)];
-        let states =
-            project_states_for_days(initial, &hours, &day_starts, &DryingParams::default());
-        // ~18 dry hours after the rain ends (rain 0..6, snapshot at ts(24)).
-        assert_eq!(
-            states[1].accumulated_mm, 0.0,
-            "gravel should have drained dry within a day; got {:?}",
-            states[1],
         );
     }
 

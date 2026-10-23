@@ -35,8 +35,8 @@ const WIND_CHILL_MIN_KMH: f64 = 4.8;
 
 /// UV index value that represents the upper end of typical Nordic peak
 /// summer noon irradiance. Used to normalise `uv_index_clear_sky` into a
-/// 0–1.5 sunshine multiplier. Shared with the drying model so both
-/// signals scale consistently.
+/// 0–1.5 sunshine multiplier for felt temperature only; evaporation uses
+/// a separate shortwave-radiation estimate rather than UV.
 pub const UV_NORDIC_PEAK: f64 = 7.0;
 
 /// Maximum °C added to felt-T from direct sunshine, hit at clear sky +
@@ -146,8 +146,7 @@ pub fn apparent_temp(t_c: f64, wind_ms: f64, humidity_pct: Option<f64>) -> f64 {
 /// helps or hurts the score is decided by the temperature sub-score
 /// curve (good in cold, bad in heat).
 ///
-/// Returns 0 when either input is missing or non-finite, mirroring the
-/// drying model's defensive handling. Inputs:
+/// Returns 0 when either input is missing or non-finite. Inputs:
 /// * `cloud_pct` — total cloud area, 0–100 %.
 /// * `uv_clear_sky` — UV index for clear sky (0+); api.met.no returns 0
 ///   at night, so no separate daylight gate is needed.
