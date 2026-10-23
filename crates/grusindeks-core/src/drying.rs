@@ -17,8 +17,10 @@
 //! remains. Snow accumulation/melt is **not** modelled — callers should treat
 //! the score as undefined when snow is on the ground.
 //!
-//! Not a real Penman–Monteith ET model; it's a transparent heuristic with
-//! all coefficients tunable in one place. Good enough for scoring.
+//! Penman-style combination of net radiation and vapour transport, not
+//! reference-crop ET or a calibrated gravel energy-balance model. Radiation,
+//! surface albedo and aerodynamic exchange remain estimates; soil heat storage,
+//! dew and a slow subsurface water reservoir are not represented.
 
 use serde::{Deserialize, Serialize};
 
@@ -65,11 +67,6 @@ pub fn liquid_fraction(temp_c: f64) -> f64 {
     ((temp_c + FREEZE_RAMP_C) / (2.0 * FREEZE_RAMP_C)).clamp(0.0, 1.0)
 }
 
-/// Re-exported from `felt_temp` so the drying model and the cyclist
-/// felt-T scale solar contributions against the same Nordic peak. Single
-/// source of truth lives in `felt_temp::UV_NORDIC_PEAK` (= 7.0).
-pub use crate::felt_temp::UV_NORDIC_PEAK;
-
 /// Coefficients for the per-hour drying rate (mm/h) and the gravel
 /// drainage term. Exposed so tests and future calibration can override
 /// them without forking the function.
@@ -86,12 +83,13 @@ pub use crate::felt_temp::UV_NORDIC_PEAK;
 /// equilibrium lags the first hour of rain by design).
 #[derive(Debug, Clone, Copy)]
 pub struct DryingParams {
-    pub base: f64,
-    pub per_deg_c_above_5: f64,
-    pub per_ms_wind: f64,
-    pub sunshine_max: f64,
-    pub per_pct_humidity_above_50: f64,
-    pub min_rate: f64,
+    /// Fraction of incoming shortwave reflected by the surface (0–1).
+    pub albedo: f64,
+    /// Penman-style vapour transport, mm/h per kPa of VPD before weighting
+    /// by gamma / (delta + gamma). Wind is converted from 10 m to 2 m.
+    pub aerodynamic_mm_per_hour_kpa: f64,
+    /// Wind enhancement per m/s at 2 m; multiplies VPD, never dries on its own.
+    pub wind_response_per_ms: f64,
     pub max_rate: f64,
     /// Depth of the capillary-held "damp" surface film (mm) the gravel holds
     /// against gravity — what's left once free water has drained. This is a
@@ -113,12 +111,11 @@ pub struct DryingParams {
 impl Default for DryingParams {
     fn default() -> Self {
         Self {
-            base: 0.05,
-            per_deg_c_above_5: 0.010,
-            per_ms_wind: 0.020,
-            sunshine_max: 0.050, // multiplied by (1 - cloud%) × (uv/5)
-            per_pct_humidity_above_50: 0.005,
-            min_rate: 0.0,
+            albedo: 0.23,
+            // Conventional wet-surface Penman transport scale: 2.6 mm/day/kPa.
+            // A starting estimate, not locally calibrated gravel coefficients.
+            aerodynamic_mm_per_hour_kpa: 2.6 / 24.0,
+            wind_response_per_ms: 0.54,
             max_rate: 1.5,
             surface_retention_mm: 0.4,
             drainage_fraction: 0.5,
@@ -232,72 +229,62 @@ fn finite_or(value: f64, fallback: f64) -> f64 {
     }
 }
 
-/// Saturation vapour pressure (kPa) at `temp_c`, via the Magnus formula.
-/// Used to give the humidity term its temperature dependence (the vapour-
-/// pressure deficit a given RH represents grows with temperature).
+/// Saturation vapour pressure (kPa), Magnus approximation. The caller bounds
+/// temperature to the weather domain to avoid the singularity at −243.04 °C.
 fn saturation_vapour_kpa(temp_c: f64) -> f64 {
     0.610_94 * (17.625 * temp_c / (temp_c + 243.04)).exp()
 }
 
-/// Drying rate (mm/h) for one hour of conditions.
+/// Potential evaporation (mm/h) from a wet surface.
 ///
-/// Sunshine term uses cloud cover and (when available) UV index. With both
-/// missing it falls back to "neutral" (no extra sunshine boost). The wind
-/// term uses √u rather than u directly: aerodynamic mass-transfer is
-/// concave in wind speed, so a lineær term would overestimate evaporation
-/// at storm strength. The factor of 2 is calibrated so that the mid-range
-/// `u ≈ 4 m/s` matches the previous lineær formula.
+/// A Penman-style combination weights net radiation by delta/(delta+gamma)
+/// and vapour transport by gamma/(delta+gamma). VPD is es(T)*(1−RH/100):
+/// neither temperature nor wind supplies an unconditional drying bonus.
 ///
-/// Near and below freezing the rate is scaled toward [`FROST_FACTOR`] by the
-/// [`liquid_fraction`] freeze/thaw ramp — fully frozen leaves only slow
-/// sublimation; fully thawed runs at the full rate; the two blend across
-/// `±FREEZE_RAMP_C` of 0 °C. Without this gating a frozen, snow-free surface
-/// would dry at ~0.05 mm/h and fool the drought counter into thinking the
-/// gravel is fluffy when it's actually iced over.
+/// Incoming shortwave is the shared hourly solar estimate, NOT UV. Longwave
+/// cooling uses the FAO-56 vapour-emissivity factor with a cloud-cover estimate
+/// of sky transmissivity. This hourly adaptation assumes surface temperature
+/// equals air temperature and neglects ground heat storage. Negative radiation
+/// offsets aerodynamic drying *before* the final zero clamp: a cold clear night
+/// cannot turn radiative cooling into energy for evaporation. Dry advected air
+/// can still evaporate water at night. Negative totals do not add dew.
+///
+/// Missing radiation adds no solar energy; missing RH/cloud use the historical
+/// replay's 70% fallback, not dry air or clear sky. These estimates are not a
+/// substitute for observations. `drying_step` limits actual loss to stored water.
 pub fn drying_rate(h: &HourlyConditions, p: &DryingParams) -> f64 {
-    let temp_c = finite_or(h.temperature_c, 0.0);
-    let wind = finite_or(h.wind_speed_ms, 0.0).max(0.0);
+    let temp_c = finite_or(h.temperature_c, 0.0).clamp(-80.0, 60.0);
+    let wind_10m = finite_or(h.wind_speed_ms, 0.0).max(0.0);
+    let rh = finite_or(h.relative_humidity.unwrap_or(70.0), 70.0).clamp(0.0, 100.0);
+    let cloud = finite_or(h.cloud_area_fraction.unwrap_or(70.0), 70.0).clamp(0.0, 100.0) / 100.0;
+    let shortwave = finite_or(h.shortwave_radiation_w_m2.unwrap_or(0.0), 0.0).max(0.0);
 
-    let temp_term = p.per_deg_c_above_5 * (temp_c - 5.0).max(0.0);
-    // sqrt is concave: u=4 → 2, u=16 → 4. The ×2 normalises the formula
-    // so it matches `per_ms_wind * u` at u ≈ 4 m/s, which is the typical
-    // calm-to-light-breeze regime the coefficient was originally tuned
-    // against.
-    let wind_term = p.per_ms_wind * 2.0 * wind.sqrt();
+    let es = saturation_vapour_kpa(temp_c);
+    let actual_vapour = es * rh / 100.0;
+    let vpd = es - actual_vapour;
+    let delta = 17.625 * 243.04 * es / (temp_c + 243.04).powi(2);
+    // kPa/°C, near sea level. No pressure/elevation observation in this model.
+    const GAMMA: f64 = 0.0665;
+    const STEFAN_BOLTZMANN: f64 = 5.670_374_419e-8;
+    const LATENT_HEAT_J_KG: f64 = 2_450_000.0;
+    // FAO-56 logarithmic wind-height adjustment: 4.87 / ln(67.8*10 − 5.42).
+    const WIND_10M_TO_2M: f64 = 0.747_951_075_167_944_1;
 
-    let sunshine_term = match (h.cloud_area_fraction, h.uv_index_clear_sky) {
-        (Some(cloud), Some(uv)) if cloud.is_finite() && uv.is_finite() => {
-            p.sunshine_max
-                * (1.0 - cloud / 100.0).clamp(0.0, 1.0)
-                * (uv / UV_NORDIC_PEAK).clamp(0.0, 1.5)
-        }
-        (Some(cloud), _) if cloud.is_finite() => {
-            // Without UV we still get a smaller boost from "clear-ish" skies.
-            0.5 * p.sunshine_max * (1.0 - cloud / 100.0).clamp(0.0, 1.0)
-        }
-        _ => 0.0,
-    };
-
-    // Humid air suppresses evaporation — but the same relative humidity leaves
-    // a larger vapour-pressure deficit to overcome as temperature rises, so a
-    // muggy 25 °C afternoon holds water far more than a damp 5 °C morning at
-    // the same RH. Scale the (RH − 50) penalty by the Magnus saturation-
-    // pressure ratio against a 15 °C reference (= 1 there, so the original
-    // calibration is preserved at 15 °C). A step toward a full VPD term
-    // without re-tuning the other coefficients.
-    let humidity_penalty = match h.relative_humidity {
-        Some(rh) if rh.is_finite() => {
-            let temp_scale = saturation_vapour_kpa(temp_c) / saturation_vapour_kpa(15.0);
-            p.per_pct_humidity_above_50 * (rh - 50.0).max(0.0) * temp_scale
-        }
-        _ => 0.0,
-    };
-
-    let raw = p.base + temp_term + wind_term + sunshine_term - humidity_penalty;
-    // Frost gate as a ramp, not a cliff: fully frozen → FROST_FACTOR
-    // (sublimation only), fully thawed → 1.0, blended across [-1, +1] °C.
+    let sky_transmissivity = 1.0 - 0.75 * cloud.powf(3.4);
+    let cloud_emissivity = (1.35 * sky_transmissivity - 0.35).clamp(0.05, 1.0);
+    let longwave_loss = STEFAN_BOLTZMANN
+        * (temp_c + 273.15).powi(4)
+        * (0.34 - 0.14 * actual_vapour.sqrt()).max(0.0)
+        * cloud_emissivity;
+    let net_radiation = (1.0 - p.albedo) * shortwave - longwave_loss;
+    // W/m² × seconds / (J/kg) = kg/m² = mm of water per hourly step.
+    let energy_mm = net_radiation * 3600.0 / LATENT_HEAT_J_KG;
+    let aerodynamic_mm = p.aerodynamic_mm_per_hour_kpa
+        * (1.0 + p.wind_response_per_ms * wind_10m * WIND_10M_TO_2M)
+        * vpd;
+    let potential = (delta * energy_mm + GAMMA * aerodynamic_mm) / (delta + GAMMA);
     let frost_factor = FROST_FACTOR + (1.0 - FROST_FACTOR) * liquid_fraction(temp_c);
-    (raw * frost_factor).clamp(p.min_rate, p.max_rate)
+    (potential * frost_factor).clamp(0.0, p.max_rate)
 }
 
 /// Step the surface state forward by one hour.
@@ -342,7 +329,8 @@ pub fn drying_step(state: SurfaceState, h: &HourlyConditions, p: &DryingParams) 
     let free = (after_rain - p.surface_retention_mm).max(0.0);
     let drained = free * p.drainage_fraction.clamp(0.0, 1.0) * liquid_fraction(temp_c);
     let after_drainage = after_rain - drained;
-    let after_drying = (after_drainage - drying_rate(h, p)).max(0.0);
+    let evaporated = drying_rate(h, p).min(after_drainage);
+    let after_drying = after_drainage - evaporated;
     let hours_since_meaningful_rain = if after_drying >= SURFACE_WETTED_MM {
         0.0
     } else {
@@ -372,6 +360,7 @@ pub fn replay(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sun::shortwave_radiation_w_m2;
     use chrono::{TimeZone, Utc};
 
     fn t(h: u32) -> chrono::DateTime<Utc> {
@@ -382,7 +371,12 @@ mod tests {
         HourlyConditions {
             thunder: false,
             cloud_area_fraction: Some(20.0),
-            uv_index_clear_sky: Some(4.0),
+            shortwave_radiation_w_m2: Some(shortwave_radiation_w_m2(
+                t(h),
+                59.91,
+                10.75,
+                Some(20.0),
+            )),
             relative_humidity: Some(40.0),
             ..HourlyConditions::minimal(t(h), 18.0, 4.0, 0.0)
         }
@@ -392,7 +386,7 @@ mod tests {
         HourlyConditions {
             thunder: false,
             cloud_area_fraction: Some(95.0),
-            uv_index_clear_sky: Some(0.0),
+            shortwave_radiation_w_m2: Some(0.0),
             relative_humidity: Some(95.0),
             ..HourlyConditions::minimal(t(h), 12.0, 3.0, mm)
         }
@@ -415,10 +409,136 @@ mod tests {
     // ---- drying_rate ----
 
     #[test]
-    fn base_rate_at_5c_no_wind_no_sun() {
-        let h = HourlyConditions::minimal(t(0), 5.0, 0.0, 0.0);
-        let r = drying_rate(&h, &DryingParams::default());
-        assert!((r - 0.05).abs() < 1e-9, "got {r}");
+    fn saturated_air_without_solar_energy_cannot_evaporate_retained_water() {
+        let p = DryingParams::default();
+        for temp in [2.0, 5.0, 15.0] {
+            for wind in [0.0, 3.0, 12.0] {
+                let h = HourlyConditions {
+                    relative_humidity: Some(100.0),
+                    cloud_area_fraction: Some(100.0),
+                    shortwave_radiation_w_m2: Some(0.0),
+                    ..HourlyConditions::minimal(t(0), temp, wind, 0.0)
+                };
+                let mut state = SurfaceState::new(0.4);
+                for _ in 0..24 {
+                    state = drying_step(state, &h, &p);
+                }
+                assert_eq!(state.accumulated_mm, 0.4, "T={temp}, wind={wind}");
+                assert_eq!(state.hours_since_meaningful_rain, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn cold_humid_air_dries_slower_than_mild_air_at_equal_rh_and_wind() {
+        let p = DryingParams::default();
+        let cold = HourlyConditions {
+            relative_humidity: Some(95.0),
+            cloud_area_fraction: Some(100.0),
+            shortwave_radiation_w_m2: Some(0.0),
+            ..HourlyConditions::minimal(t(0), 2.0, 3.0, 0.0)
+        };
+        let mild = HourlyConditions {
+            temperature_c: 15.0,
+            ..cold.clone()
+        };
+        assert!(drying_rate(&cold, &p) < drying_rate(&mild, &p));
+        let mut state = SurfaceState::new(0.4);
+        for _ in 0..24 {
+            state = drying_step(state, &cold, &p);
+        }
+        assert!(
+            state.accumulated_mm >= SURFACE_WETTED_MM,
+            "one cold humid night/day must not turn retained water into drought"
+        );
+    }
+
+    #[test]
+    fn radiative_cooling_offsets_but_does_not_forbid_night_evaporation() {
+        let p = DryingParams::default();
+        let clear = HourlyConditions {
+            relative_humidity: Some(30.0),
+            cloud_area_fraction: Some(0.0),
+            shortwave_radiation_w_m2: Some(0.0),
+            ..HourlyConditions::minimal(t(0), 20.0, 8.0, 0.0)
+        };
+        let overcast = HourlyConditions {
+            cloud_area_fraction: Some(100.0),
+            ..clear.clone()
+        };
+        let clear_rate = drying_rate(&clear, &p);
+        assert!(clear_rate > 0.0, "dry advected air can dry at night");
+        assert!(
+            clear_rate < drying_rate(&overcast, &p),
+            "clear-night cooling must offset, not increase, evaporation"
+        );
+    }
+
+    #[test]
+    fn solar_energy_can_evaporate_water_in_saturated_air_but_not_create_negative_water() {
+        let p = DryingParams::default();
+        let h = HourlyConditions {
+            relative_humidity: Some(100.0),
+            cloud_area_fraction: Some(0.0),
+            shortwave_radiation_w_m2: Some(500.0),
+            ..HourlyConditions::minimal(t(12), 10.0, 0.0, 0.0)
+        };
+        assert!(drying_rate(&h, &p) > 0.1, "sun can heat a wet surface");
+        assert_eq!(
+            drying_step(SurfaceState::new(0.01), &h, &p).accumulated_mm,
+            0.0
+        );
+        let dark = HourlyConditions {
+            shortwave_radiation_w_m2: None,
+            ..h
+        };
+        assert_eq!(
+            drying_rate(&dark, &p),
+            0.0,
+            "clear skies without radiation data must not invent sunlight"
+        );
+    }
+
+    #[test]
+    fn autumn_solar_cycle_retains_water_longer_than_summer_at_identical_weather() {
+        // Isolate evaporation from the unchanged fast drainage, so both
+        // scenarios retain water instead of hitting the zero-water floor.
+        let p = DryingParams {
+            drainage_fraction: 0.0,
+            ..DryingParams::default()
+        };
+        let simulate = |month, day| {
+            let start = Utc.with_ymd_and_hms(2026, month, day, 0, 0, 0).unwrap();
+            let mut state = SurfaceState::new(5.0);
+            let mut potential = 0.0;
+            for hour in 0..24 {
+                let time = start + chrono::Duration::hours(hour);
+                let h = HourlyConditions {
+                    relative_humidity: Some(90.0),
+                    cloud_area_fraction: Some(70.0),
+                    shortwave_radiation_w_m2: Some(shortwave_radiation_w_m2(
+                        time,
+                        59.91,
+                        10.75,
+                        Some(70.0),
+                    )),
+                    ..HourlyConditions::minimal(time, 10.0, 3.0, 0.0)
+                };
+                potential += drying_rate(&h, &p);
+                state = drying_step(state, &h, &p);
+            }
+            (potential, state.accumulated_mm)
+        };
+        let summer = simulate(6, 21);
+        let autumn = simulate(10, 24);
+        assert!(
+            summer.0 > autumn.0 * 2.0,
+            "solar season must materially affect drying"
+        );
+        assert!(
+            autumn.1 > summer.1,
+            "short autumn days must retain more water"
+        );
     }
 
     #[test]
@@ -435,31 +555,6 @@ mod tests {
         let calm = drying_rate(&HourlyConditions::minimal(t(0), 15.0, 0.0, 0.0), &p);
         let windy = drying_rate(&HourlyConditions::minimal(t(0), 15.0, 8.0, 0.0), &p);
         assert!(windy > calm);
-    }
-
-    #[test]
-    fn humidity_penalty_scales_with_temperature() {
-        // The same high RH must suppress drying more at warm temperatures than
-        // cold ones (larger vapour-pressure deficit when warm). Compare the
-        // humidity *deficit* against a dry-air baseline at each temperature so
-        // we isolate the humidity term from the temperature drying term.
-        let p = DryingParams::default();
-        let rate = |temp, rh| {
-            drying_rate(
-                &HourlyConditions {
-                    thunder: false,
-                    relative_humidity: Some(rh),
-                    ..HourlyConditions::minimal(t(0), temp, 4.0, 0.0)
-                },
-                &p,
-            )
-        };
-        let warm_drop = rate(25.0, 50.0) - rate(25.0, 95.0);
-        let cold_drop = rate(5.0, 50.0) - rate(5.0, 95.0);
-        assert!(
-            warm_drop > cold_drop,
-            "humidity should bite harder when warm: warm Δ {warm_drop}, cold Δ {cold_drop}",
-        );
     }
 
     #[test]
@@ -912,49 +1007,7 @@ mod tests {
         );
     }
 
-    // ---- UV normalisation ----
-
-    #[test]
-    fn sunshine_term_caps_at_15_pct_of_max_when_uv_above_nordic_peak() {
-        // UV > UV_NORDIC_PEAK should clamp to 1.5 × sunshine_max — not 2×
-        // as in the old `(uv/5).clamp(0,2)` formula.
-        let p = DryingParams::default();
-        let extreme_sun = HourlyConditions {
-            thunder: false,
-            cloud_area_fraction: Some(0.0),
-            uv_index_clear_sky: Some(20.0),
-            relative_humidity: Some(50.0),
-            ..HourlyConditions::minimal(t(0), 5.0, 0.0, 0.0)
-        };
-        let r = drying_rate(&extreme_sun, &p);
-        // base + 0 temp + 0 wind + sunshine_max * 1.0 * 1.5 = 0.05 + 0.075 = 0.125
-        assert!(
-            (r - 0.125).abs() < 1e-9,
-            "expected sunshine cap at 1.5×sunshine_max + base, got {r}",
-        );
-    }
-
-    // ---- Concave wind ----
-
-    #[test]
-    fn wind_term_grows_concave_not_linear() {
-        // sqrt: u=4 → 2; u=16 → 4. Old linear: u=4 → 4; u=16 → 16.
-        // So doubling the windspeed in the high range no longer doubles
-        // the wind contribution.
-        let p = DryingParams::default();
-        let calm = drying_rate(&HourlyConditions::minimal(t(0), 5.0, 4.0, 0.0), &p);
-        let storm = drying_rate(&HourlyConditions::minimal(t(0), 5.0, 16.0, 0.0), &p);
-        let calm_wind_term = calm - p.base; // temp_term=0 at 5°C
-        let storm_wind_term = storm - p.base;
-        // Linear would give ratio 4.0; sqrt gives 2.0.
-        let ratio = storm_wind_term / calm_wind_term;
-        assert!(
-            ratio < 3.0,
-            "sqrt wind should give ratio ~2 (got {ratio}); linear would be 4",
-        );
-    }
-
-    // ---- Cloud cover drives the solar drying term ----
+    // ---- Controlled weather for drainage tests ----
 
     /// Build an hour fixing every drying input except the one under test,
     /// so a single-variable sweep is unambiguous.
@@ -963,48 +1016,16 @@ mod tests {
         wind: f64,
         humidity: f64,
         cloud: Option<f64>,
-        uv: Option<f64>,
+        shortwave: Option<f64>,
         precip: f64,
     ) -> HourlyConditions {
         HourlyConditions {
             thunder: false,
             cloud_area_fraction: cloud,
-            uv_index_clear_sky: uv,
+            shortwave_radiation_w_m2: shortwave,
             relative_humidity: Some(humidity),
             ..HourlyConditions::minimal(t(0), temp, wind, precip)
         }
-    }
-
-    #[test]
-    fn clear_sky_dries_faster_than_overcast_without_uv() {
-        // Cloud-only fallback path (no UV, as in the Frost replay): less
-        // cloud must mean more solar drying. This is exactly the signal the
-        // old hardcoded-70%-cloud replay threw away.
-        let p = DryingParams::default();
-        let clear = drying_rate(&hour_with(18.0, 3.0, 50.0, Some(5.0), None, 0.0), &p);
-        let overcast = drying_rate(&hour_with(18.0, 3.0, 50.0, Some(95.0), None, 0.0), &p);
-        assert!(
-            clear > overcast,
-            "clear sky should dry faster than overcast (clear={clear}, overcast={overcast})",
-        );
-    }
-
-    #[test]
-    fn drying_rate_monotonic_across_conditions() {
-        // Single-variable sweeps: warmer, windier, drier-air, and clearer
-        // each strictly increase the rate; humidity decreases it.
-        let p = DryingParams::default();
-        let base = drying_rate(&hour_with(15.0, 3.0, 60.0, Some(50.0), None, 0.0), &p);
-        let warmer = drying_rate(&hour_with(25.0, 3.0, 60.0, Some(50.0), None, 0.0), &p);
-        let windier = drying_rate(&hour_with(15.0, 8.0, 60.0, Some(50.0), None, 0.0), &p);
-        let drier_air = drying_rate(&hour_with(15.0, 3.0, 30.0, Some(50.0), None, 0.0), &p);
-        let clearer = drying_rate(&hour_with(15.0, 3.0, 60.0, Some(10.0), None, 0.0), &p);
-        let humid = drying_rate(&hour_with(15.0, 3.0, 95.0, Some(50.0), None, 0.0), &p);
-        assert!(warmer > base, "warmer should dry faster");
-        assert!(windier > base, "windier should dry faster");
-        assert!(drier_air > base, "drier air should dry faster");
-        assert!(clearer > base, "clearer sky should dry faster");
-        assert!(humid < base, "humid air should dry slower");
     }
 
     // ---- Gravel drainage ----
@@ -1178,7 +1199,15 @@ mod tests {
     #[test]
     fn frost_gate_is_continuous_and_monotone_across_zero() {
         let p = DryingParams::default();
-        let r = |t_c| drying_rate(&HourlyConditions::minimal(t(0), t_c, 4.0, 0.0), &p);
+        let r = |t_c| {
+            drying_rate(
+                &HourlyConditions {
+                    shortwave_radiation_w_m2: Some(200.0),
+                    ..HourlyConditions::minimal(t(12), t_c, 4.0, 0.0)
+                },
+                &p,
+            )
+        };
         // No cliff at 0 °C — the old hard switch jumped 10× here.
         assert!(
             (r(-0.001) - r(0.001)).abs() < 1e-3,

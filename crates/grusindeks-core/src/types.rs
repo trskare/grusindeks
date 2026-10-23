@@ -57,6 +57,11 @@ pub struct HourlyConditions {
     /// UV index for clear-sky conditions, 0–11+.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uv_index_clear_sky: Option<f64>,
+    /// Estimated mean incoming shortwave radiation over this hour, W/m².
+    /// Computed from location, solar geometry and cloud cover by `sun`, not
+    /// measured and not derived from UV. `None` means no radiation estimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shortwave_radiation_w_m2: Option<f64>,
 
     /// `true` when MET's hourly symbol code for this hour denotes thunder (any
     /// `*thunder*` variant). Defaults to `false` for blobs predating the field.
@@ -89,6 +94,7 @@ impl HourlyConditions {
             relative_humidity: None,
             cloud_area_fraction: None,
             uv_index_clear_sky: None,
+            shortwave_radiation_w_m2: None,
             thunder: false,
             resolution: Resolution::Hourly,
         }

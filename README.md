@@ -383,11 +383,52 @@ betyr "vet ikke".
 
 Den mest sammensatte aksen. To delmodeller jobber sammen:
 
-**Vannbalanse-heuristikk** (kortsiktig, timer): hver simulert time legger
-vi til timens nedbør og trekker fra en tørke-rate som avhenger av
-temperatur, vind, sky-cover, UV og luftfuktighet. Akkumulert
-overflatevann er kappet til 5 mm — grus dreneres raskt selv etter
-gjennomvåtning.
+**Vannbalanse** (kortsiktig, timer): hver simulert time legger vi til
+nedbør, kapper vannlageret til 5 mm (overskudd renner bort), drenerer
+fritt vann og trekker fra fordamping, aldri mer enn tilgjengelig vann.
+Standard drenering fjerner 50 % av vannet over 0.4 mm per time;
+dreneringsklassene og lagerkapasiteten er uendret.
+
+**Fordamping:** en Penman-inspirert kombinasjon av netto strålingsenergi
+og transport av vanndamp erstatter den additive temperatur-/vind-/UV-formelen.
+Damptrykksunderskuddet er `VPD = es(T) × (1 − RH/100)` i kPa, der `es`
+beregnes med Magnus-formelen. Vind forsterker VPD-leddet; den gir ikke
+uttørking alene i mettet luft. METs vind ved 10 m omregnes til 2 m.
+Netto stråling vektes med `delta/(delta + gamma)`, damptransport med
+`gamma/(delta + gamma)`, der `delta` er stigningen til metningsdamptrykket
+og `gamma = 0.0665 kPa/°C`. Overflatens antatte albedo er 0.23;
+transportleddet starter på `(2.6/24) × (1 + 0.54 × vind_2m) × VPD` mm/time.
+Dette er startverdier for en våt overflate, ikke lokalt kalibrerte grustall.
+
+**Sol og årstid:** historikk og prognose bruker samme estimat for
+kortbølget stråling i W/m², basert på posisjon, dato, klokkeslett og
+skydekke. Solhøyden integreres over hver time ved +10, +30 og +50 minutter,
+med korreksjon for avstanden til solen. Estimatet bruker 1361 W/m² som
+solkonstant, 0.75 klarværstransmisjon og skyfaktoren `1 − 0.75 × skyandel^3.4`;
+overskyet vær beholder dermed diffus stråling. Timer helt uten sol får
+null kortbølget stråling, også når UV mangler. Sekstimersprognoser får
+strålingen beregnet på nytt for hver utvidede time. UV brukes fortsatt
+til «føles som», men ikke til uttørking.
+
+**Natt og datamangler:** netto energi trekker fra et anslag for langbølget
+varmetap basert på temperatur, vanndamp og skyer. Negativ stråling bremser
+fordampingen før totalen begrenses til minst null; tørr luft med vind kan
+fortsatt tørke om natten. Negative verdier tilfører ikke dugg. Manglende
+stråling eller historisk posisjon gir intet solbidrag. Manglende RH/skydekke
+bruker 70 %, ikke tørr luft/klarvær. Eksisterende historiske reserveverdier
+for temperatur og vind beholdes. Fryse-/tinerampen beholdes.
+
+**Begrensninger:** dette er estimert overflatevann, ikke målt bakkefuktighet
+eller FAO-referansefordamping fra gress. Overflatetemperatur antas lik
+lufttemperatur; trykkvariasjon, varmelagring i bakken, lokal skygge,
+duggtilførsel og et langsomt fuktlager i veidekket er ikke modellert.
+Kortere høstdager gir lavere fordampingskapasitet, men den raske
+dreneringen kan fortsatt gjøre anslaget optimistisk på fuktige veier.
+Koeffisientene må valideres mot daterte observasjoner før tørketidene
+kan tolkes som lokale fasitsvar.
+
+Fysisk bakgrunn: [FAO-56, kombinasjonsmodellen](https://www.fao.org/4/X0490E/x0490e06.htm)
+og [meteorologiske størrelser, stråling og vindhøyde](https://www.fao.org/4/X0490E/x0490e07.htm).
 
 **Tørke-teller** (langsiktig, døgn): vi sporer "timer siden overflaten
 sist var meningsfullt fuktig" (post-tørking ≥ 0.3 mm). Lett duskregn som

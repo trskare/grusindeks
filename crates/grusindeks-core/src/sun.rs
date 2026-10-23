@@ -1,8 +1,8 @@
-//! Sunrise/sunset for a date and location, from the standard "Sunrise/Sunset
-//! Algorithm" (Almanac for Computers, 1990). Accurate to ~1 minute at
-//! mid-latitudes — plenty for a "solnedgang 22:14" hint — and dependency-free
-//! beyond `chrono`. Returns `None` for each event during midnight sun / polar
-//! night, when the sun doesn't cross the horizon.
+//! Solar geometry and estimated hourly shortwave radiation, plus sunrise/sunset
+//! from the standard "Sunrise/Sunset Algorithm" (Almanac for Computers, 1990).
+//! Sunrise/sunset is accurate to ~1 minute at mid-latitudes and returns `None`
+//! during midnight sun / polar night, when the sun doesn't cross the horizon.
+//! Radiation is a geometry/cloud-based estimate, not a measurement.
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,12 @@ const ZENITH_DEG: f64 = 90.833;
 /// which is all the gravel drying model needs to (a) zero out the solar term
 /// at night and (b) scale it down through the dark half of the year.
 pub fn solar_elevation_deg(time: DateTime<Utc>, lat_deg: f64, lon_deg: f64) -> f64 {
+    solar_elevation_sine(time, lat_deg, lon_deg)
+        .asin()
+        .to_degrees()
+}
+
+fn solar_elevation_sine(time: DateTime<Utc>, lat_deg: f64, lon_deg: f64) -> f64 {
     let d2r = std::f64::consts::PI / 180.0;
     let utc_hours =
         time.hour() as f64 + time.minute() as f64 / 60.0 + time.second() as f64 / 3600.0;
@@ -35,7 +41,58 @@ pub fn solar_elevation_deg(time: DateTime<Utc>, lat_deg: f64, lon_deg: f64) -> f
     let hour_angle = (solar_time - 12.0) * 15.0 * d2r;
     let lat = lat_deg * d2r;
     let sin_elev = lat.sin() * dec.sin() + lat.cos() * dec.cos() * hour_angle.cos();
-    sin_elev.clamp(-1.0, 1.0).asin() / d2r
+    sin_elev.clamp(-1.0, 1.0)
+}
+
+/// Estimate mean global incoming shortwave radiation (W/m²) over the hour
+/// starting at `time`, for latitude/longitude in degrees (north/east positive).
+///
+/// This is not measured radiation: it combines approximate solar geometry with
+/// a 1361 W/m² solar constant, seasonal Earth–Sun distance correction, 0.75
+/// clear-sky transmissivity, and cloud attenuation `1 - 0.75 * cloud_fraction^3.4`.
+/// Global radiation includes diffuse light, so overcast skies retain 25% of the
+/// clear-sky estimate. UV is neither required nor used.
+///
+/// Hourly integration uses the mean positive sine of solar elevation sampled
+/// at +10, +30 and +50 minutes. Thus a sunrise/sunset hour can receive partial
+/// sunlight, but samples below the horizon contribute exactly zero. Polar days
+/// use the same geometry without imposing an artificial sunrise or sunset.
+///
+/// Missing/nonfinite cloud cover uses 70%; finite percentages are clamped to
+/// 0–100. Nonfinite or out-of-range coordinates return zero.
+pub fn shortwave_radiation_w_m2(
+    time: DateTime<Utc>,
+    lat_deg: f64,
+    lon_deg: f64,
+    cloud_pct: Option<f64>,
+) -> f64 {
+    if !lat_deg.is_finite()
+        || !lon_deg.is_finite()
+        || !(-90.0..=90.0).contains(&lat_deg)
+        || !(-180.0..=180.0).contains(&lon_deg)
+    {
+        return 0.0;
+    }
+
+    let cloud_fraction = cloud_pct
+        .filter(|cloud| cloud.is_finite())
+        .unwrap_or(70.0)
+        .clamp(0.0, 100.0)
+        / 100.0;
+    let mean_sin_elevation = [10, 30, 50]
+        .into_iter()
+        .map(|minutes| {
+            solar_elevation_sine(time + Duration::minutes(minutes), lat_deg, lon_deg).max(0.0)
+        })
+        .sum::<f64>()
+        / 3.0;
+    let distance_correction =
+        1.0 + 0.033 * (2.0 * std::f64::consts::PI * time.ordinal() as f64 / 365.0).cos();
+    1361.0
+        * distance_correction
+        * mean_sin_elevation
+        * 0.75
+        * (1.0 - 0.75 * cloud_fraction.powf(3.4))
 }
 
 /// When the sun never crosses the horizon on a date (so there's neither a
@@ -233,5 +290,82 @@ mod tests {
             elev > 80.0,
             "equinox equator noon should be near zenith: {elev}"
         );
+    }
+
+    #[test]
+    fn shortwave_is_zero_at_night_even_with_clear_skies() {
+        assert_eq!(
+            shortwave_radiation_w_m2(at(2026, 6, 21, 23), 59.91, 10.75, Some(0.0)),
+            0.0
+        );
+    }
+
+    #[test]
+    fn shortwave_handles_polar_night_and_midnight_sun() {
+        for hour in 0..24 {
+            let winter = shortwave_radiation_w_m2(at(2026, 12, 21, hour), 78.22, 15.65, Some(0.0));
+            let summer = shortwave_radiation_w_m2(at(2026, 6, 21, hour), 78.22, 15.65, Some(0.0));
+            assert_eq!(winter, 0.0, "polar night at hour {hour}");
+            assert!(summer > 0.0, "midnight sun at hour {hour}: {summer}");
+        }
+    }
+
+    #[test]
+    fn oslo_daily_shortwave_is_much_greater_in_june_than_october() {
+        // Summing hourly mean W/m² over one-hour intervals gives daily Wh/m².
+        let daily = |month| {
+            (0..24)
+                .map(|hour| {
+                    shortwave_radiation_w_m2(at(2026, month, 21, hour), 59.91, 10.75, Some(0.0))
+                })
+                .sum::<f64>()
+        };
+        let june = daily(6);
+        let october = daily(10);
+        assert!(october > 0.0);
+        assert!(june > 3.0 * october, "June {june}, October {october} Wh/m²");
+    }
+
+    #[test]
+    fn overcast_retains_diffuse_shortwave_but_less_than_clear() {
+        let time = at(2026, 6, 21, 11);
+        let clear = shortwave_radiation_w_m2(time, 59.91, 10.75, Some(0.0));
+        let overcast = shortwave_radiation_w_m2(time, 59.91, 10.75, Some(100.0));
+        assert!(clear > 500.0, "clear summer noon: {clear} W/m²");
+        assert!(overcast > 0.0 && overcast < clear);
+        assert!((overcast / clear - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn shortwave_integrates_sunset_instead_of_using_only_hour_start() {
+        // At the equator near equinox, the 17:00 hour approaches sunset.
+        let time = at(2026, 3, 20, 17);
+        let radiation = shortwave_radiation_w_m2(time, 0.0, 0.0, Some(0.0));
+        let start_sine = solar_elevation_deg(time, 0.0, 0.0).to_radians().sin();
+        let start_estimate = 1361.0
+            * (1.0 + 0.033 * (2.0 * std::f64::consts::PI * 79.0 / 365.0).cos())
+            * 0.75
+            * start_sine;
+        assert!(radiation > 0.0 && radiation < start_estimate * 0.75);
+        assert_eq!(
+            shortwave_radiation_w_m2(at(2026, 3, 20, 18), 0.0, 0.0, Some(0.0)),
+            0.0
+        );
+    }
+
+    #[test]
+    fn shortwave_clamps_cloud_and_rejects_invalid_coordinates() {
+        let time = at(2026, 6, 21, 11);
+        let estimate = |cloud| shortwave_radiation_w_m2(time, 59.91, 10.75, cloud);
+        assert_eq!(estimate(Some(-10.0)), estimate(Some(0.0)));
+        assert_eq!(estimate(Some(110.0)), estimate(Some(100.0)));
+        for (lat, lon) in [
+            (91.0, 0.0),
+            (0.0, -181.0),
+            (f64::NAN, 0.0),
+            (0.0, f64::INFINITY),
+        ] {
+            assert_eq!(shortwave_radiation_w_m2(time, lat, lon, None), 0.0);
+        }
     }
 }

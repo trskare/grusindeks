@@ -1,17 +1,18 @@
 //! `api.met.no/weatherapi/locationforecast/2.0/complete` — 9-day forecast.
 //!
-//! Maps the upstream timeseries to a `Vec<HourlyConditions>` from the core
-//! crate. We only emit entries that include `next_1_hours.details` so the
-//! per-hour precipitation is real, not back-derived from a 6-hour bucket.
+//! Maps upstream hourly intervals and expanded six-hour buckets to
+//! `HourlyConditions`. Precipitation in expanded buckets is distributed evenly;
+//! shortwave radiation is estimated separately for each output hour and location.
 //!
 //! We deliberately use `/complete` over `/compact`: the latter omits
 //! `probability_of_precipitation`, `wind_speed_of_gust` and
-//! `ultraviolet_index_clear_sky` — fields the Grusindeks score and the
-//! drying model both depend on. Payload is ~2.4× larger but still tiny
+//! `ultraviolet_index_clear_sky`, used by scoring and felt temperature. UV is not
+//! required for the radiation estimate. Payload is ~2.4× larger but still tiny
 //! (~90KB).
 
 use chrono::{DateTime, Utc};
 use grusindeks_core::geo::Point;
+use grusindeks_core::sun::shortwave_radiation_w_m2;
 use grusindeks_core::types::{Forecast, HourlyConditions, Resolution};
 use serde::Deserialize;
 
@@ -101,6 +102,8 @@ fn is_thunder(iv: &CompactInterval) -> bool {
 ///   the bucket's probability carried as-is. Instant-grade fields
 ///   (temperature, wind) are reused across the six hours, since MET only
 ///   gives them at the bucket start.
+///   Shortwave radiation is instead recomputed for each expanded hour, using
+///   that hour's solar geometry and the bucket's cloud cover.
 ///
 /// When a 6h bucket overlaps an already-emitted hourly entry, hourly wins
 /// — it's the higher-fidelity source.
@@ -133,6 +136,12 @@ fn into_forecast(point: Point, raw: CompactResponse) -> Forecast {
                     relative_humidity: s.data.instant.details.relative_humidity,
                     cloud_area_fraction: s.data.instant.details.cloud_area_fraction,
                     uv_index_clear_sky: s.data.instant.details.ultraviolet_index_clear_sky,
+                    shortwave_radiation_w_m2: Some(shortwave_radiation_w_m2(
+                        s.time,
+                        point.lat,
+                        point.lon,
+                        s.data.instant.details.cloud_area_fraction,
+                    )),
                     resolution: Resolution::Hourly,
                 },
             );
@@ -146,7 +155,7 @@ fn into_forecast(point: Point, raw: CompactResponse) -> Forecast {
             for offset in 0..6 {
                 let t = s.time + chrono::Duration::hours(offset);
                 // Hourly entries already emitted win — never overwrite them.
-                by_time.entry(t).or_insert(HourlyConditions {
+                by_time.entry(t).or_insert_with(|| HourlyConditions {
                     thunder,
                     time: t,
                     temperature_c: temp,
@@ -158,6 +167,12 @@ fn into_forecast(point: Point, raw: CompactResponse) -> Forecast {
                     relative_humidity: s.data.instant.details.relative_humidity,
                     cloud_area_fraction: s.data.instant.details.cloud_area_fraction,
                     uv_index_clear_sky: s.data.instant.details.ultraviolet_index_clear_sky,
+                    shortwave_radiation_w_m2: Some(shortwave_radiation_w_m2(
+                        t,
+                        point.lat,
+                        point.lon,
+                        s.data.instant.details.cloud_area_fraction,
+                    )),
                     resolution: Resolution::SixHourly,
                 });
             }
@@ -315,8 +330,8 @@ mod tests {
     /// scoring layer depends on. Catches the class of bug where the fixture
     /// is captured from the wrong endpoint variant (e.g. `/compact` strips
     /// `probability_of_precipitation`, `wind_speed_of_gust` and
-    /// `ultraviolet_index_clear_sky` — fields the score and drying model
-    /// both consume). If this ever fails, either the fixture was refreshed
+    /// `ultraviolet_index_clear_sky`, used by scoring and felt temperature).
+    /// If this ever fails, either the fixture was refreshed
     /// from `/compact` by mistake, or MET changed the endpoint contract.
     #[test]
     fn fixture_populates_every_field_the_score_consumes() {
@@ -337,6 +352,96 @@ mod tests {
         // endpoint regression is caught here too.
         assert!(f.hours.iter().any(|h| h.relative_humidity.is_some()));
         assert!(f.hours.iter().any(|h| h.cloud_area_fraction.is_some()));
+    }
+
+    fn solar_forecast_body(time: &str, cloud: f64, interval: &str) -> String {
+        serde_json::json!({
+            "properties": {
+                "timeseries": [{
+                    "time": time,
+                    "data": {
+                        "instant": {
+                            "details": {
+                                "air_temperature": 15.0,
+                                "wind_speed": 2.0,
+                                "cloud_area_fraction": cloud
+                            }
+                        },
+                        (interval): {"details": {"precipitation_amount": 0.0}}
+                    }
+                }]
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn parser_estimates_radiation_without_uv_and_respects_location_and_cloud() {
+        let clear_body = solar_forecast_body("2026-06-21T11:00:00Z", 0.0, "next_1_hours");
+        let clear = parse_compact(oslo(), &clear_body).unwrap();
+        let noon = &clear.hours[0];
+        assert_eq!(noon.uv_index_clear_sky, None);
+        let clear_radiation = noon.shortwave_radiation_w_m2.unwrap();
+        assert!(clear_radiation > 500.0);
+
+        let overcast_body = solar_forecast_body("2026-06-21T11:00:00Z", 100.0, "next_1_hours");
+        let overcast = parse_compact(oslo(), &overcast_body).unwrap();
+        let diffuse = overcast.hours[0].shortwave_radiation_w_m2.unwrap();
+        assert!(diffuse > 0.0 && diffuse < clear_radiation);
+
+        // The same UTC hour is night on the opposite side of the globe.
+        let night = parse_compact(Point::new(0.0, -165.0), &clear_body).unwrap();
+        assert_eq!(night.hours[0].shortwave_radiation_w_m2, Some(0.0));
+        let winter_body = solar_forecast_body("2026-12-21T11:00:00Z", 0.0, "next_1_hours");
+        let winter = parse_compact(oslo(), &winter_body).unwrap();
+        let winter_radiation = winter.hours[0].shortwave_radiation_w_m2.unwrap();
+        assert!(winter_radiation > 0.0 && winter_radiation < clear_radiation);
+    }
+
+    #[test]
+    fn six_hour_bucket_recomputes_radiation_across_sunset() {
+        // Equatorial sunset is near 18:00 UTC at longitude zero. A bucket
+        // beginning in daylight must not carry that sunlight into the night.
+        let body = solar_forecast_body("2026-03-20T16:00:00Z", 0.0, "next_6_hours");
+        let forecast = parse_compact(Point::new(0.0, 0.0), &body).unwrap();
+        assert_eq!(forecast.hours.len(), 6);
+        let radiation: Vec<_> = forecast
+            .hours
+            .iter()
+            .map(|h| {
+                assert_eq!(h.resolution, Resolution::SixHourly);
+                assert_eq!(h.uv_index_clear_sky, None);
+                h.shortwave_radiation_w_m2.unwrap()
+            })
+            .collect();
+        assert!(radiation[0] > radiation[1] && radiation[1] > 0.0);
+        assert!(radiation[2..].iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn hourly_radiation_wins_over_overlapping_bucket_in_either_input_order() {
+        let bucket_body = solar_forecast_body("2026-06-21T10:00:00Z", 100.0, "next_6_hours");
+        let hourly_body = solar_forecast_body("2026-06-21T11:00:00Z", 0.0, "next_1_hours");
+        let bucket: serde_json::Value = serde_json::from_str(&bucket_body).unwrap();
+        let hourly: serde_json::Value = serde_json::from_str(&hourly_body).unwrap();
+        let bucket_entry = &bucket["properties"]["timeseries"][0];
+        let hourly_entry = &hourly["properties"]["timeseries"][0];
+        for entries in [
+            vec![bucket_entry, hourly_entry],
+            vec![hourly_entry, bucket_entry],
+        ] {
+            let body = serde_json::json!({"properties": {"timeseries": entries}}).to_string();
+            let forecast = parse_compact(oslo(), &body).unwrap();
+            assert_eq!(forecast.hours.len(), 6);
+            let hour = &forecast.hours[1];
+            assert_eq!(hour.resolution, Resolution::Hourly);
+            assert_eq!(hour.cloud_area_fraction, Some(0.0));
+            assert!(hour.shortwave_radiation_w_m2.unwrap() > 500.0);
+            assert!(
+                forecast.hours[0].shortwave_radiation_w_m2.unwrap()
+                    < hour.shortwave_radiation_w_m2.unwrap()
+            );
+        }
     }
 
     // ---- HTTP-level wiremock test ----
